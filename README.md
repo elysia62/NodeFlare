@@ -21,7 +21,7 @@
 - Telegram 通知、失败重试、资源/流量/离线/到期提醒和数据维护
 - 内置 NodeFlare Glass 主题，并提供远程主题商店
 - 远程主题支持 GitHub 仓库地址（默认 `main` 分支，也可用 `tree` 指定分支或子目录），Worker 代理 `index.html` 与 `assets/`
-- Rust Agent 支持 Linux x64/ARM64、Windows x64、macOS ARM64 和 FreeBSD x64，可按节点自动更新
+- Rust Agent 支持 Linux x64/ARM64、Windows x64、macOS ARM64 和 FreeBSD x64（13 及以上），可按节点自动更新
 
 ## 部署到 Cloudflare
 

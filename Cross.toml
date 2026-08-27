@@ -3,3 +3,17 @@ passthrough = ["NODEFLARE_VERSION"]
 
 [target.aarch64-unknown-linux-musl]
 runner = "qemu-user"
+
+# cross 0.2.5 自带的 FreeBSD 镜像 sysroot 是白名单拷贝的（docker/freebsd.sh 里逐个
+# `cp` 出来），漏了 libgeom，而 sysinfo 的 FreeBSD FFI 无条件 `#[link(name = "geom")]`
+# 且只受 disk/system feature 控制 —— 这两个 feature agent 都要，绕不开，链接期就
+# `cannot find -lgeom`。上游 main 分支已改成整个 `/lib/*` 全拷贝并自动补 `.so` 软链，
+# sysroot 里 libgeom.so / libbsdxml.so / libsbuf.so 齐全（已核对镜像层内容）。
+#
+# 只覆盖这一个 target，其余 target 仍走 CLI 自己推导的 :0.2.5 镜像。
+# Cross.toml 指定 image 会直接短路 image_name() 的版本推导，不存在 CLI 与镜像的版本校验。
+# 按 digest 钉死，和本仓库所有 action 钉 SHA 的做法一致；这份 digest 是 :main 的
+# multi-arch index，docker 会自己挑 linux/amd64。
+# 换来的副作用：sysroot 从 FreeBSD 12 变成 13，产物的最低运行版本相应提高到 13。
+[target.x86_64-unknown-freebsd]
+image = "ghcr.io/cross-rs/x86_64-unknown-freebsd@sha256:d1ecbeb055803f5316607acce26c8af2b8609a04e38a06ba7aed84f9df80042e"
