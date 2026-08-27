@@ -23,6 +23,7 @@ import {
 import { api } from "../api";
 import { chartGapLimit, chartTimeLabel, chartTimeRange, insertTimelineGaps } from "../chart";
 import { demoHistory, demoLatencyHistory, demoLatencyTasks } from "../demo";
+import { averageOf } from "../latency";
 import { displayGpuDevices, formatBytes, formatCpuName, formatSpeed, formatUptime, isOnline, number } from "../format";
 import type { HistoryPoint, LatencySample, LatencyTestPoint, LiveLatencyResult, Server } from "../types";
 import { Flag, regionDisplayName } from "./Flag";
@@ -90,11 +91,6 @@ function ChartCard({ title, value, children }: { title: string; value: string; c
 
 function resourceTicks(total: number): number[] {
   return Array.from({ length: 5 }, (_, index) => total * index / 4);
-}
-
-function average(values: number[]): number | null {
-  const valid = values.filter((value) => Number.isFinite(value) && value >= 0);
-  return valid.length ? valid.reduce((sum, value) => sum + value, 0) / valid.length : null;
 }
 
 function latencyBucketSeconds(hours: number, taskCount: number): number {
@@ -353,8 +349,8 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
         id: task.id,
         name: task.name,
         color: LATENCY_COLORS[index % LATENCY_COLORS.length],
-        latency: average(samples.map((sample) => sample.latency_ms)),
-        loss: average(samples.map((sample) => sample.packet_loss)),
+        latency: averageOf(samples.map((sample) => sample.latency_ms)),
+        loss: averageOf(samples.map((sample) => sample.packet_loss)),
         points: insertLatencyGaps(rawPoints, hours),
       };
     });

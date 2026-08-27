@@ -502,42 +502,6 @@ pub(crate) fn traffic_cycle_key(timestamp: i64, reset_day: i64) -> i64 {
     }
 }
 
-#[cfg(test)]
-impl TrafficCounterState {
-    pub fn apply(&mut self, report: &AgentReport, configured_reset_day: i64) {
-        if report.timestamp <= self.timestamp {
-            return;
-        }
-        let configured_reset_day = configured_reset_day.clamp(1, 31);
-        let cycle_key = traffic_cycle_key(report.timestamp, configured_reset_day);
-        if self.timestamp <= 0 {
-            self.used_rx = report.net_rx_total;
-            self.used_tx = report.net_tx_total;
-        } else if cycle_key != self.cycle_key || configured_reset_day != self.reset_day {
-            self.used_rx = 0;
-            self.used_tx = 0;
-        } else {
-            let rx_delta = if report.net_rx_total >= self.raw_rx {
-                report.net_rx_total - self.raw_rx
-            } else {
-                report.net_rx_total
-            };
-            let tx_delta = if report.net_tx_total >= self.raw_tx {
-                report.net_tx_total - self.raw_tx
-            } else {
-                report.net_tx_total
-            };
-            self.used_rx = self.used_rx.saturating_add(rx_delta);
-            self.used_tx = self.used_tx.saturating_add(tx_delta);
-        }
-        self.cycle_key = cycle_key;
-        self.reset_day = configured_reset_day;
-        self.timestamp = report.timestamp;
-        self.raw_rx = report.net_rx_total;
-        self.raw_tx = report.net_tx_total;
-    }
-}
-
 pub async fn list_servers(db: &D1Database, include_hidden: bool) -> Result<Vec<ServerView>> {
     let filter = if include_hidden {
         ""
@@ -1863,8 +1827,8 @@ pub async fn update_expiry(db: &D1Database, id: &str, expires_at: i64) -> Result
 mod tests {
     use super::{
         alert_window_covered, history_cutoff, metric_history_ddl, secret_for_api,
-        traffic_cycle_key, AlertMetricRow, HistoryMetricAggregate, TrafficCounterState,
-        MAX_HISTORY_RETENTION_DAYS, SECRET_MASK,
+        traffic_cycle_key, AlertMetricRow, HistoryMetricAggregate, MAX_HISTORY_RETENTION_DAYS,
+        SECRET_MASK,
     };
     use crate::models::AgentReport;
 
@@ -1964,67 +1928,6 @@ mod tests {
         assert_eq!(traffic_cycle_key(timestamp(2026, 8, 10), 10), 2026 * 12 + 7);
         assert_eq!(traffic_cycle_key(timestamp(2028, 2, 28), 31), 2028 * 12);
         assert_eq!(traffic_cycle_key(timestamp(2028, 2, 29), 31), 2028 * 12 + 1);
-    }
-
-    #[test]
-    fn folds_traffic_counters_and_ignores_replayed_samples() {
-        let mut state = TrafficCounterState::default();
-        state.apply(
-            &AgentReport {
-                timestamp: 100,
-                net_rx_total: 1_000,
-                net_tx_total: 2_000,
-                ..AgentReport::default()
-            },
-            1,
-        );
-        state.apply(
-            &AgentReport {
-                timestamp: 101,
-                net_rx_total: 1_300,
-                net_tx_total: 2_500,
-                ..AgentReport::default()
-            },
-            1,
-        );
-        assert_eq!((state.used_rx, state.used_tx), (1_300, 2_500));
-
-        state.apply(
-            &AgentReport {
-                timestamp: 102,
-                net_rx_total: 20,
-                net_tx_total: 40,
-                ..AgentReport::default()
-            },
-            1,
-        );
-        assert_eq!((state.used_rx, state.used_tx), (1_320, 2_540));
-
-        state.apply(
-            &AgentReport {
-                timestamp: 99,
-                net_rx_total: 9_999,
-                net_tx_total: 9_999,
-                ..AgentReport::default()
-            },
-            1,
-        );
-        assert_eq!(
-            (state.timestamp, state.used_rx, state.used_tx),
-            (102, 1_320, 2_540)
-        );
-
-        state.apply(
-            &AgentReport {
-                timestamp: 103,
-                net_rx_total: 30,
-                net_tx_total: 50,
-                ..AgentReport::default()
-            },
-            2,
-        );
-        assert_eq!((state.used_rx, state.used_tx), (0, 0));
-        assert_eq!(state.reset_day, 2);
     }
 
     #[test]

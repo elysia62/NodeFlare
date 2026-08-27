@@ -1400,14 +1400,14 @@ pub async fn upgrade_agent(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_wss_interval_ms, batch_update_parts_at, begin_d1_flush, cached_update_value,
-        consume_agent_message_budget, finish_d1_flush, live_ack_payload, next_d1_write_ms,
-        outbound_close_code, trim_cached_live_samples, trim_socket_attachment, update_alert_window,
-        AgentMessageBudget, AlertEvaluationServer, AlertWindowSample, CachedLiveSample,
-        SocketAttachment, TrafficAttachment, ALERT_WINDOW_SECONDS, BROWSER_OMITTED_REPORT_FIELDS,
-        CACHED_LIVE_TTL_SECONDS, MAX_AGENT_BYTES_PER_WINDOW, MAX_AGENT_MESSAGES_PER_WINDOW,
-        MAX_AGENT_SAMPLES_PER_WINDOW, MAX_CACHED_LIVE_BYTES, MAX_CACHED_LIVE_SAMPLES,
-        MAX_SERIALIZED_ATTACHMENT_BYTES,
+        agent_wss_interval_ms, apply_live_traffic, batch_update_parts_at, begin_d1_flush,
+        cached_update_value, consume_agent_message_budget, finish_d1_flush, live_ack_payload,
+        next_d1_write_ms, outbound_close_code, trim_cached_live_samples, trim_socket_attachment,
+        update_alert_window, AgentMessageBudget, AlertEvaluationServer, AlertWindowSample,
+        CachedLiveSample, SocketAttachment, TrafficAttachment, ALERT_WINDOW_SECONDS,
+        BROWSER_OMITTED_REPORT_FIELDS, CACHED_LIVE_TTL_SECONDS, MAX_AGENT_BYTES_PER_WINDOW,
+        MAX_AGENT_MESSAGES_PER_WINDOW, MAX_AGENT_SAMPLES_PER_WINDOW, MAX_CACHED_LIVE_BYTES,
+        MAX_CACHED_LIVE_SAMPLES, MAX_SERIALIZED_ATTACHMENT_BYTES,
     };
     use crate::db::HistoryMetricAggregate;
     use crate::latency::LatencyMetricAggregates;
@@ -1425,6 +1425,65 @@ mod tests {
             net_out: net_in / 2.0,
             ..HistoryPoint::default()
         }
+    }
+
+    /// 流量累加以前在 db.rs 里有一份手抄的 `TrafficCounterState::apply` 供测试用，
+    /// 测的是副本、生产这份没人测。现在直接驱动 `apply_live_traffic`。
+    /// correction 置 0，隔离出纯累加行为；correction 的效果由
+    /// live_payload_contains_cycle_adjusted_traffic_and_latency 覆盖。
+    #[test]
+    fn folds_traffic_counters_and_ignores_replayed_samples() {
+        let mut traffic = TrafficAttachment {
+            reset_day: 1,
+            state_reset_day: 1,
+            timestamp: 0,
+            cycle_key: 0,
+            raw_rx: 0,
+            raw_tx: 0,
+            used_rx: 0,
+            used_tx: 0,
+            rx_correction: 0,
+            tx_correction: 0,
+        };
+        let fold = |traffic: &mut TrafficAttachment, timestamp, rx, tx| {
+            let mut report = AgentReport {
+                timestamp,
+                net_rx_total: rx,
+                net_tx_total: tx,
+                ..AgentReport::default()
+            };
+            apply_live_traffic(&mut report, traffic);
+            report
+        };
+
+        // 首个样本只立基线，不把历史总量算成本周期用量。
+        fold(&mut traffic, 100, 1_000, 2_000);
+        assert_eq!((traffic.used_rx, traffic.used_tx), (1_000, 2_000));
+
+        // 正常增长按差值累加。
+        fold(&mut traffic, 101, 1_300, 2_500);
+        assert_eq!((traffic.used_rx, traffic.used_tx), (1_300, 2_500));
+
+        // agent 重启导致计数器回绕：新值小于上次原始值，整值计入而不是算负数。
+        fold(&mut traffic, 102, 20, 40);
+        assert_eq!((traffic.used_rx, traffic.used_tx), (1_320, 2_540));
+
+        // 重放的旧样本不得改状态，返回值仍是当前累计量。
+        let replayed = fold(&mut traffic, 99, 9_999, 9_999);
+        assert_eq!(
+            (traffic.timestamp, traffic.used_rx, traffic.used_tx),
+            (102, 1_320, 2_540)
+        );
+        assert_eq!(
+            (replayed.net_rx_total, replayed.net_tx_total),
+            (1_320, 2_540)
+        );
+
+        // 改了重置日 → 周期换了，用量归零重新起算。
+        traffic.reset_day = 2;
+        fold(&mut traffic, 103, 30, 50);
+        assert_eq!((traffic.used_rx, traffic.used_tx), (0, 0));
+        assert_eq!(traffic.state_reset_day, 2);
     }
 
     #[test]

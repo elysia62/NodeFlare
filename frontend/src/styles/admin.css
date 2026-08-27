@@ -2,8 +2,7 @@
 
 /* Management workspace: deliberately independent from the public theme,
    but the accent intentionally follows the product teal (#0f766e family). */
-.modal-backdrop, .submodal-backdrop { position: fixed; z-index: 80; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgb(5 10 12 / .56); backdrop-filter: blur(6px); }
-.submodal-backdrop { z-index: 90; background: rgb(5 10 12 / .42); }
+.submodal-backdrop { position: fixed; z-index: 90; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgb(5 10 12 / .42); backdrop-filter: blur(6px); }
 
 /* 两处色值受无障碍下限约束，改动前先算比值：
    --admin-border-strong 是 input/select/textarea/secondary-btn/checkbox 的边界，
@@ -287,7 +286,7 @@
 }
 
 @media (max-width: 639px) {
-  .modal-backdrop, .submodal-backdrop { align-items: stretch; padding: 0; }
+  .submodal-backdrop { align-items: stretch; padding: 0; }
   .admin-shell, .editor-modal, .install-modal, .latency-editor { width: 100%; max-height: 100dvh; border: 0; border-radius: 0; }
   .admin-shell { min-height: 100dvh; }
   .login-form { width: calc(100% - 26px); padding: 24px 20px; }
