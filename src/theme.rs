@@ -1,12 +1,16 @@
-use futures_util::TryStreamExt;
+use std::time::Duration;
+
 use serde_json::Value;
-use worker::{Error, Fetch, Method, Request, Response, Result, Url};
+use worker::{Error, Method, Request, Result, Url};
+
+use crate::outbound::{fetch_with_timeout, read_response_limited};
 
 pub const BUILTIN_THEME_ID: &str = "builtin-nodeflare-glass";
 pub const BUILTIN_THEME_NAME: &str = "NodeFlare Glass";
 pub const INDEX_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const ASSET_MAX_BYTES: usize = 16 * 1024 * 1024;
 const SETTINGS_MAX_BYTES: usize = 64 * 1024;
+const REMOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ResolvedTheme {
     pub source_url: String,
@@ -143,37 +147,13 @@ fn settings_url(base: &str) -> Option<String> {
     raw_github_base(base).map(|base| remote_url(base.as_str(), "theme.json"))
 }
 
-pub async fn read_response_limited(
-    response: &mut Response,
-    limit: usize,
-) -> Result<Option<Vec<u8>>> {
-    let declared = response
-        .headers()
-        .get("Content-Length")?
-        .and_then(|value| value.parse::<usize>().ok());
-    if declared.is_some_and(|length| length == 0 || length > limit) {
-        return Ok(None);
-    }
-
-    let mut body = Vec::with_capacity(declared.unwrap_or(0).min(limit));
-    let mut stream = response.stream()?;
-    while let Some(mut chunk) = stream.try_next().await? {
-        let Some(length) = body.len().checked_add(chunk.len()) else {
-            return Ok(None);
-        };
-        if length > limit {
-            return Ok(None);
-        }
-        body.append(&mut chunk);
-    }
-    Ok((!body.is_empty()).then_some(body))
-}
-
 pub async fn validate_remote(base: &str) -> Result<()> {
     let index = index_url(base)
         .ok_or_else(|| Error::RustError("主题资源地址不是 GitHub Raw 地址".to_string()))?;
     let request = Request::new(&index, Method::Get)?;
-    let mut response = Fetch::Request(request).send().await?;
+    let Some(mut response) = fetch_with_timeout(request, REMOTE_FETCH_TIMEOUT).await? else {
+        return Err(Error::RustError("主题 index.html 请求超时".to_string()));
+    };
     let status = response.status_code();
     if !(200..300).contains(&status) {
         return Err(Error::RustError(format!(
@@ -219,6 +199,33 @@ pub fn builtin_settings_schema() -> Value {
                 "label": "总览显示在线节点",
                 "type": "toggle",
                 "default": true
+            },
+            {
+                "key": "showCarrierLatency",
+                "label": "节点卡片分线路显示延迟",
+                "type": "toggle",
+                "default": false
+            },
+            {
+                "key": "telecomLatencyTask",
+                "label": "电信线路任务名称",
+                "type": "text",
+                "default": "",
+                "placeholder": "留空时按任务名称自动匹配"
+            },
+            {
+                "key": "mobileLatencyTask",
+                "label": "移动线路任务名称",
+                "type": "text",
+                "default": "",
+                "placeholder": "留空时按任务名称自动匹配"
+            },
+            {
+                "key": "unicomLatencyTask",
+                "label": "联通线路任务名称",
+                "type": "text",
+                "default": "",
+                "placeholder": "留空时按任务名称自动匹配"
             }
         ]
     })
@@ -323,7 +330,9 @@ pub async fn remote_settings_schema(base: &str) -> Result<Value> {
     let url = settings_url(base)
         .ok_or_else(|| Error::RustError("主题资源地址不是 GitHub Raw 地址".to_string()))?;
     let request = Request::new(&url, Method::Get)?;
-    let mut response = Fetch::Request(request).send().await?;
+    let Some(mut response) = fetch_with_timeout(request, REMOTE_FETCH_TIMEOUT).await? else {
+        return Err(Error::RustError("主题 theme.json 请求超时".to_string()));
+    };
     if response.status_code() == 404 {
         return Ok(empty_settings_schema("remote"));
     }
@@ -346,7 +355,9 @@ pub async fn remote_settings_schema(base: &str) -> Result<Value> {
 pub async fn remote_theme_version(base: &str) -> Option<String> {
     let url = settings_url(base)?;
     let request = Request::new(&url, Method::Get).ok()?;
-    let mut response = Fetch::Request(request).send().await.ok()?;
+    let mut response = fetch_with_timeout(request, REMOTE_FETCH_TIMEOUT)
+        .await
+        .ok()??;
     if !(200..300).contains(&response.status_code()) {
         return None;
     }

@@ -1,7 +1,13 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
-use worker::{wasm_bindgen::JsValue, Fetch, Method, Request, RequestInit, Result};
+use worker::{wasm_bindgen::JsValue, Headers, Method, Request, RequestInit, Result};
+
+use crate::outbound::{fetch_with_timeout, read_json_limited};
 
 const GRAPHQL_URL: &str = "https://api.cloudflare.com/client/v4/graphql";
+const GRAPHQL_TIMEOUT: Duration = Duration::from_secs(10);
+const GRAPHQL_MAX_BYTES: usize = 1024 * 1024;
 const DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO: i64 = 20;
 const USAGE_QUERY: &str = r#"
 query CloudflareUsage(
@@ -228,13 +234,10 @@ fn summarize_durable_objects(
             summary.duration += group.sum.duration;
         }
     }
-    summary.billable_requests = summary
-        .http_requests
-        .saturating_add(summary.hibernation_wakeups)
-        .saturating_add(ceil_div_nonnegative(
-            summary.inbound_websocket_messages,
-            DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO,
-        ));
+    summary.billable_requests = summary.http_requests.saturating_add(ceil_div_nonnegative(
+        summary.inbound_websocket_messages,
+        DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO,
+    ));
     summary
 }
 
@@ -266,19 +269,23 @@ async fn query_period(token: &str, account_id: &str, date: &str) -> Result<Usage
             end_time: &end_time,
         },
     })?;
+    let headers = Headers::new();
+    headers.set("Authorization", &format!("Bearer {token}"))?;
+    headers.set("Content-Type", "application/json")?;
+    headers.set("Accept", "application/json")?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
+        .with_headers(headers)
         .with_body(Some(JsValue::from_str(&body)));
     let request = Request::new_with_init(GRAPHQL_URL, &init)?;
-    request
-        .headers()
-        .set("Authorization", &format!("Bearer {token}"))?;
-    request.headers().set("Content-Type", "application/json")?;
-    request.headers().set("Accept", "application/json")?;
 
-    let mut response = Fetch::Request(request).send().await?;
+    let Some(mut response) = fetch_with_timeout(request, GRAPHQL_TIMEOUT).await? else {
+        return Err(worker::Error::RustError(
+            "Cloudflare GraphQL 请求超时".to_string(),
+        ));
+    };
     let status = response.status_code();
-    let payload: GraphQlResponse = response.json().await?;
+    let payload: GraphQlResponse = read_json_limited(&mut response, GRAPHQL_MAX_BYTES).await?;
     let errors = payload.errors.unwrap_or_default();
     if !(200..300).contains(&status) || !errors.is_empty() {
         let message = errors
@@ -390,7 +397,7 @@ mod tests {
             vec![DurableObjectsPeriodicGroup {
                 sum: DurableObjectsPeriodicSum {
                     duration: 2.5,
-                    inbound_websocket_msg_count: 21,
+                    inbound_websocket_msg_count: 20,
                     outbound_websocket_msg_count: 11,
                 },
             }],
@@ -398,7 +405,7 @@ mod tests {
         assert_eq!(summary.http_requests, 7);
         assert_eq!(summary.hibernation_wakeups, 3);
         assert_eq!(summary.raw_requests, 10);
-        assert_eq!(summary.billable_requests, 12);
+        assert_eq!(summary.billable_requests, 8);
         assert_eq!(summary.outbound_websocket_messages, 11);
         assert_eq!(summary.duration, 2.5);
         assert_eq!(ceil_div_nonnegative(0, 20), 0);

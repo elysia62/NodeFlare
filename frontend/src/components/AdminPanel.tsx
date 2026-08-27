@@ -41,13 +41,14 @@ import { useDialog } from "./useDialog";
 import { SiteLogo } from "./SiteLogo";
 import { LatencyManager } from "./LatencyManager";
 import { AlertRuleManager } from "./AlertRuleManager";
+import { TelegramSettings } from "./TelegramSettings";
 import { Flag } from "./Flag";
 import pkg from "../../package.json";
 
 const VERSION = import.meta.env.VITE_NODEFLARE_VERSION || pkg.version;
 
 type AdminTab = "servers" | "latency" | "appearance" | "themes" | "themeSettings" | "alerts" | "security" | "data" | "about";
-type AgentPlatform = "linux" | "windows" | "macos";
+type AgentPlatform = "linux" | "windows" | "macos" | "freebsd";
 
 interface AgentInstallInfo {
   agent_token: string;
@@ -376,13 +377,6 @@ export function AdminPanel({
     finally { setBusy(false); }
   }
 
-  async function testNotification() {
-    setBusy(true); setError(""); setNotice("");
-    try { await api.testNotification(); setNotice("测试通知已发送"); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "测试通知失败"); }
-    finally { setBusy(false); }
-  }
-
   async function loadDatabase() {
     setBusy(true); setError("");
     try {
@@ -498,6 +492,9 @@ export function AdminPanel({
     }
     if (installPlatform === "macos") {
       return `curl -fsSL ${installer}/install-macos.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}`;
+    }
+    if (installPlatform === "freebsd") {
+      return `fetch -qo - ${installer}/install-freebsd.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}`;
     }
     return `curl -fsSL ${installer}/agent.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}`;
   }, [install, installPlatform]);
@@ -617,7 +614,7 @@ export function AdminPanel({
                     <div className="form-grid"><label><span>站点名称</span><input required value={settings.site_name} onChange={(event) => updateSettings("site_name", event.target.value)} /></label><label><span>站点描述</span><input value={settings.site_description} onChange={(event) => updateSettings("site_description", event.target.value)} /></label></div>
                     <label><span>站点公告</span><textarea rows={3} maxLength={1000} value={settings.site_announcement} onChange={(event) => updateSettings("site_announcement", event.target.value)} /></label>
                     <div className="form-grid three"><label><span>界面语言</span><select value={settings.locale} onChange={(event) => updateSettings("locale", event.target.value as Settings["locale"])}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label><label><span>站点 Logo 地址</span><input type="url" maxLength={1000} value={settings.logo_url} onChange={(event) => updateSettings("logo_url", event.target.value)} placeholder="https://example.com/logo.svg" /></label><label><span>浏览器图标地址</span><input type="url" maxLength={1000} value={settings.favicon_url} onChange={(event) => updateSettings("favicon_url", event.target.value)} placeholder="https://example.com/favicon.png" /></label></div>
-                    <div className="form-grid"><label><span>离线判定（秒）</span><input type="number" min="30" max="3600" value={settings.offline_threshold_seconds} onChange={(event) => updateSettings("offline_threshold_seconds", Number(event.target.value))} /></label><label><span>历史保留（天）</span><input type="number" min="1" max="365" value={settings.history_retention_days} onChange={(event) => updateSettings("history_retention_days", Number(event.target.value))} /></label></div>
+                    <div className="form-grid"><label><span>离线判定（秒）</span><input type="number" min="30" max="3600" value={settings.offline_threshold_seconds} onChange={(event) => updateSettings("offline_threshold_seconds", Number(event.target.value))} /></label><label><span>历史保留（天）</span><input type="number" min="1" max="30" value={settings.history_retention_days} onChange={(event) => updateSettings("history_retention_days", Number(event.target.value))} /></label></div>
                   </> : null}
 
                   {tab === "themeSettings" ? <>
@@ -631,10 +628,10 @@ export function AdminPanel({
 
                   {tab === "alerts" ? <>
                     <div className="section-title"><AlertTriangle size={15} />通知与告警</div>
-                    <div className="form-grid"><label><span>Telegram Bot Token</span><input autoComplete="off" type="password" value={settings.notification_endpoint} onChange={(event) => updateSettings("notification_endpoint", event.target.value)} placeholder="123456789:AA..." /></label><label><span>Telegram Chat ID</span><input value={settings.notification_target} onChange={(event) => updateSettings("notification_target", event.target.value)} placeholder="个人、群组或频道 ID" /></label></div>
                     <Toggle label="启用通知与告警" checked={settings.notification_enabled} onChange={(value) => updateSettings("notification_enabled", value)} />
-                    <div className="form-grid three"><label><span>离线告警延迟（分钟）</span><input type="number" min="2" max="1440" value={settings.offline_alert_minutes} onChange={(event) => updateSettings("offline_alert_minutes", Number(event.target.value))} /></label><label><span>到期提醒（天）</span><input type="number" min="0" max="365" value={settings.expiry_alert_days} onChange={(event) => updateSettings("expiry_alert_days", Number(event.target.value))} /></label><label><span>通知测试</span><button type="button" className="secondary-btn" disabled={busy} onClick={() => void testNotification()}>发送测试通知</button></label></div>
-                    <p className="settings-hint">通过 Telegram Bot 发送告警；告警状态会记录在 D1，同一故障和恢复只发送一次。</p>
+                    <div className="form-grid three"><label><span>离线告警延迟（分钟）</span><input type="number" min="2" max="1440" value={settings.offline_alert_minutes} onChange={(event) => updateSettings("offline_alert_minutes", Number(event.target.value))} /></label><label><span>到期提醒（天）</span><input type="number" min="0" max="365" value={settings.expiry_alert_days} onChange={(event) => updateSettings("expiry_alert_days", Number(event.target.value))} /></label><label><span>流量提醒起始阈值（%）</span><input type="number" min="50" max="100" value={settings.traffic_alert_percentage} onChange={(event) => updateSettings("traffic_alert_percentage", Number(event.target.value))} /></label></div>
+                    <p className="settings-hint">流量达到起始阈值后，每增加 5 个百分点生成一次事件，最多提醒到 100%。</p>
+                    <TelegramSettings onError={setError} onNotice={setNotice} />
                     <AlertRuleManager servers={servers} onError={setError} onNotice={setNotice} />
                   </> : null}
 
@@ -690,7 +687,7 @@ export function AdminPanel({
         <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={16} />保存节点</button></div>
       </form></div> : null}
 
-      {installCommand ? <div className="submodal-backdrop" role="presentation" onMouseDown={installDialog.onBackdropMouseDown}><section ref={installDialog.dialogRef} className="install-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title" tabIndex={-1}><header><div><span className="eyebrow">Agent 部署</span><h3 id="install-dialog-title">安装命令</h3></div><div className="segmented install-platform" aria-label="Agent 平台"><button type="button" className={installPlatform === "linux" ? "active" : ""} onClick={() => setInstallPlatform("linux")}>Linux</button><button type="button" className={installPlatform === "windows" ? "active" : ""} onClick={() => setInstallPlatform("windows")}>Windows</button><button type="button" className={installPlatform === "macos" ? "active" : ""} onClick={() => setInstallPlatform("macos")}>macOS ARM</button></div></header><div className="install-list"><pre>{installCommand}</pre></div><div className="form-actions"><button className="secondary-btn" type="button" onClick={() => setInstall(null)}>关闭</button><button className="primary-btn" type="button" onClick={() => void copyInstallCommand()}><Copy size={16} />复制</button></div></section></div> : null}
+      {installCommand ? <div className="submodal-backdrop" role="presentation" onMouseDown={installDialog.onBackdropMouseDown}><section ref={installDialog.dialogRef} className="install-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title" tabIndex={-1}><header><div><span className="eyebrow">Agent 部署</span><h3 id="install-dialog-title">安装命令</h3></div><div className="segmented install-platform" aria-label="Agent 平台"><button type="button" className={installPlatform === "linux" ? "active" : ""} onClick={() => setInstallPlatform("linux")}>Linux</button><button type="button" className={installPlatform === "windows" ? "active" : ""} onClick={() => setInstallPlatform("windows")}>Windows</button><button type="button" className={installPlatform === "macos" ? "active" : ""} onClick={() => setInstallPlatform("macos")}>macOS ARM</button><button type="button" className={installPlatform === "freebsd" ? "active" : ""} onClick={() => setInstallPlatform("freebsd")}>FreeBSD</button></div></header><div className="install-list"><pre>{installCommand}</pre></div><div className="form-actions"><button className="secondary-btn" type="button" onClick={() => setInstall(null)}>关闭</button><button className="primary-btn" type="button" onClick={() => void copyInstallCommand()}><Copy size={16} />复制</button></div></section></div> : null}
     </div>
   );
 }

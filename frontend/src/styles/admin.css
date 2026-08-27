@@ -226,8 +226,22 @@
 .alert-server-picker label { display: flex; min-width: 0; align-items: center; gap: 9px; border-bottom: 1px solid var(--admin-border); padding: 10px 11px; }
 .alert-server-picker span:last-child { overflow: hidden; color: var(--admin-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 
+.telegram-settings { display: grid; gap: 15px; border-top: 1px solid var(--admin-border); padding-top: 18px; }
+.telegram-settings-header { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 14px; }
+.telegram-settings-title { display: flex; min-width: 0; align-items: center; gap: 10px; }
+.telegram-settings-title > div { display: flex; min-width: 0; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.telegram-settings-title h3 { margin: 0; color: var(--admin-text); font-size: 16px; }
+.telegram-mark { display: inline-flex; width: 34px; height: 34px; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 6px; color: var(--admin-accent); background: var(--admin-active-bg); }
+.telegram-state { display: inline-flex; align-items: center; gap: 4px; color: var(--admin-muted); font-size: 11px; }
+.telegram-state.configured { color: var(--success); }
+.telegram-fields { display: grid; gap: 15px; grid-template-columns: minmax(220px, 1.4fr) minmax(180px, 1fr) minmax(130px, .65fr); }
+.telegram-template textarea { min-height: 116px; resize: vertical; }
+.telegram-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+
 @media (max-width: 960px) {
   .form-grid.three { grid-template-columns: 1fr 1fr; }
+  .telegram-fields { grid-template-columns: 1fr 1fr; }
+  .telegram-token-field { grid-column: 1 / -1; }
 }
 
 @media (max-width: 639px) {
@@ -250,6 +264,8 @@
   .usage-do-breakdown { grid-template-columns: 1fr; }
   .usage-table th, .usage-table td { padding-inline: 5px; font-size: 11px; }
   .editor-modal, .install-modal { padding: 15px 13px; }
+  .telegram-fields { grid-template-columns: 1fr; }
+  .telegram-token-field { grid-column: auto; }
   .editor-toggles { grid-template-columns: 1fr 1fr; }
   .latency-task-row { padding-block: 8px; grid-template-columns: 70px minmax(0, 1fr) auto; }
   .latency-task-row .latency-task-meta:nth-of-type(2) { display: none; }

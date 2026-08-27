@@ -341,7 +341,7 @@ async fn latency(req: &Request, ctx: &RouteContext) -> Result<Response> {
     if db::get_server(&ctx.database, &id, false).await?.is_none() {
         return error("节点不存在", 404);
     }
-    let hours = requested_hours(req, 24 * 365)?;
+    let hours = requested_hours(req, 24 * db::MAX_HISTORY_RETENTION_DAYS)?;
     let cache_key = if ctx.settings.public_dashboard {
         Some(history_cache_key(
             &req.url()?,

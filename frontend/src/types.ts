@@ -275,13 +275,21 @@ export interface Settings extends Omit<Config, "password_client_salt"> {
   new_password_derived?: string;
   turnstile_secret_key: string;
   notification_enabled: boolean;
-  notification_endpoint: string;
-  notification_target: string;
   offline_alert_minutes: number;
   expiry_alert_days: number;
+  traffic_alert_percentage: number;
   cloudflare_account_id: string;
   cloudflare_api_token: string;
 }
+
+export interface TelegramSettings {
+  bot_token: string;
+  chat_id: string;
+  message_thread_id: number | null;
+  template: string;
+}
+
+export type TelegramSettingsInput = Pick<TelegramSettings, "bot_token" | "chat_id" | "message_thread_id" | "template">;
 
 type AlertMetric = "cpu" | "memory" | "disk" | "net_in" | "net_out";
 type AlertAggregation = "average" | "continuous";

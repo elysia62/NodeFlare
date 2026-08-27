@@ -4,6 +4,7 @@ set -eu
 SERVICE_NAME="nodeflare"
 INSTALL_DIR="/opt/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
+TOKEN_FILE="$INSTALL_DIR/token"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 OPENRC_FILE="/etc/init.d/$SERVICE_NAME"
 
@@ -130,7 +131,7 @@ install_agent() {
     esac
     case "$mirror" in *@*) fail "下载加速前缀不能包含用户信息" ;; esac
   fi
-  case "$(uname -m)" in x86_64|amd64) arch="x86_64" ;; aarch64|arm64) arch="aarch64" ;; *) fail "暂不支持当前 CPU 架构：$(uname -m)" ;; esac
+  case "$(uname -m)" in x86_64|amd64) arch="x64" ;; aarch64|arm64) arch="aarch64" ;; *) fail "暂不支持当前 CPU 架构：$(uname -m)" ;; esac
   init_system=$(detect_init_system)
   [ "$init_system" != "unknown" ] || fail "未检测到正在运行的 systemd 或 OpenRC"
 
@@ -199,6 +200,9 @@ install_agent() {
   esac
   mv "$temporary" "$AGENT_FILE"
   trap - EXIT HUP INT TERM
+  (umask 077; printf '%s\n' "$token" > "$TOKEN_FILE")
+  chmod 600 "$TOKEN_FILE"
+  token=""
   log "正在配置并启动 $init_system 服务"
   if [ "$init_system" = "systemd" ]; then
     printf '%s\n' \
@@ -209,7 +213,7 @@ install_agent() {
     '' \
     '[Service]' \
     'Type=simple' \
-    "ExecStart=$AGENT_FILE -e $endpoint -t $token -i $interval" \
+    "ExecStart=$AGENT_FILE -e $endpoint --token-file $TOKEN_FILE -i $interval" \
     'Restart=always' \
     'RestartSec=10' \
     'NoNewPrivileges=true' \
@@ -232,7 +236,7 @@ install_agent() {
       '#!/sbin/openrc-run' \
       "name=\"$SERVICE_NAME\"" \
       "command=\"$AGENT_FILE\"" \
-      "command_args=\"-e $endpoint -t $token -i $interval\"" \
+      "command_args=\"-e $endpoint --token-file $TOKEN_FILE -i $interval\"" \
       "command_user=\"root\"" \
       "supervisor=\"supervise-daemon\"" \
       "respawn_delay=10" \

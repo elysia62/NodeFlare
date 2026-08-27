@@ -1,12 +1,13 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use worker::{wasm_bindgen::JsValue, Method, Request, RequestInit, Result};
+use worker::{wasm_bindgen::JsValue, Headers, Method, Request, RequestInit, Result};
 
-use crate::outbound::fetch_with_timeout;
+use crate::outbound::{fetch_with_timeout, read_json_limited};
 
 const SITEVERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 const VERIFY_TIMEOUT_SECONDS: u64 = 8;
+const VERIFY_RESPONSE_MAX_BYTES: usize = 64 * 1024;
 pub const ADMIN_LOGIN_ACTION: &str = "admin-login";
 pub const PUBLIC_DASHBOARD_ACTION: &str = "public-dashboard";
 
@@ -59,11 +60,13 @@ pub async fn verify(
         response: token,
         remoteip: remote_ip,
     })?;
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
+        .with_headers(headers)
         .with_body(Some(JsValue::from_str(&body)));
     let request = Request::new_with_init(SITEVERIFY_URL, &init)?;
-    request.headers().set("Content-Type", "application/json")?;
 
     let Some(mut response) =
         fetch_with_timeout(request, Duration::from_secs(VERIFY_TIMEOUT_SECONDS)).await?
@@ -73,7 +76,8 @@ pub async fn verify(
     if !(200..300).contains(&response.status_code()) {
         return Ok(false);
     }
-    let result: VerifyResponse = response.json().await?;
+    let result: VerifyResponse =
+        read_json_limited(&mut response, VERIFY_RESPONSE_MAX_BYTES).await?;
     Ok(matches_request(&result, expected_hostname, expected_action))
 }
 

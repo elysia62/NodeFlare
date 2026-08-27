@@ -1,17 +1,20 @@
+mod live_batch;
+mod runtime_stats;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
-use std::fs;
-use std::io::{self, ErrorKind, Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,13 +22,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-use sysinfo::{Disks, Networks, ProcessesToUpdate, System};
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
+use sysinfo::{Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{connect, Error as WebSocketError, Message};
 
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-compile_error!("nodeflare-agent supports Linux, Windows, and macOS");
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "freebsd"
+)))]
+compile_error!("nodeflare-agent supports Linux, Windows, macOS, and FreeBSD");
 
 const VERSION: &str = match option_env!("NODEFLARE_VERSION") {
     Some(version) if !version.is_empty() => version,
@@ -39,21 +47,22 @@ const MAX_LATENCY_TASKS: usize = 128;
 const LATENCY_WORKERS: usize = 4;
 const MAX_PENDING_LATENCY_RESULTS: usize = 4096;
 const MAX_REPORT_AGE_SECONDS: i64 = 7_000;
-const REPORT_RETRY_MIN: Duration = Duration::from_secs(5);
-const REPORT_RETRY_MAX: Duration = Duration::from_secs(300);
+const ONCE_WSS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const UPDATE_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const UPDATE_CHECK_JITTER_MAX_SECONDS: u64 = 30 * 60;
 const LIVE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const LIVE_QUEUE_CAPACITY: usize = 720;
-// Keep each WebSocket frame comfortably below the Worker 1 MiB validation limit;
-// the queue preserves the remaining samples for the next frame.
-const LIVE_BATCH_CAPACITY: usize = 32;
+const MAX_PENDING_SPOOL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PENDING_SPOOL_LINE_BYTES: usize = 1024 * 1024;
 // D1 persistence can take a few hundred milliseconds; allow the ACK to arrive
 // before continuing with the configured live interval.
-const LIVE_ACK_READ_TIMEOUT: Duration = Duration::from_millis(1_000);
+const LIVE_ACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const LIVE_HINT_READ_TIMEOUT: Duration = Duration::from_millis(10);
 const LIVE_REPORT_DIVISOR: u64 = 15;
 const BASIC_INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const SLOW_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const RUNTIME_STATS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CLOCK_CALIBRATION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOCK_CALIBRATION_MIN_CHANGE_MS: i64 = 20_000;
 
@@ -78,9 +87,9 @@ struct CliOptions {
     /// NodeFlare endpoint
     #[arg(short = 'e', value_name = "URL")]
     endpoint: String,
-    /// Agent token
-    #[arg(short = 't', value_name = "TOKEN")]
-    token: String,
+    /// Path to a file containing the Agent token
+    #[arg(long, value_name = "PATH")]
+    token_file: PathBuf,
     /// Initial report interval in seconds (15-3600)
     #[arg(short = 'i', value_name = "SECONDS", default_value_t = 60)]
     interval: u64,
@@ -103,7 +112,7 @@ struct LatencyTask {
     interval_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct LatencyResult {
     task_id: String,
     timestamp: i64,
@@ -115,10 +124,11 @@ struct LatencyExecutor {
     task_tx: mpsc::SyncSender<LatencyTask>,
     result_rx: mpsc::Receiver<LatencyResult>,
     in_flight: HashSet<String>,
+    stats: Arc<runtime_stats::RuntimeStats>,
 }
 
 impl LatencyExecutor {
-    fn new() -> Result<Self> {
+    fn new(stats: Arc<runtime_stats::RuntimeStats>) -> Result<Self> {
         let (task_tx, task_rx) = mpsc::sync_channel::<LatencyTask>(MAX_LATENCY_TASKS);
         let (result_tx, result_rx) = mpsc::channel();
         let task_rx = Arc::new(Mutex::new(task_rx));
@@ -130,7 +140,7 @@ impl LatencyExecutor {
                 .name(format!("nodeflare-latency-{index}"))
                 .spawn(move || loop {
                     let task = match task_rx.lock() {
-                        Ok(receiver) => receiver.try_recv(),
+                        Ok(receiver) => receiver.recv(),
                         Err(_) => return,
                     };
                     match task {
@@ -139,10 +149,7 @@ impl LatencyExecutor {
                                 return;
                             }
                         }
-                        Err(mpsc::TryRecvError::Empty) => {
-                            thread::sleep(Duration::from_millis(25));
-                        }
-                        Err(mpsc::TryRecvError::Disconnected) => return,
+                        Err(mpsc::RecvError) => return,
                     };
                 })?;
         }
@@ -151,6 +158,7 @@ impl LatencyExecutor {
             task_tx,
             result_rx,
             in_flight: HashSet::new(),
+            stats,
         })
     }
 
@@ -164,8 +172,10 @@ impl LatencyExecutor {
                 self.in_flight.insert(task_id);
                 true
             }
-            Err(mpsc::TrySendError::Full(_)) => false,
-            Err(mpsc::TrySendError::Disconnected(_)) => false,
+            Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.stats.latency_queue_rejected();
+                false
+            }
         }
     }
 
@@ -202,12 +212,6 @@ struct GithubReleaseAsset {
     digest: Option<String>,
 }
 
-struct SubmitResult {
-    config: Option<RemoteConfig>,
-    config_hash: String,
-    clock_offset_ms: Option<i64>,
-}
-
 #[derive(Debug, Default)]
 struct ClockCalibration {
     offset_ms: i64,
@@ -234,38 +238,62 @@ type SharedClock = Arc<Mutex<ClockCalibration>>;
 struct LiveSender {
     pending: Arc<(Mutex<VecDeque<Report>>, Condvar)>,
     send_interval: Arc<Mutex<Duration>>,
-    healthy: Arc<AtomicBool>,
+    persisted_through: Arc<AtomicI64>,
+    remote_config: Arc<Mutex<Option<RemoteConfig>>>,
+    stats: Arc<runtime_stats::RuntimeStats>,
+}
+
+struct LiveSenderWorker {
+    pending: Arc<(Mutex<VecDeque<Report>>, Condvar)>,
+    configured_interval: Arc<Mutex<Duration>>,
+    persisted_through: Arc<AtomicI64>,
+    remote_config: Arc<Mutex<Option<RemoteConfig>>>,
+    clock: SharedClock,
+    stats: Arc<runtime_stats::RuntimeStats>,
 }
 
 impl LiveSender {
-    fn start(config: &RuntimeConfig, clock: SharedClock) -> Result<Self> {
+    fn start(
+        config: &RuntimeConfig,
+        clock: SharedClock,
+        stats: Arc<runtime_stats::RuntimeStats>,
+    ) -> Result<Self> {
         let pending = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         let send_interval = Arc::new(Mutex::new(live_batch_interval(
             config.report_interval,
             config.collect_interval,
         )));
-        let healthy = Arc::new(AtomicBool::new(false));
+        let persisted_through = Arc::new(AtomicI64::new(0));
+        let remote_config = Arc::new(Mutex::new(None));
         let endpoint = live_endpoint(&config.endpoint)?;
         let token = config.token.clone();
         let sender_state = Arc::clone(&pending);
         let sender_interval = Arc::clone(&send_interval);
-        let sender_healthy = Arc::clone(&healthy);
+        let sender_persisted_through = Arc::clone(&persisted_through);
+        let sender_remote_config = Arc::clone(&remote_config);
+        let sender_stats = Arc::clone(&stats);
         thread::Builder::new()
             .name("nodeflare-live".to_string())
             .spawn(move || {
                 live_sender_loop(
                     &endpoint,
                     &token,
-                    sender_state,
-                    sender_interval,
-                    sender_healthy,
-                    clock,
+                    LiveSenderWorker {
+                        pending: sender_state,
+                        configured_interval: sender_interval,
+                        persisted_through: sender_persisted_through,
+                        remote_config: sender_remote_config,
+                        clock,
+                        stats: sender_stats,
+                    },
                 )
             })?;
         Ok(Self {
             pending,
             send_interval,
-            healthy,
+            persisted_through,
+            remote_config,
+            stats,
         })
     }
 
@@ -274,6 +302,7 @@ impl LiveSender {
         if let Ok(mut pending) = pending.lock() {
             if pending.len() >= LIVE_QUEUE_CAPACITY {
                 pending.pop_front();
+                self.stats.live_queue_dropped(1);
             }
             pending.push_back(report.clone());
             ready.notify_one();
@@ -287,8 +316,15 @@ impl LiveSender {
         self.pending.1.notify_one();
     }
 
-    fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
+    fn persisted_through(&self) -> i64 {
+        self.persisted_through.load(Ordering::Acquire)
+    }
+
+    fn take_remote_config(&self) -> Option<RemoteConfig> {
+        self.remote_config
+            .lock()
+            .ok()
+            .and_then(|mut config| config.take())
     }
 }
 
@@ -301,12 +337,7 @@ fn live_batch_interval(report_interval: u64, collect_interval: u64) -> Duration 
     Duration::from_secs(seconds)
 }
 
-#[derive(Debug, Serialize)]
-struct ReportBatch<'a> {
-    samples: &'a [Report],
-}
-
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 struct DiskMetric {
     name: String,
     mount_point: String,
@@ -320,7 +351,7 @@ struct DiskMetric {
     utilization: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct GpuMetric {
     model: String,
     usage: Option<f64>,
@@ -328,7 +359,7 @@ struct GpuMetric {
     memory_total: i64,
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 struct Report {
     timestamp: i64,
     cpu: f64,
@@ -380,6 +411,14 @@ struct BasicMetrics {
     gpu_usage: f64,
     gpu_model: String,
     gpus: Vec<GpuMetric>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct SlowMetrics {
+    disks: Vec<DiskMetric>,
+    processes: i64,
+    tcp_connections: i64,
+    udp_connections: i64,
 }
 
 #[cfg(target_os = "linux")]
@@ -518,7 +557,7 @@ fn file_line_count(path: &str) -> i64 {
     text(path).lines().skip(1).count() as i64
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 fn connection_counts_from_netstat(output: &str) -> (i64, i64) {
     output.lines().fold((0_i64, 0_i64), |(tcp, udp), line| {
         let protocol = line
@@ -536,7 +575,7 @@ fn connection_counts_from_netstat(output: &str) -> (i64, i64) {
     })
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 fn connection_counts() -> (i64, i64) {
     Command::new("netstat")
         .args(["-an"])
@@ -755,6 +794,10 @@ fn ping_latency(output: &str) -> Option<f64> {
     value.parse().ok()
 }
 
+fn ping_latencies(output: &str) -> Vec<f64> {
+    output.lines().filter_map(ping_latency).collect()
+}
+
 fn icmp_latency_probe(target: &str) -> (f64, f64) {
     let host = target.trim();
     let Some((host, _)) = parse_probe_target(host, None) else {
@@ -764,27 +807,18 @@ fn icmp_latency_probe(target: &str) -> (f64, f64) {
         return (-1.0, 100.0);
     };
     let destination = address.ip().to_string();
-    let mut latencies = Vec::with_capacity(PROBE_ATTEMPTS);
-    for _ in 0..PROBE_ATTEMPTS {
-        let started = Instant::now();
-        let mut ping = Command::new("ping");
-        #[cfg(target_os = "linux")]
-        ping.args(["-n", "-c", "1", "-W", "1", destination.as_str()]);
-        #[cfg(target_os = "macos")]
-        ping.args(["-n", "-c", "1", "-W", "1000", destination.as_str()]);
-        #[cfg(target_os = "windows")]
-        ping.args(["-n", "1", "-w", "1000", destination.as_str()]);
-        let output = ping.output();
-        if let Ok(output) = output {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                latencies.push(
-                    ping_latency(&stdout)
-                        .unwrap_or_else(|| started.elapsed().as_secs_f64() * 1000.0),
-                );
-            }
-        }
-    }
+    let mut ping = Command::new("ping");
+    #[cfg(target_os = "linux")]
+    ping.args(["-n", "-c", "4", "-W", "1", destination.as_str()]);
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    ping.args(["-n", "-c", "4", "-W", "1000", destination.as_str()]);
+    #[cfg(target_os = "windows")]
+    ping.args(["-n", "4", "-w", "1000", destination.as_str()]);
+    let mut latencies = ping
+        .output()
+        .map(|output| ping_latencies(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or_default();
+    latencies.truncate(PROBE_ATTEMPTS);
     let loss = (PROBE_ATTEMPTS - latencies.len()) as f64 * 100.0 / PROBE_ATTEMPTS as f64;
     if latencies.is_empty() {
         (-1.0, loss)
@@ -820,17 +854,17 @@ fn clock_offset_from_http_date(value: &str, started_ms: i64, ended_ms: i64) -> O
     Some(server_ms.saturating_sub(midpoint_ms))
 }
 
-fn clock_offset_from_server_seconds(value: &str, started_ms: i64, ended_ms: i64) -> Option<i64> {
-    let server_ms = value.trim().parse::<i64>().ok()?.saturating_mul(1_000);
-    let midpoint_ms = started_ms.saturating_add(ended_ms.saturating_sub(started_ms) / 2);
-    Some(server_ms.saturating_sub(midpoint_ms))
-}
-
 fn corrected_timestamp(timestamp: i64, offset_ms: i64) -> i64 {
     timestamp
         .saturating_mul(1_000)
         .saturating_add(offset_ms)
         .div_euclid(1_000)
+}
+
+fn monotonic_report_timestamp(corrected: i64, last_emitted: i64, persisted_through: i64) -> i64 {
+    corrected
+        .max(last_emitted.saturating_add(1))
+        .max(persisted_through.saturating_add(1))
 }
 
 fn shared_clock_offset(clock: &SharedClock) -> i64 {
@@ -1006,6 +1040,68 @@ fn parse_system_profiler_gpu_names(output: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(any(target_os = "freebsd", test))]
+fn parse_pciconf_gpu_names(output: &str) -> Vec<String> {
+    fn block_name(lines: &[&str]) -> Option<String> {
+        let header = lines.first()?.to_ascii_lowercase();
+        let mut display = header.contains("class=0x03");
+        let mut vendor = None;
+        let mut device = None;
+        for line in lines.iter().skip(1) {
+            let Some((key, value)) = line.trim().split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim().trim_matches(['\'', '"']);
+            match key {
+                "class" if value.eq_ignore_ascii_case("display") => display = true,
+                "vendor" => vendor = Some(value),
+                "device" => device = Some(value),
+                _ => {}
+            }
+        }
+        if !display {
+            return None;
+        }
+        match (vendor, device) {
+            (Some(vendor), Some(device))
+                if !device
+                    .to_ascii_lowercase()
+                    .contains(&vendor.to_ascii_lowercase()) =>
+            {
+                Some(format!("{vendor} {device}"))
+            }
+            (_, Some(device)) => Some(device.to_string()),
+            (Some(vendor), None) => Some(vendor.to_string()),
+            _ => None,
+        }
+    }
+
+    let mut names = Vec::new();
+    let mut block = Vec::new();
+    for line in output.lines() {
+        if !line.is_empty()
+            && !line
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_whitespace())
+            && !block.is_empty()
+        {
+            if let Some(name) = block_name(&block) {
+                names.push(name);
+            }
+            block.clear();
+        }
+        if !line.trim().is_empty() {
+            block.push(line);
+        }
+    }
+    if let Some(name) = block_name(&block) {
+        names.push(name);
+    }
+    names
+}
+
 #[cfg(target_os = "linux")]
 fn basic_gpu_info() -> Vec<GpuMetric> {
     let names = parse_lspci_gpu_names(&command("lspci", &[]));
@@ -1041,6 +1137,11 @@ fn basic_gpu_info() -> Vec<GpuMetric> {
     )))
 }
 
+#[cfg(target_os = "freebsd")]
+fn basic_gpu_info() -> Vec<GpuMetric> {
+    basic_gpu_metrics(parse_pciconf_gpu_names(&command("pciconf", &["-lv"])))
+}
+
 fn gpu_info() -> Vec<GpuMetric> {
     let detailed = nvidia_gpu_info();
     if detailed.is_empty() {
@@ -1059,7 +1160,7 @@ fn average_gpu_usage(gpus: &[GpuMetric]) -> f64 {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 fn u64_to_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
@@ -1090,6 +1191,8 @@ struct Collector {
     network_interface: String,
     basic: BasicMetrics,
     basic_at: Instant,
+    slow: SlowMetrics,
+    slow_at: Instant,
 }
 
 #[cfg(target_os = "linux")]
@@ -1102,8 +1205,11 @@ impl Collector {
             network_interface: config.network_interface.clone(),
             basic: BasicMetrics::default(),
             basic_at: Instant::now(),
+            slow: SlowMetrics::default(),
+            slow_at: Instant::now(),
         };
         collector.refresh_basic();
+        collector.refresh_slow();
         collector
     }
 
@@ -1127,6 +1233,29 @@ impl Collector {
             gpus,
         };
         self.basic_at = Instant::now();
+    }
+
+    fn refresh_slow(&mut self) {
+        let processes = fs::read_dir("/proc")
+            .map(|items| {
+                items
+                    .filter_map(|item| item.ok())
+                    .filter(|item| {
+                        item.file_name()
+                            .to_string_lossy()
+                            .chars()
+                            .all(|ch| ch.is_ascii_digit())
+                    })
+                    .count() as i64
+            })
+            .unwrap_or(0);
+        self.slow = SlowMetrics {
+            disks: disk_usage(),
+            processes,
+            tcp_connections: file_line_count("/proc/net/tcp") + file_line_count("/proc/net/tcp6"),
+            udp_connections: file_line_count("/proc/net/udp") + file_line_count("/proc/net/udp6"),
+        };
+        self.slow_at = Instant::now();
     }
 
     fn collect(
@@ -1163,6 +1292,9 @@ impl Collector {
         if self.basic_at.elapsed() >= BASIC_INFO_REFRESH_INTERVAL {
             self.refresh_basic();
         }
+        if self.slow_at.elapsed() >= SLOW_METRICS_REFRESH_INTERVAL {
+            self.refresh_slow();
+        }
 
         let mem = text("/proc/meminfo");
         let mem_total = mem_value(&mem, "MemTotal:");
@@ -1179,24 +1311,12 @@ impl Collector {
             .next()
             .and_then(|value| value.parse::<f64>().ok())
             .unwrap_or(0.0) as i64;
-        let processes = fs::read_dir("/proc")
-            .map(|items| {
-                items
-                    .filter_map(|item| item.ok())
-                    .filter(|item| {
-                        item.file_name()
-                            .to_string_lossy()
-                            .chars()
-                            .all(|ch| ch.is_ascii_digit())
-                    })
-                    .count() as i64
-            })
-            .unwrap_or(0);
-        let disks = disk_usage();
+        let processes = self.slow.processes;
+        let disks = self.slow.disks.clone();
         let disk_used = disks.iter().map(|disk| disk.used).sum();
         let disk_total = disks.iter().map(|disk| disk.total).sum();
-        let tcp_connections = file_line_count("/proc/net/tcp") + file_line_count("/proc/net/tcp6");
-        let udp_connections = file_line_count("/proc/net/udp") + file_line_count("/proc/net/udp6");
+        let tcp_connections = self.slow.tcp_connections;
+        let udp_connections = self.slow.udp_connections;
         let read_ops = io_now.read_ops.saturating_sub(io_before.read_ops);
         let write_ops = io_now.write_ops.saturating_sub(io_before.write_ops);
         let total_ops = read_ops.saturating_add(write_ops);
@@ -1269,26 +1389,33 @@ impl Collector {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 struct Collector {
     system: System,
     networks: Networks,
+    disks: Disks,
     previous_at: Instant,
     basic: BasicMetrics,
     basic_at: Instant,
+    slow: SlowMetrics,
+    slow_at: Instant,
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 impl Collector {
     fn new(_config: &RuntimeConfig) -> Self {
         let mut collector = Self {
             system: System::new_all(),
             networks: Networks::new_with_refreshed_list(),
+            disks: Disks::new_with_refreshed_list(),
             previous_at: Instant::now(),
             basic: BasicMetrics::default(),
             basic_at: Instant::now(),
+            slow: SlowMetrics::default(),
+            slow_at: Instant::now(),
         };
         collector.refresh_basic();
+        collector.refresh_slow();
         collector
     }
 
@@ -1317,35 +1444,22 @@ impl Collector {
         self.basic_at = Instant::now();
     }
 
-    fn collect(
-        &mut self,
-        config: &RuntimeConfig,
-        latency_results: Vec<LatencyResult>,
-        timestamp: i64,
-    ) -> Report {
-        let sampled_at = Instant::now();
-        let elapsed = sampled_at
-            .saturating_duration_since(self.previous_at)
-            .as_secs_f64()
-            .max(0.001);
-        self.system.refresh_cpu_usage();
-        self.system.refresh_memory();
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
-        self.networks.refresh(true);
-        self.previous_at = sampled_at;
-        if self.basic_at.elapsed() >= BASIC_INFO_REFRESH_INTERVAL {
-            self.refresh_basic();
-        }
-
-        let disks = Disks::new_with_refreshed_list();
+    fn refresh_slow(&mut self) {
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
+        self.disks.refresh(true);
         #[cfg(target_os = "windows")]
         let root = format!(
             "{}\\",
             env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string())
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
         let root = "/".to_string();
-        let mut disk_metrics = disks
+        let mut disks = self
+            .disks
             .iter()
             .filter(|disk| !disk.is_removable())
             .map(|disk| {
@@ -1359,8 +1473,42 @@ impl Collector {
                 }
             })
             .collect::<Vec<_>>();
-        disk_metrics.sort_by_key(|disk| (disk.mount_point != root, disk.mount_point.clone()));
+        disks.sort_by_key(|disk| (disk.mount_point != root, disk.mount_point.clone()));
         let (tcp_connections, udp_connections) = connection_counts();
+        self.slow = SlowMetrics {
+            disks,
+            processes: self.system.processes().len() as i64,
+            tcp_connections,
+            udp_connections,
+        };
+        self.slow_at = Instant::now();
+    }
+
+    fn collect(
+        &mut self,
+        config: &RuntimeConfig,
+        latency_results: Vec<LatencyResult>,
+        timestamp: i64,
+    ) -> Report {
+        let sampled_at = Instant::now();
+        let elapsed = sampled_at
+            .saturating_duration_since(self.previous_at)
+            .as_secs_f64()
+            .max(0.001);
+        self.system.refresh_cpu_usage();
+        self.system.refresh_memory();
+        self.networks.refresh(true);
+        self.previous_at = sampled_at;
+        if self.basic_at.elapsed() >= BASIC_INFO_REFRESH_INTERVAL {
+            self.refresh_basic();
+        }
+        if self.slow_at.elapsed() >= SLOW_METRICS_REFRESH_INTERVAL {
+            self.refresh_slow();
+        }
+
+        let disk_metrics = self.slow.disks.clone();
+        let tcp_connections = self.slow.tcp_connections;
+        let udp_connections = self.slow.udp_connections;
 
         let mut net_in = 0_u64;
         let mut net_out = 0_u64;
@@ -1393,7 +1541,7 @@ impl Collector {
             net_rx_total: u64_to_i64(net_rx_total),
             net_tx_total: u64_to_i64(net_tx_total),
             uptime: u64_to_i64(System::uptime()),
-            processes: self.system.processes().len() as i64,
+            processes: self.slow.processes,
             tcp_connections,
             udp_connections,
             cpu_cores: self.basic.cpu_cores,
@@ -1423,7 +1571,18 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
     if !(15..=3600).contains(&interval) {
         return Err("interval must be between 15 and 3600 seconds".into());
     }
-    let token = options.token.clone();
+    let mut token_file = fs::File::open(&options.token_file)?;
+    let metadata = token_file.metadata()?;
+    if !metadata.is_file() || metadata.len() > 513 {
+        return Err("token file is invalid".into());
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err("token file must not be accessible by group or other users".into());
+    }
+    let mut token = String::new();
+    token_file.read_to_string(&mut token)?;
+    let token = token.trim().to_string();
     let endpoint = options.endpoint.clone();
     if token.is_empty() || token.len() > 512 || token.chars().any(char::is_whitespace) {
         return Err("token is invalid".into());
@@ -1445,122 +1604,19 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
     })
 }
 
-fn submit(
-    agent: &ureq::Agent,
-    config: &RuntimeConfig,
-    reports: &[Report],
-    config_hash: &str,
-) -> Result<SubmitResult> {
-    let batch = ReportBatch { samples: reports };
-    let started_ms = unix_timestamp_millis();
-    let mut response = agent
-        .post(&format!("{}/api/agent/report", config.endpoint))
-        .header("Authorization", format!("Bearer {}", config.token))
-        .header("User-Agent", format!("nodeflare-agent/{VERSION}"))
-        .header("X-Agent-Config-Sha256", config_hash)
-        .send_json(batch)?;
-    let ended_ms = unix_timestamp_millis();
-    let clock_offset_ms = response
-        .headers()
-        .get("x-nodeflare-server-time")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| clock_offset_from_server_seconds(value, started_ms, ended_ms))
-        .or_else(|| {
-            response
-                .headers()
-                .get("date")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| clock_offset_from_http_date(value, started_ms, ended_ms))
-        });
-    let next_hash = response
-        .headers()
-        .get("X-Agent-Config-Sha256")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or(config_hash)
-        .to_string();
-    let remote = if response.status().as_u16() == 204 {
-        None
-    } else {
-        Some(response.body_mut().read_json::<RemoteConfig>()?)
-    };
-    Ok(SubmitResult {
-        config: remote,
-        config_hash: next_hash,
-        clock_offset_ms,
-    })
-}
-
-fn fetch_remote_config(
-    agent: &ureq::Agent,
-    config: &RuntimeConfig,
-    config_hash: &str,
-) -> Result<SubmitResult> {
-    let started_ms = unix_timestamp_millis();
-    let mut response = agent
-        .get(&format!("{}/api/agent/config", config.endpoint))
-        .header("Authorization", format!("Bearer {}", config.token))
-        .header("User-Agent", format!("nodeflare-agent/{VERSION}"))
-        .header("X-Agent-Config-Sha256", config_hash)
-        .call()?;
-    let ended_ms = unix_timestamp_millis();
-    let clock_offset_ms = response
-        .headers()
-        .get("x-nodeflare-server-time")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| clock_offset_from_server_seconds(value, started_ms, ended_ms))
-        .or_else(|| {
-            response
-                .headers()
-                .get("date")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| clock_offset_from_http_date(value, started_ms, ended_ms))
-        });
-    let next_hash = response
-        .headers()
-        .get("X-Agent-Config-Sha256")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or(config_hash)
-        .to_string();
-    let remote = if response.status().as_u16() == 204 {
-        None
-    } else {
-        Some(response.body_mut().read_json::<RemoteConfig>()?)
-    };
-    Ok(SubmitResult {
-        config: remote,
-        config_hash: next_hash,
-        clock_offset_ms,
-    })
-}
-
-fn fetch_clock_offset(agent: &ureq::Agent, endpoint: &str) -> Result<Option<i64>> {
-    let started_ms = unix_timestamp_millis();
-    let response = agent
-        .get(&format!("{endpoint}/api/config"))
-        .header("User-Agent", format!("nodeflare-agent/{VERSION}"))
-        .call()?;
-    let ended_ms = unix_timestamp_millis();
-    Ok(response
-        .headers()
-        .get("x-nodeflare-server-time")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| clock_offset_from_server_seconds(value, started_ms, ended_ms))
-        .or_else(|| {
-            response
-                .headers()
-                .get("date")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| clock_offset_from_http_date(value, started_ms, ended_ms))
-        }))
-}
-
 fn live_endpoint(endpoint: &str) -> Result<String> {
     let mut url = url::Url::parse(endpoint)?;
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
         .map_err(|_| "unsupported live endpoint scheme")?;
-    let path = format!("{}/api/agent/live", url.path().trim_end_matches('/'));
+    let path = format!("{}/api/agent/ws", url.path().trim_end_matches('/'));
     url.set_path(&path);
     Ok(url.to_string())
+}
+
+fn report_batch_id(reports: &[Report]) -> String {
+    let encoded = serde_json::to_vec(reports).unwrap_or_default();
+    let digest = Sha256::digest(encoded);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 type LiveSocket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
@@ -1601,6 +1657,10 @@ struct LiveAck {
     message_type: String,
     ts: i64,
     persisted: bool,
+    #[serde(rename = "persistenceError")]
+    persistence_error: bool,
+    #[serde(rename = "persistedThroughTs")]
+    persisted_through_ts: i64,
     #[serde(rename = "nextD1WriteAfterMs")]
     next_d1_write_after_ms: u64,
     #[serde(rename = "nextWssReportAfterMs")]
@@ -1609,89 +1669,213 @@ struct LiveAck {
     realtime_hint: bool,
 }
 
-fn ack_interval(ack: &LiveAck) -> Duration {
-    Duration::from_millis(ack.next_wss_report_after_ms)
-        .clamp(Duration::from_secs(1), Duration::from_secs(60))
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveConfigMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    ts: i64,
+    config: RemoteConfig,
 }
 
-fn read_live_ack(socket: &mut LiveSocket) -> Result<Option<Duration>> {
+fn ack_wss_interval(ack: &LiveAck) -> Duration {
+    Duration::from_millis(ack.next_wss_report_after_ms)
+        .clamp(Duration::from_secs(1), Duration::from_secs(3600))
+}
+
+fn ack_d1_interval(ack: &LiveAck) -> Duration {
+    Duration::from_millis(ack.next_d1_write_after_ms)
+        .clamp(Duration::from_secs(1), Duration::from_secs(3600))
+}
+
+enum LiveRead {
+    Ack(LiveAck),
+    Config(RemoteConfig),
+    Closed,
+    Pending,
+}
+
+fn read_live_ack(socket: &mut LiveSocket) -> Result<LiveRead> {
     match socket.read() {
         Ok(Message::Text(text)) => {
-            let Ok(ack) = serde_json::from_str::<LiveAck>(text.as_ref()) else {
-                return Ok(None);
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(text.as_ref()) else {
+                return Ok(LiveRead::Pending);
             };
-            if ack.message_type != "ack" || ack.ts <= 0 {
-                return Ok(None);
+            match value.get("type").and_then(serde_json::Value::as_str) {
+                Some("ack") => {
+                    let Ok(ack) = serde_json::from_value::<LiveAck>(value) else {
+                        return Ok(LiveRead::Pending);
+                    };
+                    if ack.message_type != "ack" || ack.ts <= 0 {
+                        return Ok(LiveRead::Pending);
+                    }
+                    Ok(LiveRead::Ack(ack))
+                }
+                Some("config") => {
+                    let Ok(message) = serde_json::from_value::<LiveConfigMessage>(value) else {
+                        return Ok(LiveRead::Pending);
+                    };
+                    if message.message_type != "config" || message.ts <= 0 {
+                        return Ok(LiveRead::Pending);
+                    }
+                    Ok(LiveRead::Config(message.config))
+                }
+                _ => Ok(LiveRead::Pending),
             }
-            let _ = (ack.persisted, ack.next_d1_write_after_ms, ack.realtime_hint);
-            Ok(Some(ack_interval(&ack)))
         }
         Ok(Message::Ping(payload)) => {
             socket.send(Message::Pong(payload))?;
-            Ok(None)
+            Ok(LiveRead::Pending)
         }
-        Ok(Message::Close(_)) => Ok(Some(Duration::ZERO)),
-        Ok(_) => Ok(None),
+        Ok(Message::Close(_)) => Ok(LiveRead::Closed),
+        Ok(_) => Ok(LiveRead::Pending),
         Err(WebSocketError::Io(error))
             if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
         {
-            Ok(None)
+            Ok(LiveRead::Pending)
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+fn wait_for_live_ack(
+    socket: &mut LiveSocket,
+    remote_config: &Arc<Mutex<Option<RemoteConfig>>>,
+) -> Result<LiveRead> {
+    let deadline = Instant::now() + LIVE_ACK_READ_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(LiveRead::Pending);
+        }
+        set_live_read_timeout(socket, Some(remaining))?;
+        match read_live_ack(socket)? {
+            LiveRead::Ack(ack) if !ack.realtime_hint => {
+                return Ok(LiveRead::Ack(ack));
+            }
+            LiveRead::Config(config) => {
+                if let Ok(mut target) = remote_config.lock() {
+                    *target = Some(config);
+                }
+            }
+            LiveRead::Closed => return Ok(LiveRead::Closed),
+            LiveRead::Ack(_) | LiveRead::Pending => {}
+        }
     }
 }
 
 fn live_update_payload(reports: &[Report]) -> Result<String> {
     Ok(serde_json::to_string(&serde_json::json!({
         "type": "update",
+        "batchId": report_batch_id(reports),
         "samples": reports,
     }))?)
 }
 
-fn requeue_reports(pending: &Arc<(Mutex<VecDeque<Report>>, Condvar)>, reports: Vec<Report>) {
-    if reports.is_empty() {
+fn observe_persisted_through(target: &AtomicI64, ack: &LiveAck) {
+    let _ = ack.persisted;
+    target.fetch_max(ack.persisted_through_ts.max(0), Ordering::AcqRel);
+}
+
+fn prune_live_queue(pending: &Arc<(Mutex<VecDeque<Report>>, Condvar)>, persisted_through: i64) {
+    if persisted_through <= 0 {
         return;
     }
-    let (queue, ready) = &**pending;
-    if let Ok(mut queue) = queue.lock() {
-        for report in reports.into_iter().rev() {
-            queue.push_front(report);
-        }
-        while queue.len() > LIVE_QUEUE_CAPACITY {
-            queue.pop_back();
-        }
-        ready.notify_one();
+    if let Ok(mut queue) = pending.0.lock() {
+        queue.retain(|report| report.timestamp > persisted_through);
     }
 }
 
-fn live_sender_loop(
-    endpoint: &str,
-    token: &str,
-    pending: Arc<(Mutex<VecDeque<Report>>, Condvar)>,
-    configured_interval: Arc<Mutex<Duration>>,
-    healthy: Arc<AtomicBool>,
-    clock: SharedClock,
-) {
+fn live_batch_after(queue: &VecDeque<Report>, timestamp: i64) -> Vec<Report> {
+    let candidates = queue
+        .iter()
+        .filter(|report| report.timestamp > timestamp)
+        .cloned()
+        .collect::<VecDeque<_>>();
+    let count = live_batch::batch_len(&candidates);
+    candidates.into_iter().take(count).collect()
+}
+
+fn live_persistence_probe(queue: &VecDeque<Report>, persisted_through: i64) -> Vec<Report> {
+    queue
+        .iter()
+        .rev()
+        .find(|report| report.timestamp > persisted_through)
+        .cloned()
+        .into_iter()
+        .collect()
+}
+
+fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
+    let LiveSenderWorker {
+        pending,
+        configured_interval,
+        persisted_through,
+        remote_config,
+        clock,
+        stats,
+    } = worker;
     let mut socket: Option<LiveSocket> = None;
-    let mut send_interval = configured_interval
+    let mut wss_interval = configured_interval
         .lock()
         .map(|interval| *interval)
         .unwrap_or(Duration::from_secs(1));
-    let mut next_send_at = Instant::now() + send_interval;
-    loop {
+    let mut accepted_through = persisted_through.load(Ordering::Acquire);
+    let mut next_send_at = Instant::now();
+    let mut next_probe_at = Instant::now();
+    'sender: loop {
+        if socket.is_none() {
+            match connect_live(endpoint, token) {
+                Ok((mut connected, offset_ms)) => {
+                    observe_clock(&clock, offset_ms);
+                    if set_live_read_timeout(&mut connected, Some(LIVE_HINT_READ_TIMEOUT)).is_err()
+                    {
+                        thread::sleep(LIVE_RECONNECT_DELAY);
+                        continue;
+                    }
+                    socket = Some(connected);
+                    accepted_through = persisted_through.load(Ordering::Acquire);
+                    next_send_at = Instant::now();
+                    next_probe_at = Instant::now();
+                }
+                Err(error) => {
+                    stats.live_connect_failed();
+                    eprintln!("live connection failed: {error}");
+                    thread::sleep(LIVE_RECONNECT_DELAY);
+                    continue;
+                }
+            }
+        }
+
         let (queue_lock, ready) = &*pending;
         let mut queue = match queue_lock.lock() {
             Ok(queue) => queue,
             Err(_) => return,
         };
-        while queue.is_empty() || Instant::now() < next_send_at {
-            let wait = if queue.is_empty() {
-                Duration::from_millis(250)
+        let batch = loop {
+            let now = Instant::now();
+            let unsent = live_batch_after(&queue, accepted_through);
+            if !unsent.is_empty() && (now >= next_send_at || now >= next_probe_at) {
+                break unsent;
+            }
+            let persisted = persisted_through.load(Ordering::Acquire);
+            if unsent.is_empty() && now >= next_probe_at {
+                let probe = live_persistence_probe(&queue, persisted);
+                if !probe.is_empty() {
+                    break probe;
+                }
+            }
+
+            let wake_at = if !unsent.is_empty() {
+                next_send_at.min(next_probe_at)
+            } else if queue.iter().any(|report| report.timestamp > persisted) {
+                next_probe_at
             } else {
-                next_send_at
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(250))
+                now + Duration::from_millis(250)
             };
+            let wait = wake_at
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(250));
             queue = match ready.wait_timeout(queue, wait) {
                 Ok((queue, _)) => queue,
                 Err(_) => return,
@@ -1704,13 +1888,26 @@ fn live_sender_loop(
                     drop_socket = true;
                 } else {
                     match read_live_ack(connected) {
-                        Ok(Some(Duration::ZERO)) => drop_socket = true,
-                        Ok(Some(interval)) => {
-                            healthy.store(true, Ordering::Release);
-                            send_interval = interval;
-                            next_send_at = Instant::now() + send_interval;
+                        Ok(LiveRead::Closed) => drop_socket = true,
+                        Ok(LiveRead::Ack(ack)) => {
+                            observe_persisted_through(&persisted_through, &ack);
+                            if ack.persistence_error {
+                                stats.live_persistence_failed();
+                                drop_socket = true;
+                            } else {
+                                prune_live_queue(&pending, ack.persisted_through_ts);
+                                accepted_through = accepted_through.max(ack.persisted_through_ts);
+                                wss_interval = ack_wss_interval(&ack);
+                                next_send_at = Instant::now() + wss_interval;
+                                next_probe_at = Instant::now() + ack_d1_interval(&ack);
+                            }
                         }
-                        Ok(None) => {}
+                        Ok(LiveRead::Config(config)) => {
+                            if let Ok(mut target) = remote_config.lock() {
+                                *target = Some(config);
+                            }
+                        }
+                        Ok(LiveRead::Pending) => {}
                         Err(error) => {
                             eprintln!("live hint read failed: {error}");
                             drop_socket = true;
@@ -1720,99 +1917,86 @@ fn live_sender_loop(
             }
             if drop_socket {
                 socket = None;
-                healthy.store(false, Ordering::Release);
+                accepted_through = persisted_through.load(Ordering::Acquire);
                 next_send_at = Instant::now();
+                next_probe_at = Instant::now();
+                thread::sleep(LIVE_RECONNECT_DELAY);
+                continue 'sender;
             }
             queue = match queue_lock.lock() {
                 Ok(queue) => queue,
                 Err(_) => return,
             };
-        }
-        let count = queue.len().min(LIVE_BATCH_CAPACITY);
-        let batch = queue.drain(..count).collect::<Vec<_>>();
+        };
         drop(queue);
 
         if let Ok(interval) = configured_interval.lock() {
-            send_interval = (*interval).clamp(Duration::from_secs(1), Duration::from_secs(60));
-        }
-        if socket.is_none() {
-            match connect_live(endpoint, token) {
-                Ok((mut connected, offset_ms)) => {
-                    observe_clock(&clock, offset_ms);
-                    if set_live_read_timeout(&mut connected, Some(LIVE_ACK_READ_TIMEOUT)).is_err() {
-                        socket = None;
-                        healthy.store(false, Ordering::Release);
-                        thread::sleep(LIVE_RECONNECT_DELAY);
-                        requeue_reports(&pending, batch);
-                        continue;
-                    }
-                    socket = Some(connected);
-                }
-                Err(error) => {
-                    healthy.store(false, Ordering::Release);
-                    eprintln!("live connection failed: {error}");
-                    requeue_reports(&pending, batch);
-                    thread::sleep(LIVE_RECONNECT_DELAY);
-                    continue;
-                }
-            }
+            wss_interval = (*interval).clamp(Duration::from_secs(1), Duration::from_secs(60));
         }
 
         let payload = match live_update_payload(&batch) {
             Ok(payload) => payload,
             Err(error) => {
                 eprintln!("live payload encode failed: {error}");
-                requeue_reports(&pending, batch);
+                next_send_at = Instant::now() + wss_interval;
                 continue;
             }
         };
         let sent = socket
             .as_mut()
-            .is_some_and(|socket| socket.send(Message::Text(payload.clone().into())).is_ok());
+            .is_some_and(|socket| socket.send(Message::Text(payload.into())).is_ok());
         if !sent {
             socket = None;
-            healthy.store(false, Ordering::Release);
+            accepted_through = persisted_through.load(Ordering::Acquire);
+            next_send_at = Instant::now();
+            next_probe_at = Instant::now();
             thread::sleep(LIVE_RECONNECT_DELAY);
-            let mut resent = false;
-            if let Ok((mut connected, offset_ms)) = connect_live(endpoint, token) {
-                observe_clock(&clock, offset_ms);
-                if set_live_read_timeout(&mut connected, Some(LIVE_ACK_READ_TIMEOUT)).is_ok()
-                    && connected.send(Message::Text(payload.into())).is_ok()
-                {
-                    socket = Some(connected);
-                    resent = true;
-                }
-            }
-            if !resent {
-                requeue_reports(&pending, batch);
-            }
             continue;
         }
+        stats.live_batch_sent(batch.len());
 
-        next_send_at = Instant::now() + send_interval;
         let mut drop_socket = false;
         if let Some(socket) = socket.as_mut() {
-            if set_live_read_timeout(socket, Some(LIVE_ACK_READ_TIMEOUT)).is_err() {
-                drop_socket = true;
-            } else {
-                match read_live_ack(socket) {
-                    Ok(Some(Duration::ZERO)) => drop_socket = true,
-                    Ok(Some(interval)) => {
-                        healthy.store(true, Ordering::Release);
-                        send_interval = interval;
-                        next_send_at = Instant::now() + send_interval;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("live ACK read failed: {error}");
+            match wait_for_live_ack(socket, &remote_config) {
+                Ok(LiveRead::Closed) => drop_socket = true,
+                Ok(LiveRead::Ack(ack)) => {
+                    observe_persisted_through(&persisted_through, &ack);
+                    if ack.persistence_error {
+                        stats.live_persistence_failed();
                         drop_socket = true;
+                    } else {
+                        prune_live_queue(&pending, ack.persisted_through_ts);
+                        if let Some(timestamp) = batch.iter().map(|report| report.timestamp).max() {
+                            accepted_through = accepted_through.max(timestamp);
+                        }
+                        accepted_through = accepted_through.max(ack.persisted_through_ts);
+                        wss_interval = ack_wss_interval(&ack);
+                        next_send_at = Instant::now() + wss_interval;
+                        next_probe_at = Instant::now() + ack_d1_interval(&ack);
                     }
+                }
+                Ok(LiveRead::Config(config)) => {
+                    if let Ok(mut target) = remote_config.lock() {
+                        *target = Some(config);
+                    }
+                    drop_socket = true;
+                }
+                Ok(LiveRead::Pending) => {
+                    eprintln!("live ACK timed out");
+                    drop_socket = true;
+                }
+                Err(error) => {
+                    eprintln!("live ACK read failed: {error}");
+                    drop_socket = true;
                 }
             }
         }
         if drop_socket {
             socket = None;
-            healthy.store(false, Ordering::Release);
+            accepted_through = persisted_through.load(Ordering::Acquire);
+            next_send_at = Instant::now();
+            next_probe_at = Instant::now();
+            thread::sleep(LIVE_RECONNECT_DELAY);
         }
     }
 }
@@ -1887,15 +2071,13 @@ fn valid_endpoint(value: &str) -> bool {
     }
 }
 
-fn report_retry_delay(failures: u32, report_interval: u64) -> Duration {
-    if failures == 0 {
-        return Duration::from_secs(report_interval);
-    }
-    let exponent = failures.saturating_sub(1).min(16);
-    REPORT_RETRY_MIN
-        .checked_mul(1_u32 << exponent)
-        .unwrap_or(REPORT_RETRY_MAX)
-        .min(REPORT_RETRY_MAX)
+fn update_check_jitter(token: &str) -> Duration {
+    let digest = Sha256::digest(token.as_bytes());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    Duration::from_secs(
+        u64::from_be_bytes(bytes) % UPDATE_CHECK_JITTER_MAX_SECONDS.saturating_add(1),
+    )
 }
 
 fn prune_report_samples(samples: &mut Vec<Report>, now: i64) {
@@ -1910,6 +2092,83 @@ fn prune_report_samples(samples: &mut Vec<Report>, now: i64) {
             remaining -= report.latency_results.len();
         }
     }
+}
+
+fn pending_spool_path(token_file: &Path) -> PathBuf {
+    let name = token_file
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("nodeflare-token");
+    token_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{name}.pending.jsonl"))
+}
+
+fn load_pending_spool(path: &Path) -> Result<Vec<Report>> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if file.metadata()?.len() > MAX_PENDING_SPOOL_BYTES {
+        return Err("pending report spool is too large".into());
+    }
+    let mut samples = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.len() > MAX_PENDING_SPOOL_LINE_BYTES {
+            continue;
+        }
+        if let Ok(report) = serde_json::from_str::<Report>(&line) {
+            samples.push(report);
+        }
+    }
+    if samples.len() > LIVE_QUEUE_CAPACITY {
+        let overflow = samples.len() - LIVE_QUEUE_CAPACITY;
+        samples.drain(..overflow);
+    }
+    Ok(samples)
+}
+
+fn append_pending_spool(path: &Path, report: &Report) -> Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    serde_json::to_writer(&mut file, report)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn rewrite_pending_spool(path: &Path, samples: &[Report]) -> Result<()> {
+    if samples.is_empty() {
+        return match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        };
+    }
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("pending"),
+        std::process::id()
+    ));
+    let mut file = fs::File::create(&temporary)?;
+    #[cfg(unix)]
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    for report in samples {
+        serde_json::to_writer(&mut file, report)?;
+        file.write_all(b"\n")?;
+    }
+    file.sync_data()?;
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    fs::rename(&temporary, path)?;
+    Ok(())
 }
 
 fn normalized_version(value: &str) -> &str {
@@ -1928,10 +2187,11 @@ fn version_triplet(value: &str) -> Option<(u64, u64, u64)> {
 
 fn agent_artifact_name() -> Option<&'static str> {
     match (env::consts::OS, env::consts::ARCH) {
-        ("linux", "x86_64") => Some("agent-linux-x86_64"),
+        ("linux", "x86_64") => Some("agent-linux-x64"),
         ("linux", "aarch64") => Some("agent-linux-aarch64"),
-        ("windows", "x86_64") => Some("agent-windows-x86_64.exe"),
+        ("windows", "x86_64") => Some("agent-windows-x64.exe"),
         ("macos", "aarch64") => Some("agent-macos-aarch64"),
+        ("freebsd", "x86_64") => Some("agent-freebsd-x64"),
         _ => None,
     }
 }
@@ -1945,7 +2205,7 @@ fn executable_format_valid(path: &Path) -> bool {
         return false;
     }
     match env::consts::OS {
-        "linux" => magic == *b"\x7fELF",
+        "linux" | "freebsd" => magic == *b"\x7fELF",
         "windows" => magic.starts_with(b"MZ"),
         "macos" => matches!(
             magic,
@@ -2134,32 +2394,86 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         .build()
         .into();
     let mut collector = Collector::new(&config);
-    let mut next_report = Instant::now();
     let mut next_collect = Instant::now() + Duration::from_secs(config.collect_interval);
     let mut next_latency: HashMap<String, Instant> = HashMap::new();
-    let mut latency_executor = LatencyExecutor::new()?;
+    let stats = Arc::new(runtime_stats::RuntimeStats::default());
+    let mut latency_executor = LatencyExecutor::new(Arc::clone(&stats))?;
     let mut pending_results = Vec::new();
-    let mut pending_samples = Vec::new();
-    let mut report_failures = 0_u32;
-    let mut next_update_check = Instant::now();
-    let mut config_hash = String::new();
-    let mut live_was_healthy = false;
-    let clock = Arc::new(Mutex::new(ClockCalibration::default()));
-    if !print_only {
-        match fetch_clock_offset(&agent, &config.endpoint) {
-            Ok(offset_ms) => observe_clock(&clock, offset_ms),
-            Err(error) => eprintln!("server time calibration failed: {error}"),
+    let spool_path = pending_spool_path(&options.token_file);
+    let mut pending_samples = load_pending_spool(&spool_path).unwrap_or_else(|error| {
+        eprintln!("pending report spool ignored: {error}");
+        Vec::new()
+    });
+    let loaded_len = pending_samples.len();
+    let loaded_latency = pending_samples
+        .iter()
+        .map(|report| report.latency_results.len())
+        .sum::<usize>();
+    prune_report_samples(&mut pending_samples, unix_timestamp());
+    if loaded_len != pending_samples.len()
+        || loaded_latency
+            != pending_samples
+                .iter()
+                .map(|report| report.latency_results.len())
+                .sum::<usize>()
+    {
+        if let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples) {
+            eprintln!("pending report spool cleanup failed: {error}");
         }
     }
-    let live = (!once && !print_only)
-        .then(|| LiveSender::start(&config, Arc::clone(&clock)))
+    let mut last_emitted_timestamp = pending_samples
+        .iter()
+        .map(|report| report.timestamp)
+        .max()
+        .unwrap_or(0);
+    let mut next_update_check = Instant::now() + update_check_jitter(&config.token);
+    let mut next_stats_log = Instant::now() + RUNTIME_STATS_INTERVAL;
+    let clock = Arc::new(Mutex::new(ClockCalibration::default()));
+    let live = (!print_only)
+        .then(|| LiveSender::start(&config, Arc::clone(&clock), Arc::clone(&stats)))
         .transpose()?;
-    loop {
-        let live_healthy = live.as_ref().is_some_and(LiveSender::is_healthy);
-        if live_was_healthy && !live_healthy {
-            next_report = Instant::now();
+    if let Some(live) = &live {
+        for report in &pending_samples {
+            live.send(report);
         }
-        live_was_healthy = live_healthy;
+    }
+    let once_deadline = (once && !print_only).then(|| Instant::now() + ONCE_WSS_TIMEOUT);
+    let mut once_target_timestamp = None;
+    loop {
+        if let Some(live) = &live {
+            let persisted_through = live.persisted_through();
+            let before = pending_samples.len();
+            pending_samples.retain(|report| report.timestamp > persisted_through);
+            stats.persisted_samples_pruned(before.saturating_sub(pending_samples.len()));
+            if before != pending_samples.len() {
+                if let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples) {
+                    eprintln!("pending report spool compaction failed: {error}");
+                }
+            }
+            if once_target_timestamp.is_some_and(|target| persisted_through >= target) {
+                return Ok(());
+            }
+            if let Some(remote) = live.take_remote_config() {
+                let previous_collect_interval = config.collect_interval;
+                let previous_report_interval = config.report_interval;
+                if apply_remote(&mut config, &remote) {
+                    next_latency.clear();
+                }
+                if config.collect_interval != previous_collect_interval {
+                    next_collect = Instant::now() + Duration::from_secs(config.collect_interval);
+                }
+                if config.collect_interval != previous_collect_interval
+                    || config.report_interval != previous_report_interval
+                {
+                    live.set_send_interval(config.report_interval, config.collect_interval);
+                }
+            }
+        }
+        if once_target_timestamp.is_some()
+            && once_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err("WSS report persistence acknowledgement timed out".into());
+        }
         pending_results.extend(latency_executor.drain());
         let current = Instant::now();
         let due = config
@@ -2183,23 +2497,41 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             }
         }
 
-        if Instant::now() >= next_collect {
+        if Instant::now() >= next_collect && (!once || once_target_timestamp.is_none()) {
             let offset_ms = shared_clock_offset(&clock);
             let mut latest_results = HashMap::new();
             for mut result in std::mem::take(&mut pending_results) {
                 result.timestamp = corrected_timestamp(result.timestamp, offset_ms);
                 latest_results.insert(result.task_id.clone(), result);
             }
+            let collection_started = Instant::now();
             let mut report = collector.collect(&config, latest_results.into_values().collect(), 0);
-            report.timestamp = corrected_timestamp(unix_timestamp(), offset_ms);
+            stats.collection_finished(collection_started.elapsed());
+            let persisted_through = live.as_ref().map_or(0, LiveSender::persisted_through);
+            report.timestamp = monotonic_report_timestamp(
+                corrected_timestamp(unix_timestamp(), offset_ms),
+                last_emitted_timestamp,
+                persisted_through,
+            );
+            last_emitted_timestamp = report.timestamp;
             if print_only {
                 println!("{}", serde_json::to_string_pretty(&report)?);
                 return Ok(());
             }
+            append_pending_spool(&spool_path, &report)
+                .map_err(|error| format!("pending report spool append failed: {error}"))?;
             if let Some(live) = &live {
                 live.send(&report);
             }
+            if once {
+                once_target_timestamp = Some(report.timestamp);
+            }
             pending_samples.push(report);
+            let before_prune = pending_samples.len();
+            let latency_before_prune = pending_samples
+                .iter()
+                .map(|report| report.latency_results.len())
+                .sum::<usize>();
             prune_report_samples(
                 &mut pending_samples,
                 corrected_timestamp(unix_timestamp(), offset_ms),
@@ -2207,6 +2539,18 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             if pending_samples.len() > LIVE_QUEUE_CAPACITY {
                 let overflow = pending_samples.len() - LIVE_QUEUE_CAPACITY;
                 pending_samples.drain(..overflow);
+                stats.live_queue_dropped(overflow);
+            }
+            if before_prune != pending_samples.len()
+                || latency_before_prune
+                    != pending_samples
+                        .iter()
+                        .map(|report| report.latency_results.len())
+                        .sum::<usize>()
+            {
+                if let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples) {
+                    eprintln!("pending report spool compaction failed: {error}");
+                }
             }
             next_collect = advance_deadline(
                 next_collect,
@@ -2215,85 +2559,41 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             );
         }
 
-        if Instant::now() >= next_report && !pending_samples.is_empty() {
-            let sync_result = if live_healthy {
-                fetch_remote_config(&agent, &config, &config_hash).map(|result| (result, false))
-            } else {
-                submit(&agent, &config, &pending_samples, &config_hash).map(|result| (result, true))
-            };
-            let sync_failed = sync_result.is_err();
-            match sync_result {
-                Ok((result, submitted_metrics)) => {
-                    observe_clock(&clock, result.clock_offset_ms);
-                    if submitted_metrics {
-                        pending_samples.clear();
-                    }
-                    report_failures = 0;
-                    config_hash = result.config_hash;
-                    if let Some(remote) = result.config {
-                        let previous_collect_interval = config.collect_interval;
-                        let previous_report_interval = config.report_interval;
-                        if apply_remote(&mut config, &remote) {
-                            next_latency.clear();
-                        }
-                        if config.collect_interval != previous_collect_interval {
-                            next_collect =
-                                Instant::now() + Duration::from_secs(config.collect_interval);
-                        }
-                        if config.collect_interval != previous_collect_interval
-                            || config.report_interval != previous_report_interval
-                        {
-                            if let Some(live) = &live {
-                                live.set_send_interval(
-                                    config.report_interval,
-                                    config.collect_interval,
-                                );
-                            }
-                        }
-                    }
-                    if !once && config.auto_update && Instant::now() >= next_update_check {
-                        match update(&agent, &config.agent_mirror) {
-                            Ok(true) => return Ok(()),
-                            Ok(false) => {
-                                next_update_check = Instant::now() + UPDATE_CHECK_INTERVAL;
-                            }
-                            Err(error) => {
-                                eprintln!("agent update failed: {error}");
-                                next_update_check = Instant::now() + UPDATE_RETRY_INTERVAL;
-                            }
-                        }
-                    }
-                }
+        if !once
+            && config.auto_update
+            && pending_samples.is_empty()
+            && Instant::now() >= next_update_check
+        {
+            match update(&agent, &config.agent_mirror) {
+                Ok(true) => return Ok(()),
+                Ok(false) => next_update_check = Instant::now() + UPDATE_CHECK_INTERVAL,
                 Err(error) => {
-                    if live_healthy {
-                        eprintln!("config sync failed: {error}");
-                    } else {
-                        eprintln!("report failed: {error}");
-                        report_failures = report_failures.saturating_add(1);
-                    }
-                    if once {
-                        return Err(error);
-                    }
+                    eprintln!("agent update failed: {error}");
+                    next_update_check = Instant::now() + UPDATE_RETRY_INTERVAL;
                 }
-            }
-            let retry_delay = if live_healthy && sync_failed {
-                REPORT_RETRY_MIN
-            } else {
-                report_retry_delay(report_failures, config.report_interval)
-            };
-            next_report = Instant::now() + retry_delay;
-            if once {
-                return Ok(());
             }
         }
+        if Instant::now() >= next_stats_log {
+            stats.log_and_reset();
+            next_stats_log = Instant::now() + RUNTIME_STATS_INTERVAL;
+        }
 
+        let collect_wake_at = if once_target_timestamp.is_some() {
+            once_deadline.unwrap_or(next_collect)
+        } else {
+            next_collect
+        };
+        let maintenance_wake_at = if config.auto_update && pending_samples.is_empty() {
+            next_stats_log.min(next_update_check)
+        } else {
+            next_stats_log
+        };
         let wake_at = next_latency
             .values()
             .copied()
             .min()
-            .map_or(next_report.min(next_collect), |deadline| {
-                deadline.min(next_report).min(next_collect)
-            });
+            .map_or(collect_wake_at, |deadline| deadline.min(collect_wake_at))
+            .min(maintenance_wake_at);
         let wait = wake_at
             .saturating_duration_since(Instant::now())
             .min(Duration::from_secs(1));
@@ -2315,19 +2615,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use super::{
-        ack_interval, advance_deadline, clock_offset_from_http_date, corrected_timestamp,
-        gpu_name_from_uevent, is_public_probe_ip, live_endpoint, live_update_payload,
-        normalized_version, parse_lspci_gpu_names, parse_probe_target,
-        parse_system_profiler_gpu_names, ping_latency, prune_report_samples, release_asset_sha256,
-        sanitize_latency_tasks, valid_endpoint, version_triplet, CliOptions, ClockCalibration,
-        GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, Report, CLOCK_CALIBRATION_MAX_AGE,
-        MAX_LATENCY_TASKS, MAX_PENDING_LATENCY_RESULTS,
+        ack_d1_interval, ack_wss_interval, advance_deadline, clock_offset_from_http_date,
+        corrected_timestamp, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
+        live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
+        parse_pciconf_gpu_names, parse_probe_target, parse_system_profiler_gpu_names,
+        ping_latencies, ping_latency, prune_report_samples, release_asset_sha256,
+        sanitize_latency_tasks, update_check_jitter, valid_endpoint, version_triplet, CliOptions,
+        ClockCalibration, GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, Report,
+        CLOCK_CALIBRATION_MAX_AGE, MAX_LATENCY_TASKS, MAX_PENDING_LATENCY_RESULTS,
+        UPDATE_CHECK_JITTER_MAX_SECONDS,
     };
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
     use super::connection_counts_from_netstat;
     #[cfg(target_os = "linux")]
     use super::disk_device;
@@ -2347,6 +2650,19 @@ mod tests {
 
         let profiler = "Graphics/Displays:\n\n    Apple M3 Max:\n\n      Chipset Model: Apple M3 Max\n      Metal Support: Metal 3";
         assert_eq!(parse_system_profiler_gpu_names(profiler), ["Apple M3 Max"]);
+
+        let pciconf = "vgapci0@pci0:0:2:0:\tclass=0x030000 rev=0x02 hdr=0x00 vendor=0x8086\n\
+                       \tvendor     = 'Intel Corporation'\n\
+                       \tdevice     = 'UHD Graphics 630'\n\
+                       \tclass      = display\n\
+                       em0@pci0:0:25:0:\tclass=0x020000 rev=0x05 hdr=0x00 vendor=0x8086\n\
+                       \tvendor     = 'Intel Corporation'\n\
+                       \tdevice     = 'Ethernet Connection'\n\
+                       \tclass      = network";
+        assert_eq!(
+            parse_pciconf_gpu_names(pciconf),
+            ["Intel Corporation UHD Graphics 630"]
+        );
 
         assert_eq!(
             gpu_name_from_uevent("DRIVER=i915\nPCI_CLASS=30000\nPCI_ID=8086:591B"),
@@ -2380,7 +2696,7 @@ mod tests {
     fn validates_release_asset_digests() {
         let hash = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
         let mut asset = GithubReleaseAsset {
-            name: "agent-linux-x86_64".to_string(),
+            name: "agent-linux-x64".to_string(),
             browser_download_url: "https://example.com/agent".to_string(),
             digest: Some(format!("sha256:{hash}")),
         };
@@ -2414,31 +2730,37 @@ mod tests {
     fn builds_live_websocket_endpoints() {
         assert_eq!(
             live_endpoint("https://monitor.example.com").unwrap(),
-            "wss://monitor.example.com/api/agent/live"
+            "wss://monitor.example.com/api/agent/ws"
         );
         assert_eq!(
             live_endpoint("https://monitor.example.com/base/").unwrap(),
-            "wss://monitor.example.com/base/api/agent/live"
+            "wss://monitor.example.com/base/api/agent/ws"
         );
         assert_eq!(
             live_endpoint("http://127.0.0.1:8787").unwrap(),
-            "ws://127.0.0.1:8787/api/agent/live"
+            "ws://127.0.0.1:8787/api/agent/ws"
         );
     }
 
     #[test]
     fn accepts_server_realtime_ack_interval() {
         let ack: LiveAck = serde_json::from_str(
-            r#"{"type":"ack","ts":100,"persisted":false,"nextD1WriteAfterMs":60000,"nextWssReportAfterMs":5000,"realtimeHint":false}"#,
+            r#"{"type":"ack","ts":100,"persisted":false,"persistenceError":false,"persistedThroughTs":90,"nextD1WriteAfterMs":60000,"nextWssReportAfterMs":5000,"realtimeHint":false}"#,
         )
         .unwrap();
-        assert_eq!(ack_interval(&ack), Duration::from_secs(5));
+        assert_eq!(ack_wss_interval(&ack), Duration::from_secs(5));
+        assert_eq!(ack_d1_interval(&ack), Duration::from_secs(60));
         let slow: LiveAck = serde_json::from_str(
-            r#"{"type":"ack","ts":100,"persisted":true,"nextD1WriteAfterMs":60000,"nextWssReportAfterMs":1,"realtimeHint":true}"#,
+            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextD1WriteAfterMs":60000,"nextWssReportAfterMs":1,"realtimeHint":true}"#,
         )
         .unwrap();
-        assert_eq!(ack_interval(&slow), Duration::from_secs(1));
+        assert_eq!(ack_wss_interval(&slow), Duration::from_secs(1));
         assert!(slow.realtime_hint);
+        let idle: LiveAck = serde_json::from_str(
+            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextD1WriteAfterMs":120000,"nextWssReportAfterMs":3600000,"realtimeHint":false}"#,
+        )
+        .unwrap();
+        assert_eq!(ack_d1_interval(&idle), Duration::from_secs(120));
     }
 
     #[test]
@@ -2475,6 +2797,9 @@ mod tests {
         );
         assert_eq!(corrected_timestamp(100, 2_500), 102);
         assert_eq!(corrected_timestamp(100, -2_500), 97);
+        assert_eq!(monotonic_report_timestamp(97, 100, 90), 101);
+        assert_eq!(monotonic_report_timestamp(110, 100, 120), 121);
+        assert_eq!(monotonic_report_timestamp(130, 120, 110), 130);
     }
 
     #[test]
@@ -2494,25 +2819,32 @@ mod tests {
             "nodeflare",
             "-e",
             "https://monitor.example.com",
-            "-t",
-            "secret",
+            "--token-file",
+            "/run/nodeflare/token",
             "-i",
             "60",
             "--once",
         ])
         .unwrap();
         assert_eq!(parsed.endpoint, "https://monitor.example.com");
-        assert_eq!(parsed.token, "secret");
+        assert_eq!(parsed.token_file, PathBuf::from("/run/nodeflare/token"));
         assert_eq!(parsed.interval, 60);
         assert!(parsed.once);
-        assert!(CliOptions::try_parse_from(["nodeflare", "-t"]).is_err());
-        assert!(CliOptions::try_parse_from(["nodeflare", "-t", "first", "-t", "second"]).is_err());
+        assert!(CliOptions::try_parse_from(["nodeflare", "--token-file"]).is_err());
+        assert!(CliOptions::try_parse_from([
+            "nodeflare",
+            "--token-file",
+            "first",
+            "--token-file",
+            "second"
+        ])
+        .is_err());
         assert!(CliOptions::try_parse_from([
             "nodeflare",
             "-e",
             "https://monitor.example.com",
-            "-t",
-            "secret",
+            "--token-file",
+            "/run/nodeflare/token",
             "-s",
             "server-a",
         ])
@@ -2608,7 +2940,7 @@ mod tests {
         assert_eq!(samples.last().unwrap().latency_results.len(), 1);
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
     #[test]
     fn parses_netstat_connection_counts() {
         let output = "tcp4 0 0 host.443 peer.1 ESTABLISHED\nudp4 0 0 *.5353 *.*\nTCP host peer ESTABLISHED\n";
@@ -2671,5 +3003,16 @@ mod tests {
         assert_eq!(ping_latency("64 bytes time=12.34 ms"), Some(12.34));
         assert_eq!(ping_latency("64 bytes time<1 ms"), Some(0.5));
         assert_eq!(ping_latency("unreachable"), None);
+        assert_eq!(
+            ping_latencies("reply time=12.34 ms\nrequest timeout\nreply time=8.5 ms"),
+            vec![12.34, 8.5]
+        );
+    }
+
+    #[test]
+    fn update_check_jitter_is_stable_and_bounded() {
+        let first = update_check_jitter("agent-token");
+        assert_eq!(first, update_check_jitter("agent-token"));
+        assert!(first.as_secs() <= UPDATE_CHECK_JITTER_MAX_SECONDS);
     }
 }

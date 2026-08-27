@@ -2,9 +2,9 @@ use std::{collections::BTreeMap, time::Duration};
 
 use serde::Serialize;
 use serde_json::Value;
-use worker::{D1Database, Error, Method, Request, Result};
+use worker::{D1Database, Error, Headers, Method, Request, RequestInit, Result};
 
-use crate::outbound::fetch_with_timeout;
+use crate::outbound::{fetch_with_timeout, read_json_limited};
 
 use crate::{cloudflare, db};
 
@@ -13,6 +13,7 @@ const PRIMARY_URL: &str = "https://open.er-api.com/v6/latest/CNY";
 const FALLBACK_URL: &str = "https://api.frankfurter.dev/v1/latest?base=CNY";
 const REFRESH_INTERVAL: i64 = 86_400;
 const RETRY_INTERVAL: i64 = 3_600;
+const UPSTREAM_JSON_MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Debug)]
 struct FetchedRates {
@@ -133,11 +134,12 @@ fn parse_er_api(value: &Value) -> Option<FetchedRates> {
 }
 
 async fn fetch_json(url: &str) -> Result<Value> {
-    let request = Request::new(url, Method::Get)?;
-    request.headers().set("Accept", "application/json")?;
-    request
-        .headers()
-        .set("User-Agent", "NodeFlare-Exchange-Rates")?;
+    let headers = Headers::new();
+    headers.set("Accept", "application/json")?;
+    headers.set("User-Agent", "NodeFlare-Exchange-Rates")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    let request = Request::new_with_init(url, &init)?;
     let Some(mut response) = fetch_with_timeout(request, Duration::from_secs(8)).await? else {
         return Err(Error::RustError(
             "exchange-rate upstream request timed out".to_string(),
@@ -149,7 +151,7 @@ async fn fetch_json(url: &str) -> Result<Value> {
             "exchange-rate upstream returned HTTP {status}"
         )));
     }
-    response.json().await
+    read_json_limited(&mut response, UPSTREAM_JSON_MAX_BYTES).await
 }
 
 async fn fetch_latest() -> Result<FetchedRates> {

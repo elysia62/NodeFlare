@@ -201,6 +201,21 @@ pub async fn task_count(db: &D1Database) -> Result<i64> {
         .ok_or_else(|| worker::Error::RustError("无法读取延迟任务数量".to_string()))
 }
 
+pub async fn server_ids_for_task(db: &D1Database, task_id: &str) -> Result<Vec<String>> {
+    let assignments: Vec<AssignmentRow> = db
+        .prepare(
+            "SELECT task_id, server_id FROM latency_task_servers WHERE task_id = ?1 ORDER BY server_id ASC",
+        )
+        .bind(&[text(task_id)])?
+        .all()
+        .await?
+        .results()?;
+    Ok(assignments
+        .into_iter()
+        .map(|assignment| assignment.server_id)
+        .collect())
+}
+
 pub async fn tasks_for_server(db: &D1Database, server_id: &str) -> Result<Vec<AgentLatencyTask>> {
     db.prepare(
         "SELECT t.id, t.name, t.task_type, t.target, t.port, t.interval_seconds \
@@ -342,14 +357,6 @@ pub async fn latest_all(db: &D1Database) -> Result<Vec<LatencySample>> {
     db.prepare(latest_query(None)).all().await?.results()
 }
 
-pub async fn latest_for_server(db: &D1Database, server_id: &str) -> Result<Vec<LatencySample>> {
-    db.prepare(latest_query(Some("a.server_id = ?1")))
-        .bind(&[text(server_id)])?
-        .all()
-        .await?
-        .results()
-}
-
 fn latest_query(filter: Option<&str>) -> String {
     let filter = filter.map_or(String::new(), |value| format!("WHERE {value}"));
     format!(
@@ -360,7 +367,9 @@ fn latest_query(filter: Option<&str>) -> String {
            INNER JOIN latency_tasks t ON t.id = a.task_id {filter} \
          ), latest AS ( \
            SELECT assignments.*, COALESCE( \
-             (SELECT j.value FROM metric_history h, json_each(h.latency_json) j \
+             (SELECT j.value FROM (SELECT * FROM metric_history \
+                                   UNION ALL SELECT * FROM metric_history_old) h, \
+                                  json_each(h.latency_json) j \
               WHERE h.server_id = assignments.server_id \
                 AND json_extract(j.value, '$.task_id') = assignments.task_id \
                 AND CAST(json_extract(j.value, '$.latest_timestamp') AS INTEGER) >= assignments.assigned_at \
@@ -379,8 +388,21 @@ fn latest_query(filter: Option<&str>) -> String {
     )
 }
 
+/// 把一张历史表的 `latency_json` 摊平成延迟样本行。
+fn latency_samples_from(table: &str) -> String {
+    format!(
+        "SELECT h.server_id, h.timestamp, json_extract(j.value, '$.task_id') AS task_id, \
+           CAST(json_extract(j.value, '$.latency_ms') AS REAL) AS latency_ms, \
+           CAST(json_extract(j.value, '$.packet_loss') AS REAL) AS packet_loss, \
+           CAST(json_extract(j.value, '$.sample_count') AS INTEGER) AS sample_count, \
+           CAST(json_extract(j.value, '$.success_count') AS INTEGER) AS success_count, \
+           CAST(json_extract(j.value, '$.latest_timestamp') AS INTEGER) AS latest_timestamp \
+         FROM {table} h, json_each(h.latency_json) j"
+    )
+}
+
 pub async fn history(db: &D1Database, server_id: &str, hours: i64) -> Result<Vec<LatencySample>> {
-    let hours = hours.clamp(1, 24 * 365);
+    let hours = hours.clamp(1, 24 * crate::db::MAX_HISTORY_RETENTION_DAYS);
     let cutoff = (Date::now().as_millis() as i64 / 1000) - hours * 3600;
     let task_count = db
         .prepare("SELECT COUNT(*) AS count FROM latency_task_servers WHERE server_id = ?1")
@@ -392,33 +414,16 @@ pub async fn history(db: &D1Database, server_id: &str, hours: i64) -> Result<Vec
         return Ok(Vec::new());
     }
     let bucket = history_bucket_seconds(hours, task_count);
-    let source = if hours <= 24 {
-        "SELECT h.server_id, h.timestamp, json_extract(j.value, '$.task_id') AS task_id, \
-           CAST(json_extract(j.value, '$.latency_ms') AS REAL) AS latency_ms, \
-           CAST(json_extract(j.value, '$.packet_loss') AS REAL) AS packet_loss, \
-           CAST(json_extract(j.value, '$.sample_count') AS INTEGER) AS sample_count, \
-           CAST(json_extract(j.value, '$.success_count') AS INTEGER) AS success_count, \
-           CAST(json_extract(j.value, '$.latest_timestamp') AS INTEGER) AS latest_timestamp \
-         FROM metric_history h, json_each(h.latency_json) j"
-            .to_string()
-    } else {
-        "SELECT h.server_id, h.timestamp, json_extract(j.value, '$.task_id') AS task_id, \
-           CAST(json_extract(j.value, '$.latency_ms') AS REAL) AS latency_ms, \
-           CAST(json_extract(j.value, '$.packet_loss') AS REAL) AS packet_loss, \
-           CAST(json_extract(j.value, '$.sample_count') AS INTEGER) AS sample_count, \
-           CAST(json_extract(j.value, '$.success_count') AS INTEGER) AS success_count, \
-           CAST(json_extract(j.value, '$.latest_timestamp') AS INTEGER) AS latest_timestamp \
-         FROM metric_history h, json_each(h.latency_json) j \
-         UNION ALL \
-         SELECT h.server_id, h.timestamp, json_extract(j.value, '$.task_id') AS task_id, \
-           CAST(json_extract(j.value, '$.latency_ms') AS REAL) AS latency_ms, \
-           CAST(json_extract(j.value, '$.packet_loss') AS REAL) AS packet_loss, \
-           CAST(json_extract(j.value, '$.sample_count') AS INTEGER) AS sample_count, \
-           CAST(json_extract(j.value, '$.success_count') AS INTEGER) AS success_count, \
-           CAST(json_extract(j.value, '$.latest_timestamp') AS INTEGER) AS latest_timestamp \
-         FROM metric_history_hourly h, json_each(h.latency_json) j"
-            .to_string()
-    };
+    // 分钟历史分两代（见 db::RECENT_HISTORY），近期区间必须都读。
+    let mut tables = vec!["metric_history", "metric_history_old"];
+    if hours > 24 {
+        tables.push("metric_history_hourly");
+    }
+    let source = tables
+        .into_iter()
+        .map(latency_samples_from)
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
     let query = format!(
         "SELECT h.task_id, h.server_id, t.name, t.task_type, t.target, t.port, \
          (h.timestamp / {bucket}) * {bucket} AS timestamp, \
@@ -441,7 +446,7 @@ pub async fn history(db: &D1Database, server_id: &str, hours: i64) -> Result<Vec
 }
 
 fn history_bucket_seconds(hours: i64, task_count: i64) -> i64 {
-    let hours = hours.clamp(1, 24 * 365);
+    let hours = hours.clamp(1, 24 * crate::db::MAX_HISTORY_RETENTION_DAYS);
     let task_count = task_count.clamp(1, MAX_LATENCY_TASKS as i64);
     let base = match hours {
         1 => 60,

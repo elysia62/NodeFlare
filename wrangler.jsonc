@@ -21,6 +21,7 @@
       "/admin",
       "/admin/*",
       "/admin-assets/*",
+      "/__scheduled",
       "/__theme-active/*",
       "/__theme-preview/*"
     ]

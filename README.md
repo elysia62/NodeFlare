@@ -1,6 +1,6 @@
 # NodeFlare
 
-基于 Rust、WebAssembly 和 Cloudflare Workers 的服务器监控，支持 Linux、Windows 和 macOS Agent。
+基于 Rust、WebAssembly 和 Cloudflare Workers 的服务器监控，支持 Linux、Windows、macOS 和 FreeBSD Agent。
 
 ## 界面预览
 
@@ -14,14 +14,14 @@
 - TCP/ICMP 延迟检测，可按节点分配测试点和周期
 - NodeFlare Glass 风格总览、节点卡片、搜索/分组筛选、响应式深浅主题
 - 节点详情与历史图表，支持实时、1/4/24/168/720 小时范围
-- WebSocket 实时刷新，断线后自动轮询
+- WebSocket 实时刷新与 Agent WSS 上报
 - 计费、到期、流量和多币种资产统计，Worker 每日更新汇率
 - 用户名密码登录、Cloudflare Turnstile 和节点隐藏
 - 节点管理、批量删除、拖拽排序和 Agent 在线配置
-- Telegram 通知、资源告警、离线/到期提醒和数据维护
+- Telegram 通知、失败重试、资源/流量/离线/到期提醒和数据维护
 - 内置 NodeFlare Glass 主题，并提供远程主题商店
 - 远程主题支持 GitHub 仓库地址（默认 `main` 分支，也可用 `tree` 指定分支或子目录），Worker 代理 `index.html` 与 `assets/`
-- Rust Agent 支持 Linux x86_64/ARM64、Windows x86_64 和 macOS ARM64，可按节点自动更新
+- Rust Agent 支持 Linux x64/ARM64、Windows x64、macOS ARM64 和 FreeBSD x64，可按节点自动更新
 
 ## 部署到 Cloudflare
 
@@ -37,14 +37,22 @@
 | `TURNSTILE_SITE_KEY` | 可选 | Turnstile Site Key，无需加密；也可在后台设置 |
 | `TURNSTILE_SECRET_KEY` | 可选 | Turnstile Secret Key，勾选“加密”；也可在后台设置 |
 | `OFFLINE_THRESHOLD_SECONDS` | 可选 | 离线判定秒数，未设置时使用 180，范围 30-3600 |
-| `HISTORY_RETENTION_DAYS` | 可选 | 历史保留天数，未设置时使用 30，范围 1-365 |
+| `HISTORY_RETENTION_DAYS` | 可选 | 历史保留天数，未设置时使用 30，范围 1-30 |
 | `CF_USAGE_ACCOUNT_ID` | 可选 | Cloudflare 用量查询的账户 ID，不设置则不启用用量查询 |
 | `CF_USAGE_API_TOKEN` | 可选 | 用量查询 Token，勾选“加密”；需要 Account Analytics: Read，并授权对应账户 |
 
 ## Agent 卸载
 
+Linux：
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh | sudo sh -s -- --uninstall
+```
+
+FreeBSD：
+
+```sh
+fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-freebsd.sh | sudo sh -s -- --uninstall
 ```
 
 ## API
@@ -58,9 +66,7 @@ curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agen
 | `GET` | `/api/history/:id?hours=24` | 节点历史 |
 | `GET` | `/api/latency/:id?hours=24` | 节点延迟任务历史 |
 | `GET` | `/api/ws` | 实时 WebSocket |
-| `GET` | `/api/agent/live` | Agent 实时指标 WebSocket |
-| `GET` | `/api/agent/config` | Agent 配置同步，节点 Bearer Token |
-| `POST` | `/api/agent/report` | Agent 上报，节点 Bearer Token |
+| `GET` | `/api/agent/ws` | Agent 配置同步与指标上报 WebSocket，节点 Bearer Token |
 | `POST` | `/api/admin/login` | 管理登录 |
 | `POST` | `/api/admin/logout` | 退出登录（清除会话 Cookie） |
 | `GET/POST` | `/api/admin/servers` | 管理节点 |
@@ -69,6 +75,8 @@ curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agen
 | `PATCH/DELETE` | `/api/admin/latency-tasks/:id` | 编辑或删除延迟任务 |
 | `GET/POST` | `/api/admin/alert-rules` | 查询或创建资源告警规则 |
 | `PATCH/DELETE` | `/api/admin/alert-rules/:id` | 编辑或删除资源告警规则 |
+| `GET/PUT` | `/api/admin/telegram` | 读写 Telegram 通知配置 |
+| `POST` | `/api/admin/telegram/test` | 发送 Telegram 测试消息 |
 | `PATCH/DELETE` | `/api/admin/servers/:id` | 编辑或删除节点 |
 | `PATCH` | `/api/admin/servers/order` | 更新全部节点顺序 |
 | `DELETE` | `/api/admin/servers` | 批量删除节点 |
@@ -83,7 +91,6 @@ curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agen
 | `GET` | `/api/admin/cloudflare-usage` | 查询 UTC 今日/昨日的 D1、Workers 与 Durable Objects 用量 |
 | `POST` | `/api/admin/exchange-rates/refresh` | 立即拉取并更新 D1 汇率快照 |
 | `DELETE` | `/api/admin/history` | 清理历史指标 |
-| `POST` | `/api/admin/notifications/test` | 发送一条通知测试消息 |
 
 ## 主题
 

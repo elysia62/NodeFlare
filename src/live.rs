@@ -1,15 +1,21 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use crate::db::{AgentLiveContext, AlertMetricRow, HistoryMetricAggregate};
+use crate::db::{
+    AgentLiveContext, AlertMetricRow, HistoryMetricAggregate, HISTORY_WRITE_INTERVAL_SECONDS,
+};
 use crate::latency::LatencyMetricAggregates;
-use crate::models::{AgentReport, AlertRuleView, HistoryPoint, ServerView};
+use crate::models::{AgentConfigView, AgentReport, AlertRuleView, HistoryPoint, ServerView};
 
 const MAX_LIVE_SAMPLES: usize = 720;
 const MAX_LIVE_LATENCY_RESULTS: usize = 4096;
+const AGENT_MESSAGE_WINDOW_SECONDS: i64 = 60;
+const MAX_AGENT_MESSAGES_PER_WINDOW: u32 = 120;
+const MAX_AGENT_SAMPLES_PER_WINDOW: u32 = 1440;
+const MAX_AGENT_BYTES_PER_WINDOW: u32 = 4 * 1024 * 1024;
 const LIVE_REPORT_DIVISOR: i64 = 15;
 const MAX_SERIALIZED_ATTACHMENT_BYTES: usize = 15 * 1024;
 const MAX_CACHED_LIVE_SAMPLES: usize = 32;
@@ -20,8 +26,11 @@ const CACHED_LIVE_TTL_SECONDS: i64 = 5 * 60;
 const ALERT_WINDOW_SECONDS: i64 = 24 * 60 * 60;
 const MAX_ALERT_WINDOW_SAMPLES: usize = 24 * 60 + 1;
 const ALERT_STORAGE_PREFIX: &str = "resource-alert:";
-const ALERT_COLLECTION_STATE_KEY: &str = "resource-alert-enabled-until";
-const ALERT_COLLECTION_LEASE_SECONDS: i64 = 10 * 60;
+const DASHBOARD_HUB_NAME: &str = "dashboard";
+
+fn server_hub_name(server_id: &str) -> String {
+    format!("server:{server_id}")
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct AlertWindowSample(i64, u32, f64, f64, f64, f64, f64);
@@ -165,6 +174,8 @@ fn evaluate_alert_window(
 struct AgentLiveBatch {
     #[serde(rename = "type")]
     message_type: String,
+    #[serde(rename = "batchId")]
+    batch_id: String,
     samples: Vec<AgentReport>,
 }
 
@@ -198,6 +209,45 @@ struct CachedLiveSample {
     data: serde_json::Value,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct AgentMessageBudget {
+    #[serde(rename = "w")]
+    window_started_at: i64,
+    #[serde(rename = "m")]
+    messages: u32,
+    #[serde(rename = "s")]
+    samples: u32,
+    #[serde(rename = "b")]
+    bytes: u32,
+}
+
+fn consume_agent_message_budget(
+    budget: &mut AgentMessageBudget,
+    now: i64,
+    message_bytes: usize,
+    sample_count: usize,
+) -> bool {
+    if budget.window_started_at <= 0
+        || now < budget.window_started_at
+        || now.saturating_sub(budget.window_started_at) >= AGENT_MESSAGE_WINDOW_SECONDS
+    {
+        *budget = AgentMessageBudget {
+            window_started_at: now,
+            ..AgentMessageBudget::default()
+        };
+    }
+    budget.messages = budget.messages.saturating_add(1);
+    budget.samples = budget
+        .samples
+        .saturating_add(u32::try_from(sample_count).unwrap_or(u32::MAX));
+    budget.bytes = budget
+        .bytes
+        .saturating_add(u32::try_from(message_bytes).unwrap_or(u32::MAX));
+    budget.messages <= MAX_AGENT_MESSAGES_PER_WINDOW
+        && budget.samples <= MAX_AGENT_SAMPLES_PER_WINDOW
+        && budget.bytes <= MAX_AGENT_BYTES_PER_WINDOW
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SocketAttachment {
     #[serde(rename = "r")]
@@ -212,6 +262,8 @@ struct SocketAttachment {
     collect_interval: i64,
     #[serde(rename = "dw")]
     last_d1_write_at: i64,
+    #[serde(rename = "pw")]
+    persisted_through: i64,
     #[serde(rename = "df")]
     d1_flush: Option<D1FlushSnapshot>,
     #[serde(rename = "tr")]
@@ -224,6 +276,8 @@ struct SocketAttachment {
     latest_samples: Vec<CachedLiveSample>,
     #[serde(rename = "lr")]
     latest_received_at: i64,
+    #[serde(rename = "mb")]
+    message_budget: AgentMessageBudget,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -247,12 +301,18 @@ fn begin_d1_flush(attachment: &mut SocketAttachment) -> Option<D1FlushSnapshot> 
     Some(snapshot)
 }
 
-fn finish_d1_flush(attachment: &mut SocketAttachment, succeeded: bool, persisted_at: i64) {
+fn finish_d1_flush(
+    attachment: &mut SocketAttachment,
+    succeeded: bool,
+    persisted_at: i64,
+    persisted_through: i64,
+) {
     let Some(snapshot) = attachment.d1_flush.take() else {
         return;
     };
     if succeeded {
         attachment.last_d1_write_at = persisted_at;
+        attachment.persisted_through = attachment.persisted_through.max(persisted_through);
     } else {
         attachment.history_aggregate.merge(snapshot.history);
         attachment.latency_aggregates.merge(snapshot.latency);
@@ -275,7 +335,7 @@ fn next_d1_write_ms(attachment: &SocketAttachment, now: i64) -> i64 {
     if attachment.d1_flush.is_some() {
         return 0;
     }
-    let interval = attachment.report_interval.clamp(15, 3600);
+    let interval = HISTORY_WRITE_INTERVAL_SECONDS;
     if attachment.last_d1_write_at <= 0 {
         return interval * 1000;
     }
@@ -290,6 +350,8 @@ fn next_d1_write_ms(attachment: &SocketAttachment, now: i64) -> i64 {
 fn live_ack_payload(
     timestamp: i64,
     persisted: bool,
+    persistence_error: bool,
+    persisted_through: i64,
     next_d1_write_after_ms: i64,
     next_wss_report_after_ms: i64,
     realtime_hint: bool,
@@ -298,9 +360,19 @@ fn live_ack_payload(
         "type": "ack",
         "ts": timestamp,
         "persisted": persisted,
+        "persistenceError": persistence_error,
+        "persistedThroughTs": persisted_through,
         "nextD1WriteAfterMs": next_d1_write_after_ms,
         "nextWssReportAfterMs": next_wss_report_after_ms,
         "realtimeHint": realtime_hint
+    }))?)
+}
+
+fn agent_config_payload(timestamp: i64, config: &AgentConfigView) -> Result<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "type": "config",
+        "ts": timestamp,
+        "config": config
     }))?)
 }
 
@@ -443,6 +515,7 @@ fn agent_attachment(
         report_interval: context.report_interval.clamp(15, 3600),
         collect_interval: context.collect_interval.clamp(1, 60),
         last_d1_write_at: context.last_persisted_at,
+        persisted_through: context.last_persisted_at,
         d1_flush: None,
         traffic: Some(TrafficAttachment {
             reset_day: context.reset_day.clamp(1, 31),
@@ -460,6 +533,7 @@ fn agent_attachment(
         latency_aggregates: LatencyMetricAggregates::default(),
         latest_samples: Vec::new(),
         latest_received_at: 0,
+        message_budget: AgentMessageBudget::default(),
     }
 }
 
@@ -496,12 +570,14 @@ fn dashboard_attachment() -> SocketAttachment {
         report_interval: 0,
         collect_interval: 0,
         last_d1_write_at: 0,
+        persisted_through: 0,
         d1_flush: None,
         traffic: None,
         history_aggregate: HistoryMetricAggregate::default(),
         latency_aggregates: LatencyMetricAggregates::default(),
         latest_samples: Vec::new(),
         latest_received_at: 0,
+        message_budget: AgentMessageBudget::default(),
     }
 }
 
@@ -509,37 +585,53 @@ fn dashboard_attachment() -> SocketAttachment {
 pub struct LiveHub {
     state: State,
     env: Env,
-    alert_collection_until: Cell<i64>,
     active_d1_flushes: RefCell<HashSet<String>>,
 }
 
 impl LiveHub {
-    async fn alert_collection_enabled(&self, current_time: i64) -> Result<bool> {
-        let mut enabled_until = self.alert_collection_until.get();
-        if enabled_until < 0 {
-            enabled_until = self
-                .state
-                .storage()
-                .get::<i64>(ALERT_COLLECTION_STATE_KEY)
-                .await?
-                .unwrap_or(0);
-            self.alert_collection_until.set(enabled_until);
+    async fn broadcast_to_global_dashboard(&self, server_id: &str, payload: &str) -> bool {
+        let result = async {
+            let namespace = self.env.durable_object("LIVE_HUB")?;
+            let stub = namespace.id_from_name(DASHBOARD_HUB_NAME)?.get_stub()?;
+            let headers = Headers::new();
+            headers.set("X-Server-ID", server_id)?;
+            let mut init = RequestInit::new();
+            init.with_method(Method::Post)
+                .with_headers(headers)
+                .with_body(Some(worker::wasm_bindgen::JsValue::from_str(payload)));
+            let req = Request::new_with_init("https://live.internal/push", &init)?;
+            let mut response = stub.fetch_with_request(req).await?;
+            ensure_live_success(&response, "global-push")?;
+            response.json::<bool>().await
         }
-        Ok(enabled_until >= current_time)
+        .await;
+        match result {
+            Ok(active) => active,
+            Err(error) => {
+                console_warn!("global live broadcast failed for {server_id}: {error:?}");
+                false
+            }
+        }
     }
 
-    async fn configure_alert_collection(&self, enabled: bool, current_time: i64) -> Result<()> {
-        let enabled_until = if enabled {
-            current_time.saturating_add(ALERT_COLLECTION_LEASE_SECONDS)
-        } else {
-            0
-        };
-        self.state
-            .storage()
-            .put(ALERT_COLLECTION_STATE_KEY, enabled_until)
+    async fn record_global_alert_point(&self, server_id: &str, point: &HistoryPoint) {
+        let result = async {
+            let response = post_live_action(
+                &self.env,
+                "record-alert-sample",
+                "record-alert-sample",
+                &serde_json::to_string(&AlertRecordRequest {
+                    server_id: server_id.to_string(),
+                    point: point.clone(),
+                })?,
+            )
             .await?;
-        self.alert_collection_until.set(enabled_until);
-        Ok(())
+            ensure_live_success(&response, "record-alert-sample")
+        }
+        .await;
+        if let Err(error) = result {
+            console_warn!("global alert window write failed for {server_id}: {error:?}");
+        }
     }
 
     fn dashboard_active_for(&self, server_id: &str) -> bool {
@@ -570,6 +662,8 @@ impl LiveHub {
             let Ok(payload) = live_ack_payload(
                 now,
                 false,
+                false,
+                attachment.persisted_through,
                 next_d1_write_ms(&attachment, now),
                 agent_wss_interval_ms(&attachment, realtime_active),
                 true,
@@ -645,9 +739,6 @@ impl LiveHub {
                 "invalid alert server identity".to_string(),
             ));
         }
-        if !self.alert_collection_enabled(crate::now()).await? {
-            return Ok(());
-        }
         let key = alert_storage_key(server_id);
         let storage = self.state.storage();
         let mut samples = storage
@@ -663,8 +754,6 @@ impl LiveHub {
         request: &AlertEvaluationRequest,
     ) -> Result<Vec<AlertEvaluationValue>> {
         let enabled = request.rules.iter().any(|rule| rule.enabled);
-        self.configure_alert_collection(enabled, request.current_time)
-            .await?;
         if !enabled {
             return Ok(Vec::new());
         }
@@ -713,7 +802,6 @@ impl DurableObject for LiveHub {
         Self {
             state,
             env,
-            alert_collection_until: Cell::new(-1),
             active_d1_flushes: RefCell::new(HashSet::new()),
         }
     }
@@ -748,7 +836,6 @@ impl DurableObject for LiveHub {
                 }
                 Some("clear-alert-windows") => {
                     self.state.storage().delete_all().await?;
-                    self.alert_collection_until.set(-1);
                     return Response::empty();
                 }
                 Some("remove-alert-samples") => {
@@ -766,6 +853,9 @@ impl DurableObject for LiveHub {
                 _ => {}
             }
             let payload = req.text().await?;
+            if payload.len() > 1024 * 1024 {
+                return Response::error("live broadcast payload too large", 413);
+            }
             let server_id = req.headers().get("X-Server-ID")?.unwrap_or_default();
             let mut sockets = self.state.get_websockets_with_tag("all");
             if !server_id.is_empty() {
@@ -774,12 +864,13 @@ impl DurableObject for LiveHub {
                         .get_websockets_with_tag(&format!("server:{server_id}")),
                 );
             }
+            let dashboard_active = !sockets.is_empty();
             for socket in sockets {
                 if socket.send_with_str(&payload).is_err() {
                     let _ = socket.close(Some(1011), Some("send failed"));
                 }
             }
-            return Response::empty();
+            return Response::from_json(&dashboard_active);
         }
 
         let is_upgrade = req
@@ -804,14 +895,23 @@ impl DurableObject for LiveHub {
                 Ok(context) => context,
                 Err(_) => return Response::error("Invalid live Agent context", 400),
             };
+            let database = self.env.d1("DB")?;
+            let Some(config) = crate::db::agent_config(&database, &server_id).await? else {
+                return Response::error("Agent server not found", 404);
+            };
+            let config_payload = agent_config_payload(crate::now(), &config)?;
+            let agent_tag = format!("agent:{server_id}");
+            for existing in self.state.get_websockets_with_tag(&agent_tag) {
+                let _ = existing.close(Some(1008), Some("replaced by a newer Agent connection"));
+            }
             pair.server.serialize_attachment(agent_attachment(
                 server_id.clone(),
                 hidden,
                 context,
             ))?;
-            let agent_tag = format!("agent:{server_id}");
             self.state
                 .accept_websocket_with_tags(&pair.server, &["agents", agent_tag.as_str()]);
+            pair.server.send_with_str(&config_payload)?;
             return Response::from_websocket(pair.client);
         }
         let server_id = req
@@ -838,10 +938,13 @@ impl DurableObject for LiveHub {
             return Ok(());
         };
         if attachment.role != "agent" {
-            return Ok(());
+            return ws.close(Some(1008), Some("dashboard messages are not accepted"));
         }
         let WebSocketIncomingMessage::String(message) = message else {
-            return Ok(());
+            return ws.close(
+                Some(1003),
+                Some("binary live metric payload is not accepted"),
+            );
         };
         if message.len() > 1024 * 1024 {
             return ws.close(Some(1009), Some("live metric payload too large"));
@@ -852,10 +955,19 @@ impl DurableObject for LiveHub {
         if batch.message_type != "update"
             || batch.samples.is_empty()
             || batch.samples.len() > MAX_LIVE_SAMPLES
+            || !crate::db::valid_report_batch_id(&batch.batch_id)
         {
             return ws.close(Some(1007), Some("invalid live metric batch"));
         }
         let received_at = crate::now();
+        if !consume_agent_message_budget(
+            &mut attachment.message_budget,
+            received_at,
+            message.len(),
+            batch.samples.len(),
+        ) {
+            return ws.close(Some(1008), Some("live metric message rate exceeded"));
+        }
         let mut latency_result_count = 0usize;
         for report in &batch.samples {
             if report.timestamp <= 0
@@ -873,6 +985,8 @@ impl DurableObject for LiveHub {
         let Some(server_id) = attachment.server_id.clone() else {
             return ws.close(Some(1008), Some("missing server identity"));
         };
+        let unpersisted_reports =
+            crate::db::reports_after(&batch.samples, attachment.persisted_through);
         let mut traffic = attachment
             .traffic
             .take()
@@ -905,10 +1019,10 @@ impl DurableObject for LiveHub {
                 .extend(&latency_results, received_at);
         }
 
-        let report_interval = attachment.report_interval.clamp(15, 3600);
-        let due_for_d1 = received_at.saturating_sub(attachment.last_d1_write_at) >= report_interval;
+        let due_for_d1 = received_at.saturating_sub(attachment.last_d1_write_at)
+            >= HISTORY_WRITE_INTERVAL_SECONDS;
         let flush_active = self.active_d1_flushes.borrow().contains(&server_id);
-        let mut flush = if !fresh_reports.is_empty()
+        let mut flush = if !unpersisted_reports.is_empty()
             && (due_for_d1 || attachment.d1_flush.is_some())
             && !flush_active
         {
@@ -924,6 +1038,7 @@ impl DurableObject for LiveHub {
             ws.serialize_attachment(&attachment)?;
         }
 
+        let mut global_dashboard_active = false;
         if !fresh_reports.is_empty() && !attachment.hidden {
             let mut sockets = self.state.get_websockets_with_tag("all");
             sockets.extend(
@@ -935,9 +1050,13 @@ impl DurableObject for LiveHub {
                     let _ = dashboard.close(Some(1011), Some("send failed"));
                 }
             }
+            global_dashboard_active = self
+                .broadcast_to_global_dashboard(&server_id, &payload)
+                .await;
         }
 
         let mut persisted = false;
+        let mut persistence_error = false;
         let mut attachment_serialized = false;
         if let Some((database, snapshot)) = flush.take() {
             self.active_d1_flushes
@@ -951,19 +1070,23 @@ impl DurableObject for LiveHub {
             let metrics_result = crate::db::save_reports_with_history(
                 &database,
                 &server_id,
-                &fresh_reports,
+                crate::db::ReportBatchRef {
+                    reports: &unpersisted_reports,
+                    id: &batch.batch_id,
+                },
                 &history_point,
                 sample_count,
                 &traffic_state,
                 &snapshot.latency,
             )
             .await;
-            let write_succeeded = match metrics_result {
+            let (write_succeeded, newly_written) = match metrics_result {
                 Err(error) => {
                     console_warn!("live D1 write failed for {server_id}: {error:?}");
-                    false
+                    persistence_error = true;
+                    (false, false)
                 }
-                Ok(()) => true,
+                Ok(inserted) => (true, inserted),
             };
             self.active_d1_flushes.borrow_mut().remove(&server_id);
 
@@ -976,7 +1099,12 @@ impl DurableObject for LiveHub {
             {
                 return ws.close(Some(1011), Some("invalid live state after D1 write"));
             }
-            finish_d1_flush(&mut current_attachment, write_succeeded, received_at);
+            finish_d1_flush(
+                &mut current_attachment,
+                write_succeeded,
+                received_at,
+                traffic_state.timestamp,
+            );
             if !trim_socket_attachment(&mut current_attachment) {
                 return ws.close(Some(1011), Some("live state exceeds attachment limit"));
             }
@@ -985,20 +1113,36 @@ impl DurableObject for LiveHub {
             attachment_serialized = true;
             persisted = write_succeeded;
 
-            if write_succeeded {
-                if let Err(error) = self.record_alert_point(&server_id, &history_point).await {
-                    console_warn!("live alert window write failed for {server_id}: {error:?}");
+            if newly_written {
+                match crate::db::has_enabled_alert_rules(&database).await {
+                    Ok(true) => {
+                        self.record_global_alert_point(&server_id, &history_point)
+                            .await;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        console_warn!("enabled alert rule check failed for {server_id}: {error:?}");
+                    }
                 }
             }
         }
-        let realtime_active = !attachment.hidden && self.dashboard_active_for(&server_id);
+        let realtime_active = !attachment.hidden
+            && (global_dashboard_active || self.dashboard_active_for(&server_id));
         let next_wss_ms = agent_wss_interval_ms(&attachment, realtime_active);
         let next_d1_ms = if persisted {
-            report_interval * 1000
+            HISTORY_WRITE_INTERVAL_SECONDS * 1000
         } else {
             next_d1_write_ms(&attachment, received_at)
         };
-        let ack = live_ack_payload(received_at, persisted, next_d1_ms, next_wss_ms, false)?;
+        let ack = live_ack_payload(
+            received_at,
+            persisted,
+            persistence_error,
+            attachment.persisted_through,
+            next_d1_ms,
+            next_wss_ms,
+            false,
+        )?;
         if !attachment_serialized {
             if !trim_socket_attachment(&mut attachment) {
                 return ws.close(Some(1011), Some("live state exceeds attachment limit"));
@@ -1034,23 +1178,27 @@ fn outbound_close_code(code: usize) -> Option<u16> {
 
 async fn post_live_action(env: &Env, path: &str, action: &str, body: &str) -> Result<Response> {
     let namespace = env.durable_object("LIVE_HUB")?;
-    let stub = namespace.id_from_name("dashboard")?.get_stub()?;
+    let stub = namespace.id_from_name(DASHBOARD_HUB_NAME)?.get_stub()?;
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
+    headers.set("X-Live-Action", action)?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
+        .with_headers(headers)
         .with_body(Some(worker::wasm_bindgen::JsValue::from_str(body)));
     let req = Request::new_with_init(&format!("https://live.internal/{path}"), &init)?;
-    req.headers().set("Content-Type", "application/json")?;
-    req.headers().set("X-Live-Action", action)?;
     stub.fetch_with_request(req).await
 }
 
-pub async fn record_alert_sample(env: &Env, server_id: &str, point: &HistoryPoint) -> Result<()> {
-    let body = serde_json::to_string(&AlertRecordRequest {
-        server_id: server_id.to_string(),
-        point: point.clone(),
-    })?;
-    post_live_action(env, "record-alert-sample", "record-alert-sample", &body).await?;
-    Ok(())
+fn ensure_live_success(response: &Response, action: &str) -> Result<()> {
+    let status = response.status_code();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(Error::RustError(format!(
+            "live action {action} returned HTTP {status}"
+        )))
+    }
 }
 
 pub async fn evaluate_resource_alerts(
@@ -1079,11 +1227,14 @@ pub async fn evaluate_resource_alerts(
         &serde_json::to_string(&request)?,
     )
     .await?;
+    ensure_live_success(&response, "evaluate-alerts")?;
     response.json::<Vec<AlertEvaluationValue>>().await
 }
 
 pub async fn clear_alert_windows(env: &Env) -> Result<()> {
-    post_live_action(env, "clear-alert-windows", "clear-alert-windows", "{}").await?;
+    let response =
+        post_live_action(env, "clear-alert-windows", "clear-alert-windows", "{}").await?;
+    ensure_live_success(&response, "clear-alert-windows")?;
     Ok(())
 }
 
@@ -1091,26 +1242,29 @@ pub async fn remove_alert_samples(env: &Env, server_ids: &[String]) -> Result<()
     if server_ids.is_empty() {
         return Ok(());
     }
-    post_live_action(
+    let response = post_live_action(
         env,
         "remove-alert-samples",
         "remove-alert-samples",
         &serde_json::to_string(server_ids)?,
     )
     .await?;
+    ensure_live_success(&response, "remove-alert-samples")?;
     Ok(())
 }
 
-pub async fn broadcast(env: &Env, server_id: &str, payload: &str) -> Result<()> {
-    let namespace = env.durable_object("LIVE_HUB")?;
-    let stub = namespace.id_from_name("dashboard")?.get_stub()?;
+fn copied_request_headers(req: &Request) -> Result<Headers> {
+    let headers = Headers::new();
+    for (name, value) in req.headers().entries() {
+        headers.append(&name, &value)?;
+    }
+    Ok(headers)
+}
+
+fn request_with_headers(req: &Request, headers: Headers) -> Result<Request> {
     let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_body(Some(worker::wasm_bindgen::JsValue::from_str(payload)));
-    let req = Request::new_with_init("https://live.internal/push", &init)?;
-    req.headers().set("X-Server-ID", server_id)?;
-    stub.fetch_with_request(req).await?;
-    Ok(())
+    init.with_method(req.method()).with_headers(headers);
+    Request::new_with_init(req.url()?.as_str(), &init)
 }
 
 pub async fn disconnect_agents(env: &Env, server_ids: &[String]) -> Result<()> {
@@ -1118,25 +1272,41 @@ pub async fn disconnect_agents(env: &Env, server_ids: &[String]) -> Result<()> {
         return Ok(());
     }
     let namespace = env.durable_object("LIVE_HUB")?;
-    let stub = namespace.id_from_name("dashboard")?.get_stub()?;
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_body(Some(worker::wasm_bindgen::JsValue::from_str(
-            &serde_json::to_string(server_ids)?,
-        )));
-    let req = Request::new_with_init("https://live.internal/disconnect-agents", &init)?;
-    req.headers().set("Content-Type", "application/json")?;
-    req.headers().set("X-Live-Action", "disconnect-agents")?;
-    stub.fetch_with_request(req).await?;
+    for server_id in server_ids {
+        let stub = namespace
+            .id_from_name(&server_hub_name(server_id))?
+            .get_stub()?;
+        let headers = Headers::new();
+        headers.set("Content-Type", "application/json")?;
+        headers.set("X-Live-Action", "disconnect-agents")?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(worker::wasm_bindgen::JsValue::from_str(
+                &serde_json::to_string(std::slice::from_ref(server_id))?,
+            )));
+        let req = Request::new_with_init("https://live.internal/disconnect-agents", &init)?;
+        let response = stub.fetch_with_request(req).await?;
+        ensure_live_success(&response, "disconnect-agents")?;
+    }
     Ok(())
 }
 
 pub async fn upgrade(req: Request, env: &Env) -> Result<Response> {
     let namespace = env.durable_object("LIVE_HUB")?;
-    let stub = namespace.id_from_name("dashboard")?.get_stub()?;
-    let req = req.clone_mut()?;
-    req.headers().delete("X-Live-Agent-ID")?;
-    req.headers().delete("X-Live-Agent-Hidden")?;
+    let server_id = req
+        .url()?
+        .query_pairs()
+        .find_map(|(key, value)| (key == "server_id").then(|| value.to_string()))
+        .filter(|value| !value.is_empty() && value.len() <= 80 && !value.contains('/'));
+    let hub_name = server_id
+        .as_deref()
+        .map(server_hub_name)
+        .unwrap_or_else(|| DASHBOARD_HUB_NAME.to_string());
+    let stub = namespace.id_from_name(&hub_name)?.get_stub()?;
+    let headers = copied_request_headers(&req)?;
+    headers.delete("X-Live-Agent-ID")?;
+    headers.delete("X-Live-Agent-Hidden")?;
     for header in [
         "X-Live-Report-Interval",
         "X-Live-Collect-Interval",
@@ -1152,8 +1322,9 @@ pub async fn upgrade(req: Request, env: &Env) -> Result<Response> {
         "X-Live-Tx-Correction",
         "X-Live-Last-Persisted-At",
     ] {
-        req.headers().delete(header)?;
+        headers.delete(header)?;
     }
+    let req = request_with_headers(&req, headers)?;
     stub.fetch_with_request(req).await
 }
 
@@ -1165,48 +1336,42 @@ pub async fn upgrade_agent(
     context: AgentLiveContext,
 ) -> Result<Response> {
     let namespace = env.durable_object("LIVE_HUB")?;
-    let stub = namespace.id_from_name("dashboard")?.get_stub()?;
-    let req = req.clone_mut()?;
-    req.headers().set("X-Live-Agent-ID", server_id)?;
-    req.headers()
-        .set("X-Live-Agent-Hidden", if hidden { "1" } else { "0" })?;
-    req.headers().set(
+    let stub = namespace
+        .id_from_name(&server_hub_name(server_id))?
+        .get_stub()?;
+    let headers = copied_request_headers(&req)?;
+    headers.set("X-Live-Agent-ID", server_id)?;
+    headers.set("X-Live-Agent-Hidden", if hidden { "1" } else { "0" })?;
+    headers.set(
         "X-Live-Report-Interval",
         &context.report_interval.to_string(),
     )?;
-    req.headers().set(
+    headers.set(
         "X-Live-Collect-Interval",
         &context.collect_interval.to_string(),
     )?;
-    req.headers()
-        .set("X-Live-Reset-Day", &context.reset_day.to_string())?;
-    req.headers()
-        .set("X-Live-Cycle-Key", &context.cycle_key.to_string())?;
-    req.headers().set(
+    headers.set("X-Live-Reset-Day", &context.reset_day.to_string())?;
+    headers.set("X-Live-Cycle-Key", &context.cycle_key.to_string())?;
+    headers.set(
         "X-Live-Traffic-Reset-Day",
         &context.traffic_reset_day.to_string(),
     )?;
-    req.headers().set(
+    headers.set(
         "X-Live-Traffic-Timestamp",
         &context.traffic_timestamp.to_string(),
     )?;
-    req.headers()
-        .set("X-Live-Raw-Rx", &context.raw_rx.to_string())?;
-    req.headers()
-        .set("X-Live-Raw-Tx", &context.raw_tx.to_string())?;
-    req.headers()
-        .set("X-Live-Used-Rx", &context.used_rx.to_string())?;
-    req.headers()
-        .set("X-Live-Used-Tx", &context.used_tx.to_string())?;
-    req.headers()
-        .set("X-Live-Rx-Correction", &context.rx_correction.to_string())?;
-    req.headers()
-        .set("X-Live-Tx-Correction", &context.tx_correction.to_string())?;
-    req.headers().set(
+    headers.set("X-Live-Raw-Rx", &context.raw_rx.to_string())?;
+    headers.set("X-Live-Raw-Tx", &context.raw_tx.to_string())?;
+    headers.set("X-Live-Used-Rx", &context.used_rx.to_string())?;
+    headers.set("X-Live-Used-Tx", &context.used_tx.to_string())?;
+    headers.set("X-Live-Rx-Correction", &context.rx_correction.to_string())?;
+    headers.set("X-Live-Tx-Correction", &context.tx_correction.to_string())?;
+    headers.set(
         "X-Live-Last-Persisted-At",
         &context.last_persisted_at.to_string(),
     )?;
-    req.headers().delete("Authorization")?;
+    headers.delete("Authorization")?;
+    let req = request_with_headers(&req, headers)?;
     stub.fetch_with_request(req).await
 }
 
@@ -1214,11 +1379,12 @@ pub async fn upgrade_agent(
 mod tests {
     use super::{
         agent_wss_interval_ms, batch_update_parts_at, begin_d1_flush, cached_update_value,
-        finish_d1_flush, live_ack_payload, next_d1_write_ms, outbound_close_code,
-        trim_cached_live_samples, trim_socket_attachment, update_alert_window,
-        AlertEvaluationServer, AlertWindowSample, CachedLiveSample, SocketAttachment,
-        TrafficAttachment, ALERT_WINDOW_SECONDS, CACHED_LIVE_TTL_SECONDS, MAX_CACHED_LIVE_BYTES,
-        MAX_CACHED_LIVE_SAMPLES, MAX_SERIALIZED_ATTACHMENT_BYTES,
+        consume_agent_message_budget, finish_d1_flush, live_ack_payload, next_d1_write_ms,
+        outbound_close_code, trim_cached_live_samples, trim_socket_attachment, update_alert_window,
+        AgentMessageBudget, AlertEvaluationServer, AlertWindowSample, CachedLiveSample,
+        SocketAttachment, TrafficAttachment, ALERT_WINDOW_SECONDS, CACHED_LIVE_TTL_SECONDS,
+        MAX_AGENT_BYTES_PER_WINDOW, MAX_AGENT_MESSAGES_PER_WINDOW, MAX_AGENT_SAMPLES_PER_WINDOW,
+        MAX_CACHED_LIVE_BYTES, MAX_CACHED_LIVE_SAMPLES, MAX_SERIALIZED_ATTACHMENT_BYTES,
     };
     use crate::db::HistoryMetricAggregate;
     use crate::latency::LatencyMetricAggregates;
@@ -1249,6 +1415,30 @@ mod tests {
         assert_eq!(outbound_close_code(1006), None);
         assert_eq!(outbound_close_code(1015), None);
         assert_eq!(outbound_close_code(5000), None);
+    }
+
+    #[test]
+    fn bounds_agent_messages_per_connection_window() {
+        let mut budget = AgentMessageBudget::default();
+        assert!(consume_agent_message_budget(
+            &mut budget,
+            100,
+            MAX_AGENT_BYTES_PER_WINDOW as usize,
+            MAX_AGENT_SAMPLES_PER_WINDOW as usize,
+        ));
+        assert!(!consume_agent_message_budget(&mut budget, 100, 1, 0));
+
+        let mut message_budget = AgentMessageBudget::default();
+        for _ in 0..MAX_AGENT_MESSAGES_PER_WINDOW {
+            assert!(consume_agent_message_budget(&mut message_budget, 100, 1, 1));
+        }
+        assert!(!consume_agent_message_budget(
+            &mut message_budget,
+            100,
+            1,
+            1
+        ));
+        assert!(consume_agent_message_budget(&mut message_budget, 160, 1, 1));
     }
 
     #[test]
@@ -1327,20 +1517,24 @@ mod tests {
             report_interval: 60,
             collect_interval: 1,
             last_d1_write_at: 1_200,
+            persisted_through: 1_190,
             d1_flush: None,
             traffic: None,
             history_aggregate: HistoryMetricAggregate::default(),
             latency_aggregates: LatencyMetricAggregates::default(),
             latest_samples: Vec::new(),
             latest_received_at: 0,
+            message_budget: AgentMessageBudget::default(),
         };
         assert_eq!(agent_wss_interval_ms(&attachment, true), 4_000);
         assert_eq!(agent_wss_interval_ms(&attachment, false), 60_000);
-        assert_eq!(next_d1_write_ms(&attachment, 1_235), 25_000);
-        let hint: serde_json::Value =
-            serde_json::from_str(&live_ack_payload(1_235, false, 25_000, 4_000, true).unwrap())
-                .unwrap();
+        assert_eq!(next_d1_write_ms(&attachment, 1_235), 85_000);
+        let hint: serde_json::Value = serde_json::from_str(
+            &live_ack_payload(1_235, false, false, 1_190, 25_000, 4_000, true).unwrap(),
+        )
+        .unwrap();
         assert_eq!(hint["realtimeHint"], true);
+        assert_eq!(hint["persistedThroughTs"], 1_190);
         assert_eq!(hint["nextWssReportAfterMs"], 4_000);
 
         let mut corrected_down = traffic;
@@ -1378,12 +1572,14 @@ mod tests {
             report_interval: 60,
             collect_interval: 1,
             last_d1_write_at: 0,
+            persisted_through: 0,
             d1_flush: None,
             traffic: None,
             history_aggregate: HistoryMetricAggregate::default(),
             latency_aggregates: LatencyMetricAggregates::default(),
             latest_samples: samples,
             latest_received_at: 100,
+            message_budget: AgentMessageBudget::default(),
         };
         let update = cached_update_value(&attachment, 102, Some("node-a")).unwrap();
         assert_eq!(update["serverId"], "node-a");
@@ -1448,12 +1644,14 @@ mod tests {
             report_interval: 60,
             collect_interval: 1,
             last_d1_write_at: 60,
+            persisted_through: 60,
             d1_flush: None,
             traffic: None,
             history_aggregate: HistoryMetricAggregate::default(),
             latency_aggregates: LatencyMetricAggregates::default(),
             latest_samples: Vec::new(),
             latest_received_at: 0,
+            message_budget: AgentMessageBudget::default(),
         };
         attachment
             .history_aggregate
@@ -1485,12 +1683,13 @@ mod tests {
             .latency_aggregates
             .extend(&second.latency_results, second.timestamp);
         assert_eq!(successful_snapshot.history.point().unwrap().cpu, 10.0);
-        finish_d1_flush(&mut successful, true, 180);
+        finish_d1_flush(&mut successful, true, 180, 120);
 
         let pending = successful.history_aggregate.point().unwrap();
         assert_eq!(pending.cpu, 20.0);
         assert_eq!(pending.net_in, 500.0);
         assert_eq!(successful.last_d1_write_at, 180);
+        assert_eq!(successful.persisted_through, 120);
         assert!(successful.d1_flush.is_none());
         let latency = serde_json::to_value(&successful.latency_aggregates).unwrap();
         assert_eq!(latency["v"]["task-a"][0].as_u64(), Some(1));
@@ -1504,12 +1703,13 @@ mod tests {
             .latency_aggregates
             .extend(&second.latency_results, second.timestamp);
         assert_eq!(failed_snapshot.history.point().unwrap().cpu, 10.0);
-        finish_d1_flush(&mut attachment, false, 180);
+        finish_d1_flush(&mut attachment, false, 180, 120);
 
         let retried = attachment.history_aggregate.point().unwrap();
         assert_eq!(retried.cpu, 15.0);
         assert_eq!(retried.net_in, 500.0);
         assert_eq!(attachment.last_d1_write_at, 60);
+        assert_eq!(attachment.persisted_through, 60);
         assert!(attachment.d1_flush.is_none());
         let latency = serde_json::to_value(&attachment.latency_aggregates).unwrap();
         assert_eq!(latency["v"]["task-a"][0].as_u64(), Some(2));

@@ -12,6 +12,7 @@ $ErrorActionPreference = "Stop"
 $TaskName = "NodeFlare Agent"
 $InstallDir = Join-Path $env:ProgramData "NodeFlare"
 $AgentFile = Join-Path $InstallDir "nodeflare-agent.exe"
+$TokenFile = Join-Path $InstallDir "token"
 
 function Write-Step([string]$Message) {
   Write-Host "[NodeFlare] $Message"
@@ -89,7 +90,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 $NativeArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 if ($NativeArchitecture -ne "AMD64") {
-  Write-InstallError "仅支持 Windows x86_64"
+  Write-InstallError "仅支持 Windows x64"
 }
 Write-Step "正在检查运行环境"
 Assert-Safe "Token" $Token
@@ -106,7 +107,7 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 & icacls.exe $InstallDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
 $Temporary = "$AgentFile.$PID.download.exe"
 $ReleaseApi = "https://api.github.com/repos/imengying/NodeFlare/releases/latest"
-$Artifact = "agent-windows-x86_64.exe"
+$Artifact = "agent-windows-x64.exe"
 try {
   Write-Step "正在获取 GitHub 最新正式版本（$Artifact）"
   $Release = Invoke-RestMethod -Uri $ReleaseApi -Headers @{ Accept = "application/vnd.github+json"; "User-Agent" = "nodeflare-installer" } -TimeoutSec 30
@@ -147,7 +148,10 @@ try {
   Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
 }
 
-$TaskArguments = "-e $Endpoint -t $Token -i $Interval"
+[IO.File]::WriteAllText($TokenFile, "$Token`n", [Text.UTF8Encoding]::new($false))
+& icacls.exe $TokenFile /inheritance:r /grant:r 'SYSTEM:F' 'Administrators:F' | Out-Null
+$Token = ""
+$TaskArguments = "-e `"$Endpoint`" --token-file `"$TokenFile`" -i $Interval"
 Write-Step "正在注册并启动 Windows 计划任务"
 $TaskAction = New-ScheduledTaskAction -Execute $AgentFile -Argument $TaskArguments
 $Trigger = New-ScheduledTaskTrigger -AtStartup

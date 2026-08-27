@@ -65,6 +65,19 @@ pub(crate) async fn route(mut req: Request, ctx: &RouteContext) -> Result<RouteO
         return handled(alert_rules_patch_delete(&mut req, ctx, &method, &path).await);
     }
 
+    if method == Method::Get && path == "/api/admin/telegram" {
+        return handled(json(
+            &serde_json::json!({ "telegram": notify::telegram_settings(&ctx.database).await? }),
+            200,
+        ));
+    }
+    if method == Method::Put && path == "/api/admin/telegram" {
+        return handled(telegram_put(&mut req, ctx).await);
+    }
+    if method == Method::Post && path == "/api/admin/telegram/test" {
+        return handled(telegram_test(ctx).await);
+    }
+
     if method == Method::Get && path == "/api/admin/servers" {
         let servers = db::list_servers(&ctx.database, true).await?;
         return handled(json(&serde_json::json!({ "servers": servers }), 200));
@@ -140,10 +153,6 @@ pub(crate) async fn route(mut req: Request, ctx: &RouteContext) -> Result<RouteO
         db::increment_setting(&ctx.database, "history_cache_version").await?;
         return handled(no_content());
     }
-    if method == Method::Post && path == "/api/admin/notifications/test" {
-        return handled(notifications_test(ctx).await);
-    }
-
     Ok(RouteOutcome::Unmatched(req))
 }
 
@@ -170,6 +179,15 @@ fn short_durable_id(ctx: &RouteContext) -> Result<String> {
         .collect::<String>())
 }
 
+fn unique_admin_id(ctx: &RouteContext, namespace: &str) -> Result<String> {
+    let source = format!(
+        "{namespace}:{}:{}",
+        short_durable_id(ctx)?,
+        worker::Date::now().as_millis()
+    );
+    Ok(sha256_hex(&source).chars().take(24).collect())
+}
+
 async fn latency_tasks_post(req: &mut Request, ctx: &RouteContext) -> Result<Response> {
     let input: LatencyTaskInput = match request_json(req, API_JSON_MAX_BYTES).await {
         Ok(value) => value,
@@ -185,8 +203,12 @@ async fn latency_tasks_post(req: &mut Request, ctx: &RouteContext) -> Result<Res
     if input.server_ids.iter().any(|id| !server_ids.contains(id)) {
         return error("延迟任务包含不存在的服务器", 400);
     }
-    let id = short_durable_id(ctx)?;
+    let assigned_server_ids = input.server_ids.clone();
+    let id = unique_admin_id(ctx, "latency-task")?;
     latency::create_task(&ctx.database, &id, &input, now()).await?;
+    if let Err(error) = live::disconnect_agents(&ctx.env, &assigned_server_ids).await {
+        console_error!("failed to refresh Agents after latency task creation: {error}");
+    }
     db::increment_setting(&ctx.database, "history_cache_version").await?;
     json(&serde_json::json!({ "id": id }), 201)
 }
@@ -201,7 +223,11 @@ async fn latency_tasks_patch_delete(
         return error("延迟任务 ID 无效", 400);
     };
     if *method == Method::Delete {
+        let assigned_server_ids = latency::server_ids_for_task(&ctx.database, &id).await?;
         return if latency::delete_task(&ctx.database, &id).await? {
+            if let Err(error) = live::disconnect_agents(&ctx.env, &assigned_server_ids).await {
+                console_error!("failed to refresh Agents after latency task deletion: {error}");
+            }
             db::increment_setting(&ctx.database, "history_cache_version").await?;
             no_content()
         } else {
@@ -223,7 +249,14 @@ async fn latency_tasks_patch_delete(
     {
         return error("延迟任务包含不存在的服务器", 400);
     }
+    let mut affected_server_ids = latency::server_ids_for_task(&ctx.database, &id).await?;
+    affected_server_ids.extend(input.server_ids.iter().cloned());
+    affected_server_ids.sort();
+    affected_server_ids.dedup();
     if latency::update_task(&ctx.database, &id, &input, now()).await? {
+        if let Err(error) = live::disconnect_agents(&ctx.env, &affected_server_ids).await {
+            console_error!("failed to refresh Agents after latency task update: {error}");
+        }
         db::increment_setting(&ctx.database, "history_cache_version").await?;
         no_content()
     } else {
@@ -578,16 +611,29 @@ async fn cloudflare_usage(ctx: &RouteContext) -> Result<Response> {
     }
 }
 
-async fn notifications_test(ctx: &RouteContext) -> Result<Response> {
-    if ctx.settings.notification_endpoint.trim().is_empty() {
-        return error("请先填写 Telegram Bot Token 和 Chat ID", 400);
+async fn telegram_put(req: &mut Request, ctx: &RouteContext) -> Result<Response> {
+    let input: crate::models::TelegramNotificationInput =
+        match request_json(req, API_JSON_MAX_BYTES).await {
+            Ok(value) => value,
+            Err(_) => return error("Telegram 配置格式无效", 400),
+        };
+    match notify::save_telegram(&ctx.database, &input, now()).await? {
+        Ok(()) => no_content(),
+        Err(message) => error(&message, 400),
     }
-    if let Err(err) = notify::send(&ctx.settings, "NodeFlare 测试通知：通知渠道配置成功。").await
+}
+
+async fn telegram_test(ctx: &RouteContext) -> Result<Response> {
+    match notify::test_telegram(
+        &ctx.database,
+        &unique_admin_id(ctx, "notification-test")?,
+        now(),
+    )
+    .await?
     {
-        console_error!("test notification failed: {err}");
-        return error("测试通知发送失败，请检查 Bot Token 和 Chat ID", 502);
+        Ok(()) => no_content(),
+        Err(message) => error(&format!("Telegram 测试消息发送失败：{message}"), 502),
     }
-    no_content()
 }
 
 async fn settings_patch(req: &mut Request, ctx: &RouteContext) -> Result<Response> {
@@ -717,21 +763,10 @@ async fn settings_patch(req: &mut Request, ctx: &RouteContext) -> Result<Respons
         return error("启用 Turnstile 前必须填写站点密钥和私钥", 400);
     }
     if input
-        .notification_enabled
-        .unwrap_or(settings.notification_enabled)
+        .traffic_alert_percentage
+        .is_some_and(|value| !(50..=100).contains(&value))
     {
-        let token = submitted_secret(
-            input.notification_endpoint.as_deref(),
-            &settings.notification_endpoint,
-        );
-        let chat_id = input
-            .notification_target
-            .as_deref()
-            .unwrap_or(&settings.notification_target)
-            .trim();
-        if !notify::valid_config(token, chat_id) {
-            return error("Telegram Bot Token 或 Chat ID 格式无效", 400);
-        }
+        return error("流量提醒起始阈值应为 50 至 100", 400);
     }
     if input
         .cloudflare_account_id

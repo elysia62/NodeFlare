@@ -13,6 +13,7 @@ mod turnstile;
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use futures_util::TryStreamExt;
 use serde::{de::DeserializeOwned, Serialize};
@@ -30,9 +31,9 @@ pub(crate) const ADMIN_HTML: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/a
 pub(crate) const ADMIN_SCRIPT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/admin.js"));
 pub(crate) const ADMIN_STYLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/admin.css"));
 pub(crate) const API_JSON_MAX_BYTES: usize = 1024 * 1024;
-pub(crate) const AGENT_JSON_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_AGENT_SAMPLES: usize = 720;
-pub(crate) const MAX_AGENT_LATENCY_RESULTS: usize = 4096;
+const SERVER_RENEWAL_INTERVAL_SECONDS: i64 = 60 * 60;
+const REMOTE_THEME_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const VERSION: &str = match option_env!("NODEFLARE_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
@@ -342,9 +343,10 @@ async fn remote_theme_response(path: &str, base: &str) -> Result<Option<Response
         return Ok(Some(secure_public_response(mutable_response(response)?)?));
     }
     let request = Request::new(&remote_url, Method::Get)?;
-    let mut response = match Fetch::Request(request).send().await {
-        Ok(response) if (200..300).contains(&response.status_code()) => response,
-        Ok(response) => {
+    let mut response = match outbound::fetch_with_timeout(request, REMOTE_THEME_FETCH_TIMEOUT).await
+    {
+        Ok(Some(response)) if (200..300).contains(&response.status_code()) => response,
+        Ok(Some(response)) => {
             console_warn!(
                 "remote theme returned HTTP {} for {}",
                 response.status_code(),
@@ -354,6 +356,14 @@ async fn remote_theme_response(path: &str, base: &str) -> Result<Option<Response
                 Ok(None)
             } else {
                 Ok(Some(remote_theme_failure("远程主题资源暂时不可用")?))
+            };
+        }
+        Ok(None) => {
+            console_warn!("remote theme request timed out for {remote_url}");
+            return if is_index {
+                Ok(None)
+            } else {
+                Ok(Some(remote_theme_failure("远程主题资源请求超时")?))
             };
         }
         Err(error) => {
@@ -370,7 +380,7 @@ async fn remote_theme_response(path: &str, base: &str) -> Result<Option<Response
     } else {
         theme::ASSET_MAX_BYTES
     };
-    let Some(body) = theme::read_response_limited(&mut response, limit).await? else {
+    let Some(body) = outbound::read_response_limited(&mut response, limit).await? else {
         return if is_index {
             Ok(None)
         } else {
@@ -415,11 +425,15 @@ async fn remote_theme_preview_response(
         return remote_theme_failure("远程主题来源不受支持");
     };
     let request = Request::new(&index, Method::Get)?;
-    let mut response = Fetch::Request(request).send().await?;
+    let Some(mut response) =
+        outbound::fetch_with_timeout(request, REMOTE_THEME_FETCH_TIMEOUT).await?
+    else {
+        return remote_theme_failure("主题预览页面请求超时");
+    };
     if !(200..300).contains(&response.status_code()) {
         return remote_theme_failure("主题预览页面暂时不可用");
     }
-    let Some(body) = theme::read_response_limited(&mut response, theme::INDEX_MAX_BYTES).await?
+    let Some(body) = outbound::read_response_limited(&mut response, theme::INDEX_MAX_BYTES).await?
     else {
         return remote_theme_failure("主题预览页面大小无效");
     };
@@ -759,7 +773,10 @@ pub(crate) fn validate_report(report: &AgentReport) -> Option<&'static str> {
         report.disk_await_ms,
         report.disk_utilization,
     ];
-    if floats.iter().any(|value| !value.is_finite()) {
+    if floats
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
         return Some("指标包含非法数值");
     }
     if !(0.0..=100.0).contains(&report.cpu) || !(0.0..=100.0).contains(&report.gpu_usage) {
@@ -783,6 +800,12 @@ pub(crate) fn validate_report(report: &AgentReport) -> Option<&'static str> {
     if counters.iter().any(|value| *value < 0) {
         return Some("计数指标不能为负数");
     }
+    if report.mem_used > report.mem_total
+        || report.swap_used > report.swap_total
+        || report.disk_used > report.disk_total
+    {
+        return Some("已用资源不能超过总量");
+    }
     if report.gpu_model.chars().count() > 240 {
         return Some("GPU 型号字段过长");
     }
@@ -796,6 +819,7 @@ pub(crate) fn validate_report(report: &AgentReport) -> Option<&'static str> {
                 || disk.mount_point.chars().count() > 240
                 || disk.used < 0
                 || disk.total < 0
+                || disk.used > disk.total
                 || ![
                     disk.read_bps,
                     disk.write_bps,
@@ -811,6 +835,7 @@ pub(crate) fn validate_report(report: &AgentReport) -> Option<&'static str> {
             gpu.model.chars().count() > 240
                 || gpu.memory_used < 0
                 || gpu.memory_total < 0
+                || gpu.memory_used > gpu.memory_total
                 || gpu
                     .usage
                     .is_some_and(|usage| !usage.is_finite() || !(0.0..=100.0).contains(&usage))
@@ -932,9 +957,7 @@ pub(crate) fn client_ip(req: &Request) -> Option<String> {
 fn rate_limit_binding(method: Method, path: &str) -> Option<&'static str> {
     if method == Method::Post && matches!(path, "/api/admin/login" | "/api/turnstile/verify") {
         Some("AUTH_RATE_LIMITER")
-    } else if (method == Method::Post && path == "/api/agent/report")
-        || (method == Method::Get && matches!(path, "/api/agent/live" | "/api/agent/config"))
-    {
+    } else if method == Method::Get && path == "/api/agent/ws" {
         Some("AGENT_RATE_LIMITER")
     } else if path.starts_with("/api/") {
         Some("API_RATE_LIMITER")
@@ -963,7 +986,8 @@ fn agent_rate_limit_key(req: &Request) -> String {
 }
 
 fn allow_on_rate_limit_failure(binding: &str) -> bool {
-    binding != "AUTH_RATE_LIMITER"
+    let _ = binding;
+    false
 }
 
 async fn request_within_rate_limit(env: &Env, binding: &str, key: String) -> bool {
@@ -1070,7 +1094,7 @@ pub(crate) fn server_id(path: &str, prefix: &str) -> Option<String> {
     }
 }
 
-async fn handle(req: Request, env: Env, ctx: Context) -> Result<Response> {
+async fn handle(req: Request, env: Env) -> Result<Response> {
     let method = req.method();
     let path = req.path();
 
@@ -1082,19 +1106,14 @@ async fn handle(req: Request, env: Env, ctx: Context) -> Result<Response> {
 
     let database = env.d1("DB")?;
 
-    if method == Method::Post && path == "/api/agent/report" {
-        return routes::agent::report(req, env, ctx, &database).await;
-    }
-    if method == Method::Get && path == "/api/agent/config" {
-        return routes::agent::config(&req, &database).await;
-    }
-    if method == Method::Get && path == "/api/agent/live" {
-        return routes::agent::live_websocket(req, &env, &database).await;
+    if method == Method::Get && path == "/api/agent/ws" {
+        return routes::agent::websocket(req, &env, &database).await;
     }
 
     let default_name = env_text(&env, "SITE_NAME", "NodeFlare");
     let default_threshold = env_number(&env, "OFFLINE_THRESHOLD_SECONDS", 180).clamp(30, 3600);
-    let default_retention = env_number(&env, "HISTORY_RETENTION_DAYS", 30).clamp(1, 365);
+    let default_retention =
+        env_number(&env, "HISTORY_RETENTION_DAYS", 30).clamp(1, db::MAX_HISTORY_RETENTION_DAYS);
     let default_username = env_text(&env, "ADMIN_USERNAME", "");
     let settings = db::settings(
         &database,
@@ -1165,7 +1184,7 @@ async fn handle(req: Request, env: Env, ctx: Context) -> Result<Response> {
     secure_public_response(mutable_response(response)?)
 }
 #[event(fetch, respond_with_errors)]
-async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let method = req.method();
     let method_name = format!("{method:?}");
     let path = req.path();
@@ -1193,7 +1212,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
     }
 
-    match handle(req, env, ctx).await {
+    match handle(req, env).await {
         Ok(response) => Ok(response),
         Err(err) => {
             console_error!(
@@ -1218,7 +1237,8 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     };
     let default_name = env_text(&env, "SITE_NAME", "NodeFlare");
     let default_threshold = env_number(&env, "OFFLINE_THRESHOLD_SECONDS", 180).clamp(30, 3600);
-    let default_retention = env_number(&env, "HISTORY_RETENTION_DAYS", 30).clamp(1, 365);
+    let default_retention =
+        env_number(&env, "HISTORY_RETENTION_DAYS", 30).clamp(1, db::MAX_HISTORY_RETENTION_DAYS);
     let default_username = env_text(&env, "ADMIN_USERNAME", "");
     let settings = db::settings(
         &database,
@@ -1239,11 +1259,14 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         .flatten()
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
-    if current - last_cleanup >= 86_400 {
+    if current.saturating_sub(last_cleanup) >= db::HISTORY_ROTATION_INTERVAL_SECONDS {
         if let Err(err) = db::cleanup_history(&database, retention).await {
             console_error!("history cleanup failed: {err}");
         } else {
             let _ = db::save_setting(&database, "last_history_cleanup", &current.to_string()).await;
+        }
+        if let Err(err) = notify::cleanup(&database, current).await {
+            console_error!("notification cleanup failed: {err}");
         }
     }
     match exchange::refresh(&database, current, false).await {
@@ -1255,12 +1278,27 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         Ok((_, false)) => {}
         Err(err) => console_error!("exchange-rate refresh failed: {err}"),
     }
-    if let Err(err) = notify::renew_servers(&database).await {
-        console_error!("server renewal failed: {err}");
+    let last_server_renewal = db::get_setting(&database, "last_server_renewal")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    if current.saturating_sub(last_server_renewal) >= SERVER_RENEWAL_INTERVAL_SECONDS {
+        if let Err(err) = notify::renew_servers(&database).await {
+            console_error!("server renewal failed: {err}");
+        } else {
+            let _ = db::save_setting(&database, "last_server_renewal", &current.to_string()).await;
+        }
     }
     if let Ok(settings) = settings {
         if let Err(err) = notify::check_alerts(&database, &env, &settings).await {
             console_error!("alert check failed: {err}");
+        }
+        if settings.notification_enabled {
+            if let Err(err) = notify::process_pending(&database, current).await {
+                console_error!("notification delivery processing failed: {err}");
+            }
         }
     }
 }
@@ -1284,15 +1322,7 @@ mod tests {
             Some("AUTH_RATE_LIMITER")
         );
         assert_eq!(
-            rate_limit_binding(Method::Post, "/api/agent/report"),
-            Some("AGENT_RATE_LIMITER")
-        );
-        assert_eq!(
-            rate_limit_binding(Method::Get, "/api/agent/live"),
-            Some("AGENT_RATE_LIMITER")
-        );
-        assert_eq!(
-            rate_limit_binding(Method::Get, "/api/agent/config"),
+            rate_limit_binding(Method::Get, "/api/agent/ws"),
             Some("AGENT_RATE_LIMITER")
         );
         assert_eq!(
@@ -1301,7 +1331,7 @@ mod tests {
         );
         assert_eq!(rate_limit_binding(Method::Get, "/"), None);
         assert!(!allow_on_rate_limit_failure("AUTH_RATE_LIMITER"));
-        assert!(allow_on_rate_limit_failure("API_RATE_LIMITER"));
+        assert!(!allow_on_rate_limit_failure("API_RATE_LIMITER"));
     }
 
     #[test]

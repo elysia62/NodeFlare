@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "../node_modules/.cache/nodeflare/tsconfig.test.tsbuildinfo",
+    "composite": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["bun", "vite/client"],
+    "noEmit": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/*.ts", "src/**/*.tsx"]
+}

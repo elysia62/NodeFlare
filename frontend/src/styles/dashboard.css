@@ -1,9 +1,9 @@
 @import "./base.css";
 
-.app-shell { position: relative; z-index: 0; display: flex; min-height: 100vh; flex-direction: column; }
+.app-shell { position: relative; z-index: 0; isolation: isolate; display: flex; min-height: 100vh; flex-direction: column; }
 .app-bootstrap { display: grid; min-height: 100vh; place-items: center; padding: 24px; background: var(--background); }
 .app-bootstrap .error-band { width: min(520px, 100%); }
-.theme-background { position: fixed; z-index: -2; inset: 0; opacity: 0; background-position: center; background-repeat: no-repeat; background-size: cover; transition: opacity 180ms ease; }
+.theme-background { position: fixed; z-index: -1; inset: 0; pointer-events: none; opacity: 0; background-position: center; background-repeat: no-repeat; background-size: cover; transition: opacity 180ms ease; }
 .theme-background::after { position: absolute; content: ""; inset: 0; background: color-mix(in srgb, var(--background) 18%, transparent); }
 .container { width: min(1440px, 100%); margin: 0 auto; padding-inline: 32px; }
 
@@ -44,7 +44,8 @@
 .result-count { margin-left: auto; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
 
 .node-grid, .loading-grid { display: grid; align-items: start; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-.node-card { position: relative; display: flex; width: 100%; min-width: 0; min-height: 336px; align-self: start; flex-direction: column; overflow: hidden; border-radius: 12px; padding: 0; text-align: left; box-shadow: var(--node-card-shadow); transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease; }
+.node-card { position: relative; display: flex; width: 100%; min-width: 0; min-height: var(--node-card-min-height); align-self: start; flex-direction: column; overflow: hidden; border-radius: 12px; padding: 0; text-align: left; box-shadow: var(--node-card-shadow); transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease; }
+.node-grid.carrier-latency .node-card, .loading-grid.carrier-latency span { min-height: var(--node-card-carrier-min-height); }
 .node-card:hover { z-index: 2; border-color: color-mix(in srgb, var(--foreground) 24%, var(--node-card-border)); background: var(--node-card-hover); box-shadow: 0 12px 38px rgb(15 23 42 / .2); }
 .dark .node-card:hover { box-shadow: 0 12px 38px rgb(0 0 0 / .54); }
 .node-card.offline { box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger-bar) 30%, transparent), var(--node-card-shadow); }
@@ -82,8 +83,17 @@
 .data-panel b svg { width: 10px; height: 10px; }
 .data-panel em { overflow: hidden; font-style: normal; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .quality-grid { display: grid; gap: 6px; grid-template-columns: 1fr 1fr; }
-.quality-panel { display: flex; min-width: 0; height: 44px; flex-direction: column; gap: 6px; overflow: visible; border-radius: 8px; padding: 8px; background: var(--node-data-bg); }
+.quality-panel { display: flex; min-width: 0; height: var(--quality-panel-height); flex-direction: column; gap: 6px; overflow: visible; border-radius: 8px; padding: 8px; background: var(--node-data-bg); }
 .quality-panel > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted-foreground); font-size: 12px; line-height: 1; }
+.carrier-panel { height: var(--carrier-panel-height); }
+.carrier-rows { display: flex; min-height: 0; flex: 1; flex-direction: column; justify-content: space-between; gap: 5px; }
+.carrier-row { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.carrier-row-head { display: flex; min-width: 0; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: 11px; line-height: 1.2; }
+.carrier-row-head i { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; }
+.carrier-row-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.carrier-row-head b { margin-left: auto; flex: 0 0 auto; color: var(--foreground); font-weight: 500; font-variant-numeric: tabular-nums; }
+.carrier-row .quality-bars { min-height: 8px; }
+.empty-inline { display: grid; min-height: 0; flex: 1; place-items: center; color: var(--muted-foreground); font-size: 11px; }
 .quality-panel b { color: var(--foreground); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .quality-bars { display: grid; min-height: 0; flex: 1; align-items: end; gap: 1px; opacity: .85; }
 .quality-bars > span { position: relative; display: flex; height: 100%; min-width: 0; align-items: end; overflow: visible; border-radius: 1px; background: color-mix(in srgb, var(--foreground) 6%, transparent); }
@@ -101,6 +111,12 @@
 .quality-bar:hover { z-index: 20; }
 .quality-bar:hover .quality-tooltip { visibility: visible; opacity: 1; transform: translateY(0); }
 .quality-bar:hover .quality-tooltip.center { transform: translate(-50%, 0); }
+/* Keyboard users reach the card, not each bar, so surface the bar readings
+   whenever the card itself has focus. */
+.node-card:focus-visible .quality-bar:first-child .quality-tooltip,
+.node-card:focus-visible .quality-bar:last-child .quality-tooltip { visibility: visible; opacity: 1; transform: translateY(0); }
+.node-card:focus-visible .quality-bar:first-child .quality-tooltip.center,
+.node-card:focus-visible .quality-bar:last-child .quality-tooltip.center { transform: translate(-50%, 0); }
 
 .error-band { display: flex; align-items: center; justify-content: space-between; border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border)); border-radius: 7px; padding: 12px 14px; color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, transparent); font-size: 12px; }
 .error-band button { font-weight: 700; }
@@ -120,7 +136,7 @@
 .dashboard-login-turnstile .turnstile-widget { width: 100%; }
 .dashboard-login-submit { width: 100%; min-height: 42px; }
 .verification-status { color: var(--primary); font-size: 11px; }
-.loading-grid span { height: 336px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); animation: loading-pulse 1.3s ease-in-out infinite alternate; }
+.loading-grid span { height: var(--node-card-min-height); border: 1px solid var(--border); border-radius: 12px; background: var(--card); animation: loading-pulse 1.3s ease-in-out infinite alternate; }
 @keyframes loading-pulse { to { opacity: .46; } }
 
 .detail-page { display: flex; flex-direction: column; gap: 14px; }
@@ -162,6 +178,14 @@
 .latency-summary > span i { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 2px; }
 .latency-summary strong { display: block; margin-top: 6px; font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: 0; }
 .latency-summary small { display: block; margin-top: 5px; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
+.latency-summary.hidden { opacity: .42; }
+.latency-task-legend { display: flex; min-width: 0; align-items: center; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--border); padding: 10px 16px; }
+.latency-task-toggle { display: inline-flex; min-width: 0; min-height: 28px; flex: 0 0 auto; align-items: center; gap: 6px; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+.latency-task-toggle:hover { color: var(--foreground); background: color-mix(in srgb, var(--foreground) 6%, transparent); }
+.latency-task-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.latency-task-toggle i { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 2px; }
+.latency-task-toggle.hidden { border-color: var(--border); color: var(--muted-foreground); opacity: .58; }
+.latency-task-toggle.hidden i { opacity: .38; }
 .latency-line-chart { width: 100%; height: 320px; padding: 16px 18px 10px 10px; }
 .latency-empty { display: grid; width: 100%; height: 100%; place-items: center; color: var(--muted-foreground); font-size: 13px; }
 
@@ -194,7 +218,6 @@
   .search-box { width: 100%; }
   .group-tabs { max-width: calc(100% - 58px); }
   .node-grid, .loading-grid { grid-template-columns: 1fr; }
-  .node-card { min-height: 336px; }
   .detail-hero { padding: 14px 16px; }
   .detail-hero > .icon-btn { margin-left: -4px; }
   .detail-flag { font-size: 19px; }

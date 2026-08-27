@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-LABEL="com.nodeflare.agent"
+SERVICE_NAME="nodeflare"
 INSTALL_DIR="/usr/local/libexec/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
 TOKEN_FILE="$INSTALL_DIR/token"
-PLIST_FILE="/Library/LaunchDaemons/$LABEL.plist"
+SERVICE_FILE="/usr/local/etc/rc.d/$SERVICE_NAME"
 
 log() {
   printf '[NodeFlare] %s\n' "$1"
@@ -18,14 +18,14 @@ fail() {
 
 usage() {
   cat <<'EOF'
-NodeFlare Agent macOS 安装脚本
+NodeFlare Agent FreeBSD 安装脚本
 
 用法：
-  install-macos.sh -e <Worker URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
-  install-macos.sh --status
-  install-macos.sh --uninstall
+  install-freebsd.sh -e <Worker URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
+  install-freebsd.sh --status
+  install-freebsd.sh --uninstall
 
-仅支持 Apple Silicon（arm64）。Agent Token 请勿泄露。
+仅支持 FreeBSD amd64。Agent Token 请勿泄露。
 -m 为可选的 GitHub 下载加速前缀（形如 https://ghproxy.net），
 仅作用于 Release 下载，摘要校验不受影响。
 EOF
@@ -35,12 +35,36 @@ safe_value() {
   case "$1" in *[!A-Za-z0-9_./:@-]*|'') return 1 ;; esac
 }
 
+download_stdout() {
+  url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --silent --show-error --max-time 30 \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'User-Agent: nodeflare-installer' \
+      "$url"
+  else
+    fetch -q -T 30 -o - "$url"
+  fi
+}
+
+download_file() {
+  url="$1"
+  destination="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --silent --show-error --max-time 120 \
+      "$url" -o "$destination"
+  else
+    fetch -q -T 120 -o "$destination" "$url"
+  fi
+}
+
 if [ "${1:-}" = "--uninstall" ]; then
   [ "$#" -eq 1 ] || fail "--uninstall 不接受其它参数"
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行卸载"
   log "正在停止并移除 NodeFlare Agent"
-  launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
-  rm -f "$PLIST_FILE" "$AGENT_FILE" "$TOKEN_FILE"
+  service "$SERVICE_NAME" stop 2>/dev/null || true
+  sysrc -x "${SERVICE_NAME}_enable" >/dev/null 2>&1 || true
+  rm -f "$SERVICE_FILE" "$AGENT_FILE" "$TOKEN_FILE"
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "NodeFlare Agent 已卸载"
   exit 0
@@ -48,7 +72,7 @@ fi
 
 if [ "${1:-}" = "--status" ]; then
   [ "$#" -eq 1 ] || fail "--status 不接受其它参数"
-  launchctl print "system/$LABEL"
+  service "$SERVICE_NAME" status
   exit $?
 fi
 
@@ -57,9 +81,16 @@ fi
   exit 0
 }
 [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限运行安装"
-[ "$(uname -m)" = "arm64" ] || fail "仅支持 Apple Silicon（arm64）"
-command -v curl >/dev/null || fail "缺少 curl"
-command -v shasum >/dev/null || fail "缺少 shasum，无法校验下载文件"
+[ "$(uname -s)" = "FreeBSD" ] || fail "此脚本仅支持 FreeBSD"
+case "$(uname -m)" in
+  amd64|x86_64) ;;
+  *) fail "仅支持 FreeBSD amd64" ;;
+esac
+command -v fetch >/dev/null 2>&1 || command -v curl >/dev/null 2>&1 || fail "缺少 fetch 或 curl"
+command -v sha256 >/dev/null 2>&1 || fail "缺少 sha256，无法校验下载文件"
+command -v service >/dev/null 2>&1 || fail "缺少 service"
+command -v sysrc >/dev/null 2>&1 || fail "缺少 sysrc"
+
 log "正在检查运行环境"
 token=""
 endpoint=""
@@ -109,13 +140,10 @@ fi
 mkdir -p "$INSTALL_DIR"
 temporary="$INSTALL_DIR/.agent.$$.download"
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
-artifact="agent-macos-aarch64"
+artifact="agent-freebsd-x64"
 release_api="https://api.github.com/repos/imengying/NodeFlare/releases/latest"
 log "正在获取 GitHub 最新正式版本（$artifact）"
-release_json=$(curl --fail --location --silent --show-error --max-time 30 \
-  -H 'Accept: application/vnd.github+json' \
-  -H 'User-Agent: nodeflare-installer' \
-  "$release_api")
+release_json=$(download_stdout "$release_api")
 release_tag=$(printf '%s\n' "$release_json" | tr ',' '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
 printf '%s\n' "$release_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail "GitHub 最新 Release 标签无效：${release_tag:-未找到}"
 expected=$(printf '%s\n' "$release_json" | tr '{' '\n' | awk -v name="$artifact" '
@@ -145,46 +173,49 @@ if [ -n "$mirror" ]; then
 else
   log "正在下载 NodeFlare Agent $release_tag"
 fi
-curl --fail --location --silent --show-error --max-time 120 \
-  "$download_url" \
-  -o "$temporary"
-actual=$(shasum -a 256 "$temporary" | awk '{ print $1 }')
-[ -n "$expected" ] && [ "$actual" = "$expected" ] || fail "Agent SHA-256 校验失败，已停止安装"
+download_file "$download_url" "$temporary"
+actual=$(sha256 -q "$temporary")
+[ "$actual" = "$expected" ] || fail "Agent SHA-256 校验失败，已停止安装"
 chmod 755 "$temporary"
 log "下载校验通过，正在验证可执行文件"
-installed_version=$("$temporary" --version) || fail "下载的 Agent 无法在当前 macOS 运行"
+installed_version=$("$temporary" --version) || fail "下载的 Agent 无法在当前 FreeBSD 运行"
 installed_version=${installed_version##* }
 [ "$installed_version" = "${release_tag#v}" ] || fail "Release $release_tag 与 Agent 版本 $installed_version 不一致"
-log "正在配置并启动 macOS LaunchDaemon 服务"
-launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
+
+log "正在配置并启动 FreeBSD rc.d 服务"
+service "$SERVICE_NAME" stop 2>/dev/null || true
 mv "$temporary" "$AGENT_FILE"
 trap - EXIT HUP INT TERM
 (umask 077; printf '%s\n' "$token" > "$TOKEN_FILE")
 chmod 600 "$TOKEN_FILE"
 token=""
-cat > "$PLIST_FILE" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>$LABEL</string>
-<key>ProgramArguments</key><array><string>$AGENT_FILE</string><string>-e</string><string>$endpoint</string><string>--token-file</string><string>$TOKEN_FILE</string><string>-i</string><string>$interval</string></array>
-<key>KeepAlive</key><true/><key>RunAtLoad</key><true/>
-<key>StandardOutPath</key><string>/var/log/nodeflare-agent.log</string>
-<key>StandardErrorPath</key><string>/var/log/nodeflare-agent.log</string>
-</dict></plist>
+cat > "$SERVICE_FILE" <<EOF
+#!/bin/sh
+# PROVIDE: nodeflare
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="$SERVICE_NAME"
+rcvar="${SERVICE_NAME}_enable"
+pidfile="/var/run/\${name}.pid"
+command="/usr/sbin/daemon"
+command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint --token-file $TOKEN_FILE -i $interval"
+
+load_rc_config "\${name}"
+: \${nodeflare_enable:="NO"}
+run_rc_command "\$1"
 EOF
-chmod 600 "$PLIST_FILE"
-launchctl bootstrap system "$PLIST_FILE"
-started=false
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  sleep 1
-  if launchctl print "system/$LABEL" 2>/dev/null | grep -q 'state = running'; then
-    started=true
-    break
-  fi
-done
-[ "$started" = true ] || fail "NodeFlare 服务启动失败，请查看 /var/log/nodeflare-agent.log"
+chmod 700 "$SERVICE_FILE"
+sysrc "${SERVICE_NAME}_enable=YES" >/dev/null
+service "$SERVICE_NAME" start
+service "$SERVICE_NAME" status >/dev/null || {
+  service "$SERVICE_NAME" status >&2 || true
+  fail "NodeFlare 服务启动失败，请查看 /var/log/messages"
+}
+
 printf '\nNodeFlare Agent 安装完成\n'
 printf '  版本：%s\n' "$installed_version"
-printf '  服务：%s（LaunchDaemon）\n' "$LABEL"
-printf '  查看状态：sudo launchctl print system/%s\n' "$LABEL"
+printf '  服务：%s（FreeBSD rc.d）\n' "$SERVICE_NAME"
+printf '  查看状态：service %s status\n' "$SERVICE_NAME"

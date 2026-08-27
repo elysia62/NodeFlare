@@ -11,5 +11,12 @@ export function SiteLogo({ src = "", ...props }: SiteLogoProps) {
   const [failedSource, setFailedSource] = useState("");
   const resolved = failedSource === requested ? DEFAULT_LOGO : requested;
 
-  return <img {...props} src={resolved} onError={() => setFailedSource(requested)} />;
+  return <img
+    {...props}
+    src={resolved}
+    onError={() => {
+      // Do not retry the built-in fallback forever when it is unavailable.
+      if (resolved !== DEFAULT_LOGO) setFailedSource(requested);
+    }}
+  />;
 }

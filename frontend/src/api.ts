@@ -1,4 +1,4 @@
-import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, CloudflareUsage, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, Server, ServerInput, Settings, Theme, ThemeSettingsSchema } from "./types";
+import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, CloudflareUsage, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema } from "./types";
 
 const TOKEN_KEY = "nodeflare-admin-token";
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
@@ -71,6 +71,10 @@ export const api = {
     request<void>(`/api/admin/alert-rules/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) }, true),
   deleteAlertRule: (id: string) =>
     request<void>(`/api/admin/alert-rules/${encodeURIComponent(id)}`, { method: "DELETE" }, true),
+  telegramSettings: () => request<{ telegram: TelegramSettings | null }>("/api/admin/telegram", {}, true),
+  saveTelegramSettings: (input: TelegramSettingsInput) =>
+    request<void>("/api/admin/telegram", { method: "PUT", body: JSON.stringify(input) }, true),
+  testTelegram: () => request<void>("/api/admin/telegram/test", { method: "POST" }, true),
   themeSettings: () => request<ThemeSettingsSchema>("/api/admin/theme-settings", {}, true),
   themes: () => request<{ themes: Theme[] }>("/api/admin/themes", {}, true),
   addTheme: (input: Pick<Theme, "name" | "description" | "url">) =>
@@ -117,5 +121,4 @@ export const api = {
   databaseStats: () => request<DatabaseStats>("/api/admin/database", {}, true),
   cloudflareUsage: () => request<CloudflareUsage>("/api/admin/cloudflare-usage", {}, true),
   clearHistory: () => request<void>("/api/admin/history", { method: "DELETE" }, true),
-  testNotification: () => request<void>("/api/admin/notifications/test", { method: "POST" }, true),
 };

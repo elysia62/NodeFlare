@@ -77,11 +77,7 @@ server_input='{"name":"Smoke Test Node","region":"JP","group_name":"Test","tags"
 server_id=
 latency_task_id=
 alert_rule_id=
-stress_report_file=
 cleanup() {
-  if [ -n "$stress_report_file" ]; then
-    rm -f "$stress_report_file"
-  fi
   if [ -n "$alert_rule_id" ]; then
     monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
       -X DELETE "$MONITOR_BASE_URL/api/admin/alert-rules/$alert_rule_id" >/dev/null || true
@@ -97,6 +93,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+request -H "Authorization: Bearer $admin_token" \
+  "$MONITOR_BASE_URL/api/admin/telegram" | \
+  jq -e '.telegram == null or (.telegram.bot_token == "********" and (.telegram.chat_id | length > 0))' >/dev/null
+invalid_telegram_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X PUT -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+  --data '{"bot_token":"invalid","chat_id":"","message_thread_id":null,"template":"{{message}}"}' \
+  "$MONITOR_BASE_URL/api/admin/telegram")
+[ "$invalid_telegram_status" = "400" ]
+removed_channels_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/notification-channels")
+[ "$removed_channels_status" = "404" ]
+
 latency_task_json=$(request -H "Authorization: Bearer $admin_token" \
   -H 'Content-Type: application/json' \
   --data '{"name":"Smoke TCP","task_type":"tcp","target":"example.com","port":443,"interval_seconds":60,"default_enabled":true,"server_ids":[]}' \
@@ -110,106 +118,29 @@ server_json=$(request -H "Authorization: Bearer $admin_token" \
 server_id=$(printf '%s' "$server_json" | jq -er '.id')
 agent_token=$(printf '%s' "$server_json" | jq -er '.agent_token')
 MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
-  MONITOR_AGENT_TOKEN="$agent_token" node scripts/websocket-smoke.mjs
+  MONITOR_AGENT_TOKEN="$agent_token" MONITOR_SERVER_ID="$server_id" \
+  MONITOR_LATENCY_TASK_ID="$latency_task_id" \
+  node scripts/websocket-smoke.mjs
 token_without_admin_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
   "$MONITOR_BASE_URL/api/admin/servers/$server_id/token")
 [ "$token_without_admin_status" = "401" ]
 request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/servers/$server_id/token" | \
   jq -e --arg token "$agent_token" '.agent_token == $token' >/dev/null
-agent_version=$(sh scripts/resolve-version.sh)
 
-sample=$(jq -nc --arg agent_version "$agent_version" '{
-  timestamp:((((now|floor) / 60 | floor) + 1) * 60 + 10),cpu:18.5,load1:0.42,load5:0.36,load15:0.31,
-  mem_used:2147483648,mem_total:4294967296,swap_used:0,swap_total:0,disk_used:21474836480,disk_total:53687091200,
-  net_in:4096,net_out:2048,net_rx_total:1073741824,net_tx_total:536870912,
-  uptime:86400,processes:90,tcp_connections:18,udp_connections:4,cpu_cores:2,
-  cpu_model:"Smoke CPU",os:"Debian 12",kernel:"6.1",arch:"x86_64",virtualization:"kvm",
-  gpu_usage:32.5,gpu_model:"NVIDIA T4",disk_read_bps:4194304,disk_write_bps:2097152,
-  disk_read_iops:120,disk_write_iops:48,disk_await_ms:1.4,disk_utilization:8.2,
-  disks:[{name:"/dev/vda1",mount_point:"/",used:21474836480,total:53687091200,read_bps:4194304,write_bps:2097152,read_iops:120,write_iops:48,await_ms:1.4,utilization:8.2}],
-  gpus:[{model:"NVIDIA T4",usage:32.5,memory_used:1073741824,memory_total:17179869184}],
-  agent_version:$agent_version,latency_results:[]
-}')
-report=$(jq -nc --argjson sample "$sample" '{samples:[$sample]}')
-invalid_token_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
-  -H 'Authorization: Bearer invalid-agent-token' -H 'Content-Type: application/json' \
-  --data "$report" "$MONITOR_BASE_URL/api/agent/report")
-[ "$invalid_token_status" = "401" ]
-report_response=$(request -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  -H 'CF-Connecting-IP: 8.8.8.8' \
-  --data "$report" "$MONITOR_BASE_URL/api/agent/report")
-printf '%s' "$report_response" | jq -e \
-  --arg task_id "$latency_task_id" \
-  '.collect_interval == 5 and .agent_mirror == "https://mirror.example.com" and .auto_update == true and (.latency_tasks | any(.id == $task_id and .task_type == "tcp" and .target == "example.com" and .port == 443))' >/dev/null
-request -H "Authorization: Bearer $agent_token" \
-  "$MONITOR_BASE_URL/api/agent/config" | jq -e \
-  --arg task_id "$latency_task_id" \
-  '.collect_interval == 5 and .agent_mirror == "https://mirror.example.com" and (.latency_tasks | any(.id == $task_id))' >/dev/null
+legacy_report_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X POST -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
+  --data '{}' "$MONITOR_BASE_URL/api/agent/report")
+[ "$legacy_report_status" = "404" ]
+for legacy_path in /api/agent/config /api/agent/live; do
+  legacy_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+    -H "Authorization: Bearer $agent_token" "$MONITOR_BASE_URL$legacy_path")
+  [ "$legacy_status" = "404" ]
+done
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/servers" | \
   jq -e --arg id "$server_id" '.servers | any(.id == $id and .last_ip == "8.8.8.8")' >/dev/null
 
-latency_report=$(printf '%s' "$report" | jq --arg task_id "$latency_task_id" \
-  '.samples[0].timestamp += 1 |
-   .samples[0].latency_results=[{
-     task_id:$task_id,
-     timestamp:.samples[0].timestamp,
-     latency_ms:28.4,
-     packet_loss:25
-   }]')
-request -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  --data "$latency_report" "$MONITOR_BASE_URL/api/agent/report" | jq -e '.collect_interval == 5' >/dev/null
-latency_report_second=$(printf '%s' "$report" | jq --arg task_id "$latency_task_id" \
-  '.samples[0].timestamp += 2 |
-   .samples[0].latency_results=[{
-     task_id:$task_id,
-     timestamp:.samples[0].timestamp,
-     latency_ms:48.4,
-     packet_loss:75
-   }]')
-request -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  --data "$latency_report_second" "$MONITOR_BASE_URL/api/agent/report" | jq -e '.collect_interval == 5' >/dev/null
-
-# A whole Agent batch must collapse into one traffic-cycle write while preserving
-# counter resets. Replaying the same batch must not count any bytes twice.
-traffic_report=$(printf '%s' "$report" | jq '.samples = [
-  (.samples[0] | .timestamp += 3 | .net_rx_total=2147483648 | .net_tx_total=1073741824),
-  (.samples[0] | .timestamp += 4 | .net_rx_total=268435456 | .net_tx_total=134217728),
-  (.samples[0] | .timestamp += 5 | .net_rx_total=536870912 | .net_tx_total=268435456)
-]')
-request -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  --data "$traffic_report" "$MONITOR_BASE_URL/api/agent/report" | jq -e '.collect_interval == 5' >/dev/null
-request -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  --data "$traffic_report" "$MONITOR_BASE_URL/api/agent/report" | jq -e '.collect_interval == 5' >/dev/null
-
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/bootstrap" | jq -e --arg id "$server_id" --arg task_id "$latency_task_id" '.servers | any(.id == $id and .cpu == 18.5 and .gpu_usage == 32.5 and .disk_await_ms == 1.4 and (.gpus | length) == 1 and (.disks | length) == 1 and .disk_used == 21474836480 and .traffic_limit == 107374182400 and .net_rx_total == 2684354560 and .net_tx_total == 1342177280 and .price == 9.9 and (has("last_ip") | not) and (.latency | any(.task_id == $task_id and .latency_ms == 48.4 and .packet_loss == 75)))' >/dev/null
-
-# Changing the reset day starts a new traffic cycle. Only growth after the first
-# sample in that cycle counts toward usage.
-request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
-  --data "$(printf '%s' "$server_input" | jq '.reset_day=2')" \
-  "$MONITOR_BASE_URL/api/admin/servers/$server_id" >/dev/null
-cycle_report=$(printf '%s' "$report" | jq '.samples = [
-  (.samples[0] | .timestamp += 6 | .net_rx_total=805306368 | .net_tx_total=536870912),
-  (.samples[0] | .timestamp += 7 | .net_rx_total=1073741824 | .net_tx_total=805306368)
-]')
-request -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  --data "$cycle_report" "$MONITOR_BASE_URL/api/agent/report" | jq -e '.collect_interval == 5' >/dev/null
-request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/bootstrap" | \
-  jq -e --arg id "$server_id" '.servers | any(.id == $id and .net_rx_total == 268435456 and .net_tx_total == 268435456)' >/dev/null
-
-# Exercise the protocol maximum so batch aggregation and request-size limits
-# stay covered when an Agent flushes a full pending queue.
-stress_report_file=$(mktemp "${TMPDIR:-/tmp}/nodeflare-stress.XXXXXX")
-printf '%s' "$report" | jq '(now | floor) as $start | .samples = [
-  range(0; 720) as $index |
-  (.samples[0] |
-    .timestamp=($start + $index + 10) |
-    .net_rx_total=(1073741824 + (($index + 1) * 4096)) |
-    .net_tx_total=(805306368 + (($index + 1) * 2048)))
-]' >"$stress_report_file"
-request -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  --data-binary "@$stress_report_file" "$MONITOR_BASE_URL/api/agent/report" | jq -e '.collect_interval == 5' >/dev/null
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/history/$server_id?hours=1" | jq -e '.points | length >= 1 and any(.gpu_usage == 32.5)' >/dev/null
 history_cache_header=$(monitor_curl --silent --dump-header - --output /dev/null \
   -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/history/$server_id?hours=1" | \
@@ -223,10 +154,10 @@ request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/js
   --data '{"name":"Smoke TCP","task_type":"tcp","target":"example.com","port":443,"interval_seconds":60,"default_enabled":true,"server_ids":[]}' \
   "$MONITOR_BASE_URL/api/admin/latency-tasks/$latency_task_id" >/dev/null
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/latency/$server_id?hours=1" | jq -e --arg task_id "$latency_task_id" '(.tasks | all(.id != $task_id)) and (.points | all(.task_id != $task_id))' >/dev/null
-stale_latency_response=$(request -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  --data "$latency_report" "$MONITOR_BASE_URL/api/agent/report")
-printf '%s' "$stale_latency_response" | jq -e --arg task_id "$latency_task_id" \
-  '.latency_tasks | all(.id != $task_id)' >/dev/null
+MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
+  MONITOR_AGENT_TOKEN="$agent_token" MONITOR_SERVER_ID="$server_id" \
+  MONITOR_LATENCY_TASK_ID="$latency_task_id" MONITOR_EXPECT_TASK_ASSIGNED=0 \
+  MONITOR_CONFIG_ONLY=1 node scripts/websocket-smoke.mjs
 
 alert_rule_json=$(request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
   --data "$(jq -nc --arg server_id "$server_id" '{name:"Smoke CPU",metric:"cpu",threshold:80,duration_minutes:5,aggregation:"average",enabled:true,server_ids:[$server_id]}')" \

@@ -1,3 +1,4 @@
+import type { CarrierSlotKey } from "./latency";
 import { ASSET_CURRENCIES, type AssetCurrency, type Config, type ThemeSettingValue } from "./types";
 
 function option(config: Config, key: string): ThemeSettingValue | undefined {
@@ -14,6 +15,24 @@ export function assetCurrency(config: Config): AssetCurrency {
 export function themeToggle(config: Config, key: string, fallback = true) {
   const value = option(config, key);
   return typeof value === "boolean" ? value : fallback;
+}
+
+export function themeText(config: Config, key: string) {
+  const value = option(config, key);
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Carrier line names as configured in the theme settings. Blank entries are
+ * intentional: the latency layer falls back to name matching when all three
+ * are empty, so an unconfigured site still shows sensible lines.
+ */
+export function carrierSelection(config: Config): CarrierSlotKey {
+  return {
+    telecom: themeText(config, "telecomLatencyTask"),
+    mobile: themeText(config, "mobileLatencyTask"),
+    unicom: themeText(config, "unicomLatencyTask"),
+  };
 }
 
 export function resolveBackground(raw: string, dark: boolean) {

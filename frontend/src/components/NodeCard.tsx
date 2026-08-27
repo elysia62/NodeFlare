@@ -21,7 +21,8 @@ import {
 } from "../format";
 import type { Config, Server } from "../types";
 import { ui } from "../locale";
-import { useNodeLatency, type LatencyBar } from "../hooks/useNodeLatency";
+import { carrierSelection, themeToggle } from "../theme";
+import { useNodeLatency, type CarrierLatencyRow, type LatencyBar } from "../hooks/useNodeLatency";
 import { Flag } from "./Flag";
 import { OSIcon } from "./OSIcon";
 import { ProgressBar } from "./ProgressBar";
@@ -40,25 +41,55 @@ function CompactLine({ icon, children, tone = "" }: { icon: React.ReactNode; chi
   return <b className={tone}><span>{icon}</span><em>{children}</em></b>;
 }
 
+function QualityBars({ bars }: { bars: LatencyBar[] }) {
+  return (
+    <div className="quality-bars" style={{ gridTemplateColumns: `repeat(${Math.max(1, bars.length)}, minmax(0, 1fr))` }}>
+      {bars.map((bar, index) => {
+        const alignment = bars.length === 1 || (index >= 3 && index < bars.length - 3)
+          ? "center"
+          : index < 3 ? "start" : "end";
+        return <span className="quality-bar" key={bar.key}>
+          <i className={bar.tone} />
+          <small className={`quality-tooltip ${alignment}`} role="tooltip">{bar.tooltip}</small>
+        </span>;
+      })}
+    </div>
+  );
+}
+
 function QualityPanel({ label, value, bars }: {
   label: string;
   value: string;
   bars: LatencyBar[];
 }) {
   return (
-    <div className="quality-panel">
+    <div className="quality-panel" aria-label={`${label} ${value}`}>
       <div><span>{label}</span><b>{value}</b></div>
-      <div className="quality-bars" style={{ gridTemplateColumns: `repeat(${Math.max(1, bars.length)}, minmax(0, 1fr))` }}>
-        {bars.map((bar, index) => {
-          const alignment = bars.length === 1 || (index >= 3 && index < bars.length - 3)
-            ? "center"
-            : index < 3 ? "start" : "end";
-          return <span className="quality-bar" key={bar.key}>
-            <i className={bar.tone} />
-            <small className={`quality-tooltip ${alignment}`} role="tooltip">{bar.tooltip}</small>
-          </span>;
-        })}
-      </div>
+      <QualityBars bars={bars} />
+    </div>
+  );
+}
+
+/** One column per metric, one row per carrier line. */
+function CarrierPanel({ label, rows, kind, empty }: {
+  label: string;
+  rows: CarrierLatencyRow[];
+  kind: "latency" | "loss";
+  empty: string;
+}) {
+  return (
+    <div className="quality-panel carrier-panel">
+      <div><span>{label}</span></div>
+      {rows.length ? <div className="carrier-rows">
+        {rows.map((row) => <div className="carrier-row" key={row.id}>
+          <div className="carrier-row-head" title={row.name}>
+            <i style={{ backgroundColor: row.color }} />
+            <span>{row.label}</span>
+            <b>{kind === "latency" ? row.latencyDisplay : row.lossDisplay}</b>
+          </div>
+          <QualityBars bars={kind === "latency" ? row.latencyBars : row.lossBars} />
+        </div>)}
+      </div> : <div className="empty-inline">{empty}</div>}
     </div>
   );
 }
@@ -70,11 +101,17 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
   const disk = percent(server.disk_used, server.disk_total);
   const usedTraffic = trafficUsed(server);
   const traffic = server.traffic_limit > 0 ? Math.min(100, (usedTraffic / server.traffic_limit) * 100) : 0;
-  const quality = useNodeLatency(server, config.show_latency);
   const locale = config.locale;
+  const showCarriers = themeToggle(config, "showCarrierLatency", false);
+  // The hook keys its memo on the selection values, not the object identity,
+  // so rebuilding this each render is free.
+  const quality = useNodeLatency(server, config.show_latency, locale, showCarriers ? carrierSelection(config) : null);
   const price = formatPrice(server, locale);
   const remainingValue = remainingAssetValue(server.price, server.billing_cycle, server.expires_at);
   const showExpiryPanel = config.show_expiry || config.show_price;
+  const carrierEmpty = quality.loading
+    ? ui(locale, "加载中", "Loading")
+    : ui(locale, "未匹配到线路", "No lines matched");
 
   return (
     <button className={`node-card glass-panel ${online ? "" : "offline"}`} onClick={onOpen} type="button" aria-label={ui(locale, `查看 ${server.name} 详情`, `View ${server.name} details`)}>
@@ -118,8 +155,13 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
         </div>
 
         {config.show_latency ? <div className="quality-grid">
-          <QualityPanel label={ui(locale, "延迟", "Latency")} value={quality.latencyDisplay} bars={quality.latencyBars} />
-          <QualityPanel label={ui(locale, "丢包", "Packet loss")} value={quality.lossDisplay} bars={quality.lossBars} />
+          {showCarriers ? <>
+            <CarrierPanel label={ui(locale, "延迟", "Latency")} rows={quality.carriers} kind="latency" empty={carrierEmpty} />
+            <CarrierPanel label={ui(locale, "丢包", "Packet loss")} rows={quality.carriers} kind="loss" empty={carrierEmpty} />
+          </> : <>
+            <QualityPanel label={ui(locale, "延迟", "Latency")} value={quality.latencyDisplay} bars={quality.latencyBars} />
+            <QualityPanel label={ui(locale, "丢包", "Packet loss")} value={quality.lossDisplay} bars={quality.lossBars} />
+          </>}
         </div> : null}
       </div>
     </button>

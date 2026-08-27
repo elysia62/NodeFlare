@@ -82,12 +82,21 @@ pub struct SettingsInput {
     pub turnstile_site_key: Option<String>,
     pub turnstile_secret_key: Option<String>,
     pub notification_enabled: Option<bool>,
-    pub notification_endpoint: Option<String>,
-    pub notification_target: Option<String>,
     pub offline_alert_minutes: Option<i64>,
     pub expiry_alert_days: Option<i64>,
+    pub traffic_alert_percentage: Option<i64>,
     pub cloudflare_account_id: Option<String>,
     pub cloudflare_api_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramNotificationInput {
+    pub bot_token: String,
+    pub chat_id: String,
+    #[serde(default)]
+    pub message_thread_id: Option<i64>,
+    pub template: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,12 +183,6 @@ pub struct AgentGpuMetric {
     pub usage: Option<f64>,
     pub memory_used: i64,
     pub memory_total: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentReportBatch {
-    pub samples: Vec<AgentReport>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

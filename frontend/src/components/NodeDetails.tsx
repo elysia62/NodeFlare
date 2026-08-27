@@ -13,7 +13,6 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -22,6 +21,7 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "../api";
+import { chartGapLimit, chartTimeLabel, chartTimeRange, insertTimelineGaps } from "../chart";
 import { demoHistory, demoLatencyHistory, demoLatencyTasks } from "../demo";
 import { displayGpuDevices, formatBytes, formatCpuName, formatSpeed, formatUptime, isOnline, number } from "../format";
 import type { HistoryPoint, LatencySample, LatencyTestPoint, LiveLatencyResult, Server } from "../types";
@@ -98,7 +98,7 @@ function average(values: number[]): number | null {
 }
 
 function latencyBucketSeconds(hours: number, taskCount: number): number {
-  const boundedHours = Math.max(1, Math.min(24 * 365, Math.trunc(hours)));
+  const boundedHours = Math.max(1, Math.min(24 * 30, Math.trunc(hours)));
   const boundedTasks = Math.max(1, Math.min(128, Math.trunc(taskCount)));
   const base = boundedHours === 1 ? 60
     : boundedHours <= 4 ? 120
@@ -134,37 +134,64 @@ interface LatencyChartPoint {
   value: number | null;
 }
 
-function latencyChartGapLimit(hours: number): number {
-  return Math.max(5 * 60_000, (hours * 60 * 60_000) / 36);
+interface LoadChartPoint {
+  timestamp: number;
+  time: string;
+  cpu: number | null;
+  mem_used: number | null;
+  mem_total: number;
+  disk_used: number | null;
+  disk_total: number;
+  net_in: number | null;
+  net_out: number | null;
 }
 
 function insertLatencyGaps(points: LatencyChartPoint[], hours: number): LatencyChartPoint[] {
-  if (points.length < 2) return points;
-  const intervals = points.slice(1)
-    .map((point, index) => point.timestamp - points[index].timestamp)
-    .filter((interval) => interval > 0 && Number.isFinite(interval))
-    .sort((left, right) => left - right);
-  if (!intervals.length) return points;
-  const typicalInterval = intervals[Math.floor((intervals.length - 1) / 4)];
-  const threshold = Math.min(Math.max(10_000, typicalInterval * 1.5), latencyChartGapLimit(hours));
-  const result: LatencyChartPoint[] = [points[0]];
-  for (let index = 1; index < points.length; index += 1) {
-    const previous = points[index - 1];
-    const current = points[index];
-    if (current.timestamp - previous.timestamp > threshold) {
-      result.push({ timestamp: previous.timestamp + typicalInterval, label: "", value: null });
-    }
-    result.push(current);
-  }
-  return result;
+  return insertTimelineGaps(
+    points,
+    (timestamp) => ({ timestamp, label: "", value: null }),
+    { minGap: 10_000, maxGap: chartGapLimit(hours) },
+  );
 }
 
-function latencyChartTime(timestamp: number, hours: number, locale: "zh-CN" | "en"): string {
-  const date = new Date(timestamp);
-  if (hours <= 1) return date.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-  if (hours <= 4) return date.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", hour12: false });
-  if (hours <= 24) return date.toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-  return date.toLocaleDateString(locale, { month: "2-digit", day: "2-digit" });
+function loadChartTime(timestamp: number, hours: number, locale: "zh-CN" | "en"): string {
+  return new Date(timestamp * 1000).toLocaleString(locale, hours >= 24
+    ? { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }
+    : { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function insertLoadGaps(points: HistoryPoint[], hours: number, locale: "zh-CN" | "en"): LoadChartPoint[] {
+  const mapped = points
+    .filter((point) => Number.isFinite(point.timestamp) && point.timestamp > 0)
+    .sort((left, right) => left.timestamp - right.timestamp)
+    .map((point) => ({
+      timestamp: point.timestamp,
+      time: loadChartTime(point.timestamp, hours, locale),
+      cpu: Number.isFinite(point.cpu) ? point.cpu : null,
+      mem_used: Number.isFinite(point.mem_used) ? point.mem_used : null,
+      mem_total: Math.max(0, number(point.mem_total)),
+      disk_used: Number.isFinite(point.disk_used) ? point.disk_used : null,
+      disk_total: Math.max(0, number(point.disk_total)),
+      net_in: Number.isFinite(point.net_in) ? point.net_in : null,
+      net_out: Number.isFinite(point.net_out) ? point.net_out : null,
+    }));
+  // Load history keeps second-resolution timestamps, so the gap bounds are
+  // the millisecond limits divided back down.
+  return insertTimelineGaps(
+    mapped,
+    (timestamp) => ({
+      timestamp,
+      time: "",
+      cpu: null,
+      mem_used: null,
+      mem_total: 0,
+      disk_used: null,
+      disk_total: 0,
+      net_in: null,
+      net_out: null,
+    }),
+    { minGap: 10, maxGap: chartGapLimit(hours) / 1000 },
+  );
 }
 
 const tooltipStyle = {
@@ -189,6 +216,7 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
   const [points, setPoints] = useState<HistoryPoint[]>([]);
   const [latencyPoints, setLatencyPoints] = useState<LatencySample[]>([]);
   const [latencyTasks, setLatencyTasks] = useState<LatencyTestPoint[]>([]);
+  const [hiddenLatencyTaskIds, setHiddenLatencyTaskIds] = useState<Set<string>>(() => new Set());
   const [loadLoading, setLoadLoading] = useState(true);
   const [latencyLoading, setLatencyLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -284,6 +312,14 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
     setLatencyPoints((current) => mergeLatencySamples(current, samples, latencyHours, latencyTasks.length));
   }, [demo, latencyHours, latencyTasks, liveLatencyResults, server.id]);
 
+  useEffect(() => {
+    setHiddenLatencyTaskIds((current) => {
+      const available = new Set(latencyTasks.map((task) => task.id));
+      const next = new Set([...current].filter((id) => available.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [latencyTasks]);
+
   const online = isOnline(server, threshold);
   const gpuDevices = useMemo(() => displayGpuDevices(server.gpus), [server.gpus]);
   const gpuNames = gpuDevices.map((gpu) => gpu.model).join(" · ");
@@ -297,12 +333,11 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
   ].filter((range) => range.value <= Math.max(24, retentionDays * 24));
   const ranges = chartType === "load" ? loadRanges : loadRanges.filter((range) => range.value > 0);
   const hours = chartType === "load" ? loadHours : latencyHours;
-  const data = useMemo(() => points.map((point) => ({
-    ...point,
-    time: new Date(point.timestamp * 1000).toLocaleString(locale, hours >= 24
-      ? { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }
-      : { hour: "2-digit", minute: "2-digit", hour12: false }),
-  })), [points, hours, locale]);
+  const loadChartHours = loadHours === 0 ? 1 : loadHours;
+  const data = useMemo(
+    () => insertLoadGaps(points, loadChartHours, locale),
+    [loadChartHours, locale, points],
+  );
   const latencySeries = useMemo(() => {
     return latencyTasks.map((task, index) => {
       const samples = latencyPoints.filter((point) => point.task_id === task.id);
@@ -311,7 +346,7 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
         .sort((left, right) => left.timestamp - right.timestamp)
         .map((sample) => ({
           timestamp: sample.timestamp * 1000,
-          label: latencyChartTime(sample.timestamp * 1000, hours, locale),
+          label: chartTimeLabel(sample.timestamp * 1000, hours, locale),
           value: sample.latency_ms >= 0 ? sample.latency_ms : null,
         }));
       return {
@@ -324,25 +359,30 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
       };
     });
   }, [hours, latencyPoints, latencyTasks, locale]);
+  const visibleLatencySeries = useMemo(
+    () => latencySeries.filter((series) => !hiddenLatencyTaskIds.has(series.id)),
+    [hiddenLatencyTaskIds, latencySeries],
+  );
   const latencyData = useMemo(() => {
     const timestamps = new Set<number>();
-    for (const series of latencySeries) {
+    for (const series of visibleLatencySeries) {
       for (const point of series.points) timestamps.add(point.timestamp);
     }
     return Array.from(timestamps)
       .sort((left, right) => left - right)
-      .map((timestamp) => ({ timestamp, label: latencyChartTime(timestamp, hours, locale) }));
-  }, [hours, latencySeries, locale]);
-  const latencyTimeRange = useMemo(() => {
-    const now = Date.now();
-    const start = now - latencyHours * 60 * 60_000;
-    return {
-      domain: [start, now] as [number, number],
-      ticks: Array.from({ length: 5 }, (_, index) => start + ((now - start) * index) / 4),
-    };
-  }, [latencyHours, latencyPoints]);
+      .map((timestamp) => ({ timestamp, label: chartTimeLabel(timestamp, hours, locale) }));
+  }, [hours, locale, visibleLatencySeries]);
+  const latencyTimeRange = useMemo(() => chartTimeRange(latencyHours), [latencyHours, latencyPoints]);
   const last = data[data.length - 1];
   const pingEnabled = latencyTasks.length > 0;
+  const toggleLatencyTask = (taskId: string) => {
+    setHiddenLatencyTaskIds((current) => {
+      const next = new Set(current);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  };
 
   return (
     <div className="detail-page">
@@ -401,23 +441,38 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
         ) : (
           <section className="latency-overview glass-panel">
             <div className="latency-summary-grid" style={{ gridTemplateColumns: `repeat(${Math.max(1, latencySeries.length)}, minmax(180px, 1fr))` }}>
-              {latencySeries.map((series) => <div className="latency-summary" key={series.id}>
+              {latencySeries.map((series) => <div className={`latency-summary ${hiddenLatencyTaskIds.has(series.id) ? "hidden" : ""}`} key={series.id}>
                 <span><i style={{ backgroundColor: series.color }} />{series.name}</span>
                 <strong>{series.latency == null ? "--" : `${series.latency.toFixed(2)} ms`}</strong>
                 <small>{series.loss == null ? "--" : `${series.loss.toFixed(2)}%`} 平均丢包</small>
               </div>)}
             </div>
+            <div className="latency-task-legend" aria-label={ui(locale, "延迟任务", "Latency tasks")}>
+              {latencySeries.map((series) => {
+                const hidden = hiddenLatencyTaskIds.has(series.id);
+                return <button
+                  className={`latency-task-toggle ${hidden ? "hidden" : ""}`}
+                  key={series.id}
+                  type="button"
+                  aria-pressed={!hidden}
+                  title={hidden ? ui(locale, "显示此任务", "Show this task") : ui(locale, "隐藏此任务", "Hide this task")}
+                  onClick={() => toggleLatencyTask(series.id)}
+                >
+                  <i style={{ backgroundColor: series.color }} />
+                  <span>{series.name}</span>
+                </button>;
+              })}
+            </div>
             <div className="latency-line-chart">
-              {latencyData.length ? <ResponsiveContainer width="100%" height="100%">
+              {latencyData.length && visibleLatencySeries.length ? <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={latencyData} margin={{ top: 10, right: 12, left: 4, bottom: 2 }}>
                   <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" />
-                  <XAxis dataKey="timestamp" type="number" domain={latencyTimeRange.domain} ticks={latencyTimeRange.ticks} allowDataOverflow tick={{ fontSize: 10 }} minTickGap={40} tickFormatter={(value) => latencyChartTime(Number(value), latencyHours, locale)} />
+                  <XAxis dataKey="timestamp" type="number" domain={latencyTimeRange.domain} ticks={latencyTimeRange.ticks} allowDataOverflow tick={{ fontSize: 10 }} minTickGap={40} tickFormatter={(value) => chartTimeLabel(Number(value), latencyHours, locale)} />
                   <YAxis tick={{ fontSize: 10 }} width={48} unit="ms" />
-                  <Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => latencyChartTime(Number(value), latencyHours, locale)} formatter={(value, name) => [value == null ? "--" : `${Number(value).toFixed(1)} ms`, name]} />
-                  <Legend iconType="rect" iconSize={9} wrapperStyle={{ fontSize: 11, paddingTop: 10 }} />
-                  {latencySeries.map((series) => <Line key={series.id} data={series.points} type="monotone" dataKey="value" name={series.name} stroke={series.color} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />)}
+                  <Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), latencyHours, locale)} formatter={(value, name) => [value == null ? "--" : `${Number(value).toFixed(1)} ms`, name]} />
+                  {visibleLatencySeries.map((series) => <Line key={series.id} data={series.points} type="monotone" dataKey="value" name={series.name} stroke={series.color} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />)}
                 </LineChart>
-              </ResponsiveContainer> : <div className="latency-empty">{ui(locale, "暂无延迟数据", "No latency data")}</div>}
+              </ResponsiveContainer> : <div className="latency-empty">{visibleLatencySeries.length ? ui(locale, "暂无延迟数据", "No latency data") : ui(locale, "已隐藏全部任务", "All tasks are hidden")}</div>}
             </div>
           </section>
         )}

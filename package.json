@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "repository": "https://github.com/imengying/NodeFlare",
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.0",
   "workspaces": [
     "frontend"
   ],
@@ -19,8 +19,8 @@
     "test:smoke": "sh scripts/smoke-test.sh"
   },
   "devDependencies": {
-    "wrangler": "^4.123.0",
-    "ws": "^8.21.0"
+    "wrangler": "^4.127.0",
+    "ws": "^8.21.3"
   },
   "overrides": {
     "nanoid": "3.3.18"

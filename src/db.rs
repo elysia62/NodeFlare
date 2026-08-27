@@ -1,22 +1,77 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize, Serializer};
-use worker::{wasm_bindgen::JsValue, D1Database, Date, Result};
+use worker::{wasm_bindgen::JsValue, D1Database, D1PreparedStatement, Date, Result};
 
 use crate::models::{
     AgentConfigView, AgentIdentityRow, AgentReport, AlertRuleInput, AlertRuleView, HistoryPoint,
     ServerInput, ServerView, SettingsInput, ThemeInput, ThemeView,
 };
 
+pub(crate) const HISTORY_WRITE_INTERVAL_SECONDS: i64 = 120;
+pub(crate) const MAX_HISTORY_RETENTION_DAYS: i64 = 30;
+
+/// 分钟粒度历史按天轮换，`metric_history` 的上一代留在 `metric_history_old`。
+/// 轮换而不是 DELETE 的理由：DELETE 每行计一行 D1 写入，DROP TABLE 不计。
+/// 代价是当前表在刚轮换后是空的，所以任何近期读取都必须走 [`RECENT_HISTORY`]。
+pub(crate) const HISTORY_ROTATION_INTERVAL_SECONDS: i64 = 86_400;
+
+/// 分钟粒度历史的读取源。两代合起来覆盖 24-48 小时。
+///
+/// 轮换边界上同一分钟桶可能在两张表里各有一行（当前表刚建好、旧表还留着同
+/// 一分钟的前半段）。所有消费方都按 `sample_count` 加权聚合，两个半行合并后
+/// 与单行等价，所以重复是良性的，不需要去重。
+pub(crate) const RECENT_HISTORY: &str =
+    "SELECT * FROM metric_history UNION ALL SELECT * FROM metric_history_old";
+
+/// `metric_history` 及其轮换副本的表结构，两处必须完全一致。
+///
+/// 轮换要在运行时重建表，所以 DDL 不能只存在于 migration 里。
+/// `metric_history_ddl_matches_migration` 测试比对本函数与 migration 的文本，
+/// 防止两边漂移。
+pub(crate) fn metric_history_ddl(table: &str) -> String {
+    format!(
+        r#"CREATE TABLE {table} (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  timestamp INTEGER NOT NULL,
+  cpu REAL NOT NULL DEFAULT 0,
+  load1 REAL NOT NULL DEFAULT 0,
+  load5 REAL NOT NULL DEFAULT 0,
+  load15 REAL NOT NULL DEFAULT 0,
+  mem_used INTEGER NOT NULL DEFAULT 0,
+  mem_total INTEGER NOT NULL DEFAULT 0,
+  swap_used INTEGER NOT NULL DEFAULT 0,
+  swap_total INTEGER NOT NULL DEFAULT 0,
+  disk_used INTEGER NOT NULL DEFAULT 0,
+  disk_total INTEGER NOT NULL DEFAULT 0,
+  net_in REAL NOT NULL DEFAULT 0,
+  net_out REAL NOT NULL DEFAULT 0,
+  net_rx_total INTEGER NOT NULL DEFAULT 0,
+  net_tx_total INTEGER NOT NULL DEFAULT 0,
+  processes INTEGER NOT NULL DEFAULT 0,
+  tcp_connections INTEGER NOT NULL DEFAULT 0,
+  udp_connections INTEGER NOT NULL DEFAULT 0,
+  gpu_usage REAL NOT NULL DEFAULT 0,
+  disk_read_bps REAL NOT NULL DEFAULT 0,
+  disk_write_bps REAL NOT NULL DEFAULT 0,
+  disk_read_iops REAL NOT NULL DEFAULT 0,
+  disk_write_iops REAL NOT NULL DEFAULT 0,
+  disk_await_ms REAL NOT NULL DEFAULT 0,
+  disk_utilization REAL NOT NULL DEFAULT 0,
+  sample_count INTEGER NOT NULL DEFAULT 1 CHECK(sample_count > 0),
+  latest_timestamp INTEGER NOT NULL,
+  latest_json TEXT NOT NULL CHECK(json_valid(latest_json)),
+  latency_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(latency_json)),
+  PRIMARY KEY(server_id, timestamp)
+) WITHOUT ROWID"#
+    )
+}
+
 const SERVER_SELECT: &str = r#"
 WITH latest_state AS (
-  SELECT s0.id AS server_id, COALESCE(
-    (SELECT h.latest_json FROM metric_history h
-     WHERE h.server_id = s0.id ORDER BY h.timestamp DESC LIMIT 1),
-    (SELECT h.latest_json FROM metric_history_hourly h
-     WHERE h.server_id = s0.id ORDER BY h.timestamp DESC LIMIT 1)
-  ) AS state
+  SELECT s0.id AS server_id, l.latest_json AS state
   FROM servers s0
+  LEFT JOIN server_latest_state l ON l.server_id = s0.id
 )
 SELECT
   s.id, s.name, s.region, s.group_name, s.tags, s.hidden,
@@ -131,18 +186,6 @@ pub struct TrafficCounterState {
     pub raw_tx: i64,
     pub used_rx: i64,
     pub used_tx: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct TrafficCounterContext {
-    configured_reset_day: i64,
-    cycle_key: i64,
-    traffic_reset_day: i64,
-    traffic_timestamp: i64,
-    raw_rx: i64,
-    raw_tx: i64,
-    used_rx: i64,
-    used_tx: i64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -357,11 +400,9 @@ pub struct SettingsView {
     #[serde(serialize_with = "serialize_secret")]
     pub turnstile_secret_key: String,
     pub notification_enabled: bool,
-    #[serde(serialize_with = "serialize_secret")]
-    pub notification_endpoint: String,
-    pub notification_target: String,
     pub offline_alert_minutes: i64,
     pub expiry_alert_days: i64,
+    pub traffic_alert_percentage: i64,
     #[serde(serialize_with = "serialize_secret")]
     pub cloudflare_account_id: String,
     #[serde(serialize_with = "serialize_secret")]
@@ -415,12 +456,6 @@ pub struct AlertMetricRow {
     pub report_interval: i64,
 }
 
-#[derive(Debug, Deserialize)]
-struct AlertStateRow {
-    rule_id: String,
-    server_id: String,
-}
-
 fn now() -> i64 {
     Date::now().as_millis() as i64 / 1000
 }
@@ -468,6 +503,7 @@ pub(crate) fn traffic_cycle_key(timestamp: i64, reset_day: i64) -> i64 {
     }
 }
 
+#[cfg(test)]
 impl TrafficCounterState {
     pub fn apply(&mut self, report: &AgentReport, configured_reset_day: i64) {
         if report.timestamp <= self.timestamp {
@@ -500,31 +536,6 @@ impl TrafficCounterState {
         self.timestamp = report.timestamp;
         self.raw_rx = report.net_rx_total;
         self.raw_tx = report.net_tx_total;
-    }
-
-    pub fn extend(&mut self, reports: &[AgentReport], configured_reset_day: i64) {
-        let mut reports = reports.iter().collect::<Vec<_>>();
-        reports.sort_by_key(|report| report.timestamp);
-        for report in reports {
-            self.apply(report, configured_reset_day);
-        }
-    }
-}
-
-impl TrafficCounterContext {
-    fn into_parts(self) -> (TrafficCounterState, i64) {
-        (
-            TrafficCounterState {
-                cycle_key: self.cycle_key,
-                reset_day: self.traffic_reset_day,
-                timestamp: self.traffic_timestamp,
-                raw_rx: self.raw_rx,
-                raw_tx: self.raw_tx,
-                used_rx: self.used_rx,
-                used_tx: self.used_tx,
-            },
-            self.configured_reset_day,
-        )
     }
 }
 
@@ -563,12 +574,7 @@ pub async fn agent_live_context(db: &D1Database, id: &str) -> Result<Option<Agen
     let mut context: Option<AgentLiveContext> = db
         .prepare(
             r#"WITH latest_state AS (
-             SELECT COALESCE(
-               (SELECT latest_json FROM metric_history
-                WHERE server_id = ?1 ORDER BY timestamp DESC LIMIT 1),
-               (SELECT latest_json FROM metric_history_hourly
-                WHERE server_id = ?1 ORDER BY timestamp DESC LIMIT 1)
-             ) AS state
+             SELECT latest_json AS state FROM server_latest_state WHERE server_id = ?1
            ) SELECT
              s.report_interval,
              s.collect_interval,
@@ -584,7 +590,7 @@ pub async fn agent_live_context(db: &D1Database, id: &str) -> Result<Option<Agen
              s.tx_correction,
              COALESCE(CAST(json_extract(m.state, '$.report.timestamp') AS INTEGER), 0) AS last_persisted_at
            FROM servers s
-           CROSS JOIN latest_state m
+           LEFT JOIN latest_state m ON true
            WHERE s.id = ?1
            LIMIT 1"#,
         )
@@ -808,11 +814,19 @@ pub async fn list_alert_rules(db: &D1Database) -> Result<Vec<AlertRuleView>> {
     Ok(rules)
 }
 
-async fn replace_alert_rule_servers(
+pub async fn has_enabled_alert_rules(db: &D1Database) -> Result<bool> {
+    Ok(db
+        .prepare("SELECT 1 AS present FROM alert_rules WHERE enabled=1 LIMIT 1")
+        .first::<serde_json::Value>(None)
+        .await?
+        .is_some())
+}
+
+fn alert_rule_server_statements(
     db: &D1Database,
     rule_id: &str,
     server_ids: &[String],
-) -> Result<()> {
+) -> Result<Vec<D1PreparedStatement>> {
     let mut statements = vec![db
         .prepare("DELETE FROM alert_rule_servers WHERE rule_id = ?1")
         .bind(&[text(rule_id)])?];
@@ -820,34 +834,43 @@ async fn replace_alert_rule_servers(
     for server_id in server_ids {
         statements.push(insert.clone().bind(&[text(rule_id), text(server_id)])?);
     }
-    db.batch(statements).await?;
-    Ok(())
+    Ok(statements)
 }
 
 pub async fn create_alert_rule(db: &D1Database, id: &str, input: &AlertRuleInput) -> Result<()> {
     let timestamp = now();
-    db.prepare(
-        "INSERT INTO alert_rules(id, name, metric, threshold, duration_minutes, \
+    let mut statements = vec![db
+        .prepare(
+            "INSERT INTO alert_rules(id, name, metric, threshold, duration_minutes, \
          aggregation, enabled, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-    )
-    .bind(&[
-        text(id),
-        text(input.name.trim()),
-        text(input.metric.trim()),
-        number(input.threshold),
-        number(input.duration_minutes),
-        text(input.aggregation.trim()),
-        JsValue::from_bool(input.enabled),
-        number(timestamp),
-    ])?
-    .run()
-    .await?;
-    replace_alert_rule_servers(db, id, &input.server_ids).await
+        )
+        .bind(&[
+            text(id),
+            text(input.name.trim()),
+            text(input.metric.trim()),
+            number(input.threshold),
+            number(input.duration_minutes),
+            text(input.aggregation.trim()),
+            JsValue::from_bool(input.enabled),
+            number(timestamp),
+        ])?];
+    statements.extend(alert_rule_server_statements(db, id, &input.server_ids)?);
+    db.batch(statements).await?;
+    Ok(())
 }
 
 pub async fn update_alert_rule(db: &D1Database, id: &str, input: &AlertRuleInput) -> Result<bool> {
-    let result = db
+    let exists = db
+        .prepare("SELECT 1 AS present FROM alert_rules WHERE id=?1 LIMIT 1")
+        .bind(&[text(id)])?
+        .first::<serde_json::Value>(None)
+        .await?
+        .is_some();
+    if !exists {
+        return Ok(false);
+    }
+    let mut statements = vec![db
         .prepare(
             "UPDATE alert_rules SET name=?2, metric=?3, threshold=?4, duration_minutes=?5, \
          aggregation=?6, enabled=?7, updated_at=?8 WHERE id=?1",
@@ -861,14 +884,10 @@ pub async fn update_alert_rule(db: &D1Database, id: &str, input: &AlertRuleInput
             text(input.aggregation.trim()),
             JsValue::from_bool(input.enabled),
             number(now()),
-        ])?
-        .run()
-        .await?;
-    let changed = result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) > 0;
-    if changed {
-        replace_alert_rule_servers(db, id, &input.server_ids).await?;
-    }
-    Ok(changed)
+        ])?];
+    statements.extend(alert_rule_server_statements(db, id, &input.server_ids)?);
+    db.batch(statements).await?;
+    Ok(true)
 }
 
 pub async fn delete_alert_rule(db: &D1Database, id: &str) -> Result<bool> {
@@ -886,63 +905,20 @@ pub(crate) fn alert_window_covered(
     current_time: i64,
 ) -> bool {
     let window_seconds = duration_minutes.clamp(1, 1440) * 60;
-    let report_interval = row.report_interval.clamp(15, 3600).max(60);
-    let expected_samples = ((window_seconds + report_interval - 1) / report_interval).max(1);
+    let sample_interval = row
+        .report_interval
+        .clamp(15, 3600)
+        .max(HISTORY_WRITE_INTERVAL_SECONDS);
+    let expected_samples = ((window_seconds + sample_interval - 1) / sample_interval).max(1);
     let required_samples = if expected_samples == 1 {
         1
     } else {
         ((expected_samples * 3 + 4) / 5).max(2)
     };
-    let fresh_within = (report_interval * 2).max(120);
+    let fresh_within = sample_interval * 2;
     row.sample_count >= required_samples
         && row.first_timestamp <= row.last_timestamp
         && current_time.saturating_sub(row.last_timestamp) <= fresh_within
-}
-
-pub async fn active_alert_states(db: &D1Database) -> Result<std::collections::HashSet<String>> {
-    let rows: Vec<AlertStateRow> = db
-        .prepare("SELECT rule_id, server_id FROM alert_states WHERE active=1")
-        .all()
-        .await?
-        .results()?;
-    Ok(rows
-        .into_iter()
-        .map(|row| format!("{}:{}", row.rule_id, row.server_id))
-        .collect())
-}
-
-pub async fn sync_active_alert_states(
-    db: &D1Database,
-    previous: &std::collections::HashSet<String>,
-    current: &std::collections::HashSet<String>,
-) -> Result<()> {
-    let mut statements = Vec::new();
-    let delete = db.prepare("DELETE FROM alert_states WHERE rule_id=?1 AND server_id=?2");
-    let insert = db.prepare(
-        "INSERT INTO alert_states(rule_id, server_id, active, updated_at) VALUES (?1, ?2, 1, ?3) \
-         ON CONFLICT(rule_id, server_id) DO UPDATE SET active=1, updated_at=excluded.updated_at",
-    );
-    let timestamp = now();
-    for key in previous.difference(current) {
-        let Some((rule_id, server_id)) = key.split_once(':') else {
-            continue;
-        };
-        statements.push(delete.clone().bind(&[text(rule_id), text(server_id)])?);
-    }
-    for key in current.difference(previous) {
-        let Some((rule_id, server_id)) = key.split_once(':') else {
-            continue;
-        };
-        statements.push(insert.clone().bind(&[
-            text(rule_id),
-            text(server_id),
-            number(timestamp),
-        ])?);
-    }
-    if !statements.is_empty() {
-        db.batch(statements).await?;
-    }
-    Ok(())
 }
 
 pub async fn history(db: &D1Database, id: &str, hours: i64) -> Result<Vec<HistoryPoint>> {
@@ -956,9 +932,9 @@ pub async fn history(db: &D1Database, id: &str, hours: i64) -> Result<Vec<Histor
         _ => 14_400,
     };
     let source = if hours <= 24 {
-        "SELECT * FROM metric_history".to_string()
+        RECENT_HISTORY.to_string()
     } else {
-        "SELECT * FROM metric_history UNION ALL SELECT * FROM metric_history_hourly".to_string()
+        format!("{RECENT_HISTORY} UNION ALL SELECT * FROM metric_history_hourly")
     };
     let query = format!(
         r#"SELECT
@@ -1007,79 +983,30 @@ pub(crate) fn reports_after(reports: &[AgentReport], timestamp: i64) -> Vec<Agen
         .collect()
 }
 
-pub async fn save_reports(
-    db: &D1Database,
-    server_id: &str,
-    reports: &[AgentReport],
-) -> Result<Option<HistoryPoint>> {
-    let context: TrafficCounterContext = db
-        .prepare(
-            r#"WITH latest_state AS (
-              SELECT COALESCE(
-                (SELECT latest_json FROM metric_history
-                 WHERE server_id = ?1 ORDER BY timestamp DESC LIMIT 1),
-                (SELECT latest_json FROM metric_history_hourly
-                 WHERE server_id = ?1 ORDER BY timestamp DESC LIMIT 1)
-              ) AS state
-            ) SELECT
-              s.reset_day AS configured_reset_day,
-              COALESCE(CAST(json_extract(m.state, '$.traffic.cycle_key') AS INTEGER), 0) AS cycle_key,
-              COALESCE(CAST(json_extract(m.state, '$.traffic.reset_day') AS INTEGER), s.reset_day) AS traffic_reset_day,
-              COALESCE(CAST(json_extract(m.state, '$.traffic.timestamp') AS INTEGER), 0) AS traffic_timestamp,
-              COALESCE(CAST(json_extract(m.state, '$.traffic.raw_rx') AS INTEGER), 0) AS raw_rx,
-              COALESCE(CAST(json_extract(m.state, '$.traffic.raw_tx') AS INTEGER), 0) AS raw_tx,
-              COALESCE(CAST(json_extract(m.state, '$.traffic.used_rx') AS INTEGER), 0) AS used_rx,
-              COALESCE(CAST(json_extract(m.state, '$.traffic.used_tx') AS INTEGER), 0) AS used_tx
-            FROM servers s
-            CROSS JOIN latest_state m
-            WHERE s.id = ?1
-            LIMIT 1"#,
-        )
-        .bind(&[text(server_id)])?
-        .first(None)
-        .await?
-        .ok_or_else(|| worker::Error::RustError("节点不存在".to_string()))?;
-    let (mut traffic, configured_reset_day) = context.into_parts();
-    let fresh_reports = reports_after(reports, traffic.timestamp);
-    if fresh_reports.is_empty() {
-        return Ok(None);
-    }
+pub(crate) fn valid_report_batch_id(batch_id: &str) -> bool {
+    !batch_id.is_empty()
+        && batch_id.len() <= 128
+        && batch_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
 
-    let mut aggregate = HistoryMetricAggregate::default();
-    aggregate.extend(&fresh_reports);
-    let Some(history) = aggregate.point() else {
-        return Ok(None);
-    };
-    let mut latency = crate::latency::LatencyMetricAggregates::default();
-    let received_at = now();
-    for report in &fresh_reports {
-        latency.extend(&report.latency_results, received_at);
-    }
-    traffic.extend(&fresh_reports, configured_reset_day);
-    save_reports_with_history(
-        db,
-        server_id,
-        &fresh_reports,
-        &history,
-        aggregate.sample_count(),
-        &traffic,
-        &latency,
-    )
-    .await?;
-    Ok(Some(history))
+pub(crate) struct ReportBatchRef<'a> {
+    pub reports: &'a [AgentReport],
+    pub id: &'a str,
 }
 
 pub async fn save_reports_with_history(
     db: &D1Database,
     server_id: &str,
-    reports: &[AgentReport],
+    batch: ReportBatchRef<'_>,
     history_point: &HistoryPoint,
     sample_count: i64,
     traffic: &TrafficCounterState,
     latency: &crate::latency::LatencyMetricAggregates,
-) -> Result<()> {
-    let Some(latest_report) = reports.iter().max_by_key(|report| report.timestamp) else {
-        return Ok(());
+) -> Result<bool> {
+    let Some(latest_report) = batch.reports.iter().max_by_key(|report| report.timestamp) else {
+        return Ok(false);
     };
     let latest_timestamp = latest_report.timestamp;
     let mut latest_report = latest_report.clone();
@@ -1092,7 +1019,8 @@ pub async fn save_reports_with_history(
     })
     .to_string();
     let latency_json = latency.stored_json()?;
-    db.prepare(
+    let batch_id = batch.id;
+    let metric = db.prepare(
         r#"INSERT INTO metric_history (
           server_id, timestamp, cpu, load1, load5, load15,
           mem_used, mem_total, swap_used, swap_total, disk_used, disk_total,
@@ -1101,10 +1029,13 @@ pub async fn save_reports_with_history(
           disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops,
           disk_await_ms, disk_utilization, sample_count,
           latest_timestamp, latest_json, latency_json
-        ) VALUES (
+        ) SELECT
           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
           ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
           ?27, ?28, ?29, ?30
+        WHERE NOT EXISTS (
+          SELECT 1 FROM server_latest_state
+          WHERE server_id = ?1 AND last_batch_id = ?31
         ) ON CONFLICT(server_id, timestamp) DO UPDATE SET
           cpu=(metric_history.cpu * metric_history.sample_count +
             excluded.cpu * excluded.sample_count) /
@@ -1200,8 +1131,8 @@ pub async fn save_reports_with_history(
               )) FROM (SELECT * FROM latency_tasks ORDER BY task_id)
             ) END
           WHERE excluded.latest_timestamp > metric_history.latest_timestamp"#,
-    )
-    .bind(&[
+    );
+    let metric = metric.bind(&[
         text(server_id),
         number(history_point.timestamp),
         number(history_point.cpu),
@@ -1232,10 +1163,34 @@ pub async fn save_reports_with_history(
         number(latest_timestamp),
         text(&latest_json),
         text(&latency_json),
-    ])?
-    .run()
-    .await?;
-    Ok(())
+        text(batch_id),
+    ])?;
+    let snapshot = db
+        .prepare(
+            r#"INSERT INTO server_latest_state(
+              server_id, latest_timestamp, latest_json, last_batch_id
+            ) SELECT ?1, ?2, ?3, ?4 WHERE NOT EXISTS (
+              SELECT 1 FROM server_latest_state
+              WHERE server_id=?1 AND last_batch_id=?4
+            ) ON CONFLICT(server_id) DO UPDATE SET
+              latest_timestamp=excluded.latest_timestamp,
+              latest_json=excluded.latest_json,
+              last_batch_id=excluded.last_batch_id
+            WHERE excluded.latest_timestamp >= server_latest_state.latest_timestamp"#,
+        )
+        .bind(&[
+            text(server_id),
+            number(latest_timestamp),
+            text(&latest_json),
+            text(batch_id),
+        ])?;
+    let results = db.batch(vec![metric, snapshot]).await?;
+    Ok(results
+        .first()
+        .and_then(|result| result.meta().ok().flatten())
+        .and_then(|meta| meta.changes)
+        .unwrap_or(0)
+        > 0)
 }
 
 fn bool_setting(values: &HashMap<String, String>, key: &str, fallback: bool) -> bool {
@@ -1300,8 +1255,9 @@ pub async fn settings(
         history_retention_days: integer_setting(
             &values,
             "history_retention_days",
-            default_retention.clamp(1, 365),
-        ),
+            default_retention.clamp(1, MAX_HISTORY_RETENTION_DAYS),
+        )
+        .clamp(1, MAX_HISTORY_RETENTION_DAYS),
         history_cache_version: integer_setting(&values, "history_cache_version", 0),
         default_theme: string_setting(&values, "default_theme", "system"),
         active_theme_id: string_setting(&values, "active_theme_id", crate::theme::BUILTIN_THEME_ID),
@@ -1332,10 +1288,10 @@ pub async fn settings(
         turnstile_site_key: string_setting(&values, "turnstile_site_key", ""),
         turnstile_secret_key: string_setting(&values, "turnstile_secret_key", ""),
         notification_enabled: bool_setting(&values, "notification_enabled", false),
-        notification_endpoint: string_setting(&values, "notification_endpoint", ""),
-        notification_target: string_setting(&values, "notification_target", ""),
         offline_alert_minutes: integer_setting(&values, "offline_alert_minutes", 5),
         expiry_alert_days: integer_setting(&values, "expiry_alert_days", 7),
+        traffic_alert_percentage: integer_setting(&values, "traffic_alert_percentage", 80)
+            .clamp(50, 100),
         cloudflare_account_id: string_setting(&values, "cloudflare_account_id", ""),
         cloudflare_api_token: string_setting(&values, "cloudflare_api_token", ""),
     })
@@ -1379,7 +1335,7 @@ pub async fn update_settings(
         push_setting!("offline_threshold_seconds", &value);
     }
     if let Some(value) = input.history_retention_days {
-        let value = value.clamp(1, 365).to_string();
+        let value = value.clamp(1, MAX_HISTORY_RETENTION_DAYS).to_string();
         push_setting!("history_retention_days", &value);
     }
     if let Some(value) = input.default_theme.as_deref() {
@@ -1457,16 +1413,6 @@ pub async fn update_settings(
     if let Some(value) = input.notification_enabled {
         push_setting!("notification_enabled", if value { "true" } else { "false" });
     }
-    if let Some(value) = input
-        .notification_endpoint
-        .as_deref()
-        .filter(|value| value.trim() != SECRET_MASK)
-    {
-        push_setting!("notification_endpoint", value.trim());
-    }
-    if let Some(value) = input.notification_target.as_deref() {
-        push_setting!("notification_target", value.trim());
-    }
     if let Some(value) = input.offline_alert_minutes {
         let value = value.clamp(2, 1440).to_string();
         push_setting!("offline_alert_minutes", &value);
@@ -1474,6 +1420,10 @@ pub async fn update_settings(
     if let Some(value) = input.expiry_alert_days {
         let value = value.clamp(0, 365).to_string();
         push_setting!("expiry_alert_days", &value);
+    }
+    if let Some(value) = input.traffic_alert_percentage {
+        let value = value.clamp(50, 100).to_string();
+        push_setting!("traffic_alert_percentage", &value);
     }
     if let Some(value) = input
         .cloudflare_account_id
@@ -1601,17 +1551,41 @@ pub async fn delete_theme(db: &D1Database, id: &str) -> Result<bool> {
     Ok(deleted)
 }
 
+/// 把分钟历史压成小时粒度，然后轮换分钟表、按保留期删除过期小时行。
+///
+/// 压缩读两代分钟表，区间是 `[保留期下界, 当前整小时)`，小时表按覆盖语义写入
+/// （不累加，见那条 SQL 里的注释）。三者合起来让压缩天然幂等：
+///
+/// - 读两代保证轮换即将丢弃的行一定已经压过，不需要「哪一代压过了」的状态标记。
+/// - 上界卡在整小时，避免把还在写的小时压进归档。
+/// - 覆盖语义让重复压缩变成重算同一个值，跑几次结果都一样。
+///
+/// 所以这个函数崩在任何一步、下一次 cron 重跑都是对的。
+///
+/// 顺序是「压缩 + 删除过期小时行（同一个 batch）→ 轮换分钟表」。
+///
+/// 调用方（`src/lib.rs` 的 cron）已经把频率限制在一天一次，与
+/// [`HISTORY_ROTATION_INTERVAL_SECONDS`] 一致。分钟数据因此保留 24-48 小时而不
+/// 是精确 24 小时；小时数据仍然精确按 `retention_days` 删除。
 pub async fn cleanup_history(db: &D1Database, retention_days: i64) -> Result<()> {
-    let (cutoff, recent_cutoff) = history_cutoffs(now(), retention_days);
+    let current = now();
+    let cutoff = history_cutoff(current, retention_days);
+    // 只压已经走完的小时；当前这个未完成的小时留给下一次 cron。
+    let complete_hours_before = current.div_euclid(3600) * 3600;
     let compact = db
         .prepare(
-            r#"WITH ranked AS (
-          SELECT *, (timestamp / 3600) * 3600 AS bucket,
+            r#"WITH recent AS (
+          -- 两代分钟表，等价于 db::RECENT_HISTORY。下面 ranked 和 latency_ranked
+          -- 都从这里取，保证指标和延迟压的是同一批源行。
+          SELECT * FROM metric_history UNION ALL SELECT * FROM metric_history_old
+        ), ranked AS (
+          SELECT h.*, (h.timestamp / 3600) * 3600 AS bucket,
             ROW_NUMBER() OVER (
-              PARTITION BY server_id, timestamp / 3600
+              PARTITION BY h.server_id, h.timestamp / 3600
               ORDER BY latest_timestamp DESC
             ) AS latest_position
-          FROM metric_history WHERE timestamp >= ?1 AND timestamp < ?2
+          FROM recent h
+          WHERE h.timestamp >= ?1 AND h.timestamp < ?2
         ), metrics AS (
           SELECT
             server_id, bucket,
@@ -1637,8 +1611,7 @@ pub async fn cleanup_history(db: &D1Database, retention_days: i64) -> Result<()>
             MAX(disk_await_ms) AS disk_await_ms,
             MAX(disk_utilization) AS disk_utilization,
             SUM(sample_count) AS sample_count,
-            MAX(CASE WHEN latest_position = 1 THEN latest_timestamp END) AS latest_timestamp,
-            MAX(CASE WHEN latest_position = 1 THEN latest_json END) AS latest_json
+            MAX(CASE WHEN latest_position = 1 THEN latest_timestamp END) AS latest_timestamp
           FROM ranked GROUP BY server_id, bucket
         ), latency_ranked AS (
           SELECT h.server_id, (h.timestamp / 3600) * 3600 AS bucket,
@@ -1654,7 +1627,7 @@ pub async fn cleanup_history(db: &D1Database, retention_days: i64) -> Result<()>
               PARTITION BY h.server_id, h.timestamp / 3600, json_extract(j.value, '$.task_id')
               ORDER BY CAST(json_extract(j.value, '$.latest_timestamp') AS INTEGER) DESC
             ) AS latest_position
-          FROM metric_history h, json_each(h.latency_json) j
+          FROM recent h, json_each(h.latency_json) j
           WHERE h.timestamp >= ?1 AND h.timestamp < ?2
         ), latency_tasks AS (
           SELECT server_id, bucket, task_id,
@@ -1691,58 +1664,73 @@ pub async fn cleanup_history(db: &D1Database, retention_days: i64) -> Result<()>
           m.net_in, m.net_out, m.net_rx_total, m.net_tx_total, m.processes,
           m.tcp_connections, m.udp_connections, m.gpu_usage, m.disk_read_bps,
           m.disk_write_bps, m.disk_read_iops, m.disk_write_iops, m.disk_await_ms,
-          m.disk_utilization, m.sample_count, m.latest_timestamp, m.latest_json,
+          m.disk_utilization, m.sample_count, m.latest_timestamp, '{}',
           COALESCE(l.latency_json, '[]')
         FROM metrics m LEFT JOIN latency_packed l
           ON l.server_id = m.server_id AND l.bucket = m.bucket
         WHERE true
+        -- 直接覆盖，不做累加。上面的 CTE 是从两代分钟表里把这个小时桶的全部
+        -- 源行重新算了一遍，所以 excluded 就是该桶的完整真值。
+        -- 一个桶的源行在分钟表里可见 24-48 小时，而它在写完后的第一次 cron 就会
+        -- 被压缩，所以每次压缩看到的都是完整的桶；等源行被轮换丢弃时，这个桶也
+        -- 不再出现在 union 里，不会再触发 upsert。
+        -- 覆盖语义顺带让压缩对乱序到达免疫：迟到的行只是让下一次重算包含它。
         ON CONFLICT(server_id, timestamp) DO UPDATE SET
           cpu=excluded.cpu, load1=excluded.load1, load5=excluded.load5,
-          load15=excluded.load15, mem_used=excluded.mem_used, mem_total=excluded.mem_total,
-          swap_used=excluded.swap_used, swap_total=excluded.swap_total,
-          disk_used=excluded.disk_used, disk_total=excluded.disk_total,
-          net_in=excluded.net_in, net_out=excluded.net_out,
-          net_rx_total=excluded.net_rx_total, net_tx_total=excluded.net_tx_total,
-          processes=excluded.processes, tcp_connections=excluded.tcp_connections,
-          udp_connections=excluded.udp_connections, gpu_usage=excluded.gpu_usage,
-          disk_read_bps=excluded.disk_read_bps, disk_write_bps=excluded.disk_write_bps,
-          disk_read_iops=excluded.disk_read_iops, disk_write_iops=excluded.disk_write_iops,
-          disk_await_ms=excluded.disk_await_ms, disk_utilization=excluded.disk_utilization,
+          load15=excluded.load15, mem_used=excluded.mem_used,
+          mem_total=excluded.mem_total, swap_used=excluded.swap_used,
+          swap_total=excluded.swap_total, disk_used=excluded.disk_used,
+          disk_total=excluded.disk_total, net_in=excluded.net_in,
+          net_out=excluded.net_out, net_rx_total=excluded.net_rx_total,
+          net_tx_total=excluded.net_tx_total, processes=excluded.processes,
+          tcp_connections=excluded.tcp_connections,
+          udp_connections=excluded.udp_connections,
+          gpu_usage=excluded.gpu_usage, disk_read_bps=excluded.disk_read_bps,
+          disk_write_bps=excluded.disk_write_bps,
+          disk_read_iops=excluded.disk_read_iops,
+          disk_write_iops=excluded.disk_write_iops,
+          disk_await_ms=excluded.disk_await_ms,
+          disk_utilization=excluded.disk_utilization,
           sample_count=excluded.sample_count,
-          latest_timestamp=excluded.latest_timestamp, latest_json=excluded.latest_json,
+          latest_timestamp=excluded.latest_timestamp,
+          latest_json=excluded.latest_json,
           latency_json=excluded.latency_json"#,
         )
-        .bind(&[number(cutoff), number(recent_cutoff)])?;
-    let delete_recent = db
-        .prepare(
-            "DELETE FROM metric_history AS h WHERE timestamp < ?1 AND timestamp < ( \
-             SELECT MAX(newest.timestamp) FROM metric_history AS newest \
-             WHERE newest.server_id = h.server_id \
-             )",
-        )
-        .bind(&[number(recent_cutoff)])?;
+        .bind(&[number(cutoff), number(complete_hours_before)])?;
     let delete_archive = db
         .prepare("DELETE FROM metric_history_hourly WHERE timestamp < ?1")
         .bind(&[number(cutoff)])?;
-    db.batch(vec![compact, delete_recent, delete_archive])
+    // DDL 不和上面的语句放进同一个 batch：batch 是隐式事务，而 SQLite 不允许
+    // 在事务里 ALTER TABLE ... RENAME。压缩+删除先提交，轮换单独走；轮换中途
+    // 失败下一次 cron 重来即可，重复压缩无害（见上）。
+    db.batch(vec![compact, delete_archive]).await?;
+    rotate_recent_history(db).await
+}
+
+/// 丢弃上一代分钟历史，把当前代降级为上一代，再建一张空的当前代。
+async fn rotate_recent_history(db: &D1Database) -> Result<()> {
+    db.prepare("DROP TABLE IF EXISTS metric_history_old")
+        .run()
+        .await?;
+    db.prepare("ALTER TABLE metric_history RENAME TO metric_history_old")
+        .run()
+        .await?;
+    db.prepare(metric_history_ddl("metric_history"))
+        .run()
         .await?;
     Ok(())
 }
 
-fn history_cutoffs(current: i64, retention_days: i64) -> (i64, i64) {
-    let cutoff = current - retention_days.clamp(1, 365) * 86_400;
-    let recent_cutoff = (current - 86_400).max(cutoff);
-    (cutoff, recent_cutoff)
+/// 保留期下界，对齐到整小时。
+fn history_cutoff(current: i64, retention_days: i64) -> i64 {
+    let cutoff = current - retention_days.clamp(1, MAX_HISTORY_RETENTION_DAYS) * 86_400;
+    cutoff.div_euclid(3600) * 3600
 }
 
 pub async fn clear_history(db: &D1Database) -> Result<()> {
     db.batch(vec![
-        db.prepare(
-            "DELETE FROM metric_history AS h WHERE timestamp < ( \
-             SELECT MAX(newest.timestamp) FROM metric_history AS newest \
-             WHERE newest.server_id = h.server_id \
-             )",
-        ),
+        db.prepare("DELETE FROM metric_history"),
+        db.prepare("DELETE FROM metric_history_old"),
         db.prepare("DELETE FROM metric_history_hourly"),
     ])
     .await?;
@@ -1814,20 +1802,25 @@ pub async fn database_stats(db: &D1Database, offline_threshold: i64) -> Result<D
         r#"SELECT
           (SELECT COUNT(*) FROM servers) AS server_count,
           (SELECT COUNT(*) FROM servers s WHERE COALESCE(
-             (SELECT latest_timestamp FROM metric_history h
-              WHERE h.server_id = s.id ORDER BY timestamp DESC LIMIT 1),
+             (SELECT MAX(latest_timestamp) FROM (
+                SELECT server_id, latest_timestamp FROM metric_history UNION ALL
+                SELECT server_id, latest_timestamp FROM metric_history_old
+              ) h WHERE h.server_id = s.id),
              (SELECT latest_timestamp FROM metric_history_hourly h
               WHERE h.server_id = s.id ORDER BY timestamp DESC LIMIT 1),
              0
            ) >= ?1) AS online_count,
           ((SELECT COUNT(*) FROM metric_history) +
+           (SELECT COUNT(*) FROM metric_history_old) +
            (SELECT COUNT(*) FROM metric_history_hourly)) AS history_rows,
           (SELECT MIN(timestamp) FROM (
              SELECT timestamp FROM metric_history UNION ALL
+             SELECT timestamp FROM metric_history_old UNION ALL
              SELECT timestamp FROM metric_history_hourly
            )) AS oldest_history,
           (SELECT MAX(timestamp) FROM (
              SELECT timestamp FROM metric_history UNION ALL
+             SELECT timestamp FROM metric_history_old UNION ALL
              SELECT timestamp FROM metric_history_hourly
            )) AS newest_history"#,
     )
@@ -1875,8 +1868,9 @@ pub async fn update_expiry(db: &D1Database, id: &str, expires_at: i64) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        alert_window_covered, secret_for_api, traffic_cycle_key, AlertMetricRow,
-        HistoryMetricAggregate, TrafficCounterState, SECRET_MASK,
+        alert_window_covered, history_cutoff, metric_history_ddl, secret_for_api,
+        traffic_cycle_key, AlertMetricRow, HistoryMetricAggregate, TrafficCounterState,
+        MAX_HISTORY_RETENTION_DAYS, SECRET_MASK,
     };
     use crate::models::AgentReport;
 
@@ -1895,9 +1889,9 @@ mod tests {
     #[test]
     fn alert_coverage_tracks_report_interval_and_freshness() {
         let current = 10_000;
-        assert!(alert_window_covered(&row(6, current - 30, 60), 10, current));
+        assert!(alert_window_covered(&row(3, current - 30, 60), 10, current));
         assert!(!alert_window_covered(
-            &row(5, current - 30, 60),
+            &row(2, current - 30, 60),
             10,
             current
         ));
@@ -1911,6 +1905,48 @@ mod tests {
             10,
             current
         ));
+    }
+
+    #[test]
+    fn aligns_history_cutoff_and_caps_retention() {
+        let current = 40 * 86_400 + 12 * 3600 + 34 * 60 + 56;
+        let cutoff = history_cutoff(current, 365);
+        assert_eq!(cutoff % 3600, 0);
+        assert_eq!(
+            cutoff,
+            (40 - MAX_HISTORY_RETENTION_DAYS) * 86_400 + 12 * 3600
+        );
+    }
+
+    /// 轮换要在运行时重建 `metric_history`，DDL 因此在 Rust 里存了一份。
+    /// 这个测试比对它和 migration 的文本，防止两边漂移。三张 metric_* 表必须同构：
+    /// 轮换靠 RENAME 把当前代变成上一代，压缩靠 UNION ALL 同时读它们。
+    #[test]
+    fn metric_history_ddl_matches_migration() {
+        let schema = include_str!("../migrations/initial_01.sql");
+
+        let table_body = |sql: &str, table: &str| -> String {
+            let head = format!("CREATE TABLE {table} (");
+            let start = sql.find(&head).unwrap_or_else(|| {
+                panic!("migration 里找不到 {table}");
+            }) + head.len();
+            let rest = &sql[start..];
+            let end = rest.find(") WITHOUT ROWID").expect("缺少 WITHOUT ROWID");
+            rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+
+        let generated = table_body(&metric_history_ddl("metric_history"), "metric_history");
+        for table in [
+            "metric_history",
+            "metric_history_old",
+            "metric_history_hourly",
+        ] {
+            assert_eq!(
+                generated,
+                table_body(schema, table),
+                "migration 的 {table} 与 db::metric_history_ddl 不一致"
+            );
+        }
     }
 
     #[test]
