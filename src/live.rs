@@ -28,6 +28,25 @@ const MAX_ALERT_WINDOW_SAMPLES: usize = 24 * 60 + 1;
 const ALERT_STORAGE_PREFIX: &str = "resource-alert:";
 const DASHBOARD_HUB_NAME: &str = "dashboard";
 
+/// 机器身份字段，一批里逐条重复且几乎不变，实时样本不带它们。
+///
+/// 前端 `mergeServerLive` 是 `{ ...server, ...live.metrics }`，样本里缺的键会露出
+/// bootstrap 那份，而 `SERVER_SELECT` 从 `server_latest_state.latest_json` 里
+/// `json_extract` 出这七个字段，所以前端不需要任何改动。
+///
+/// 代价：agent 升级后这些值要等下一次 bootstrap 轮询才刷新。
+/// 只影响展示，不影响任何判定 —— 告警和持久化读的是 `AgentReport` 本身，
+/// 剥离只发生在发往浏览器的副本上。
+const BROWSER_OMITTED_REPORT_FIELDS: [&str; 7] = [
+    "cpu_model",
+    "os",
+    "kernel",
+    "arch",
+    "virtualization",
+    "gpu_model",
+    "agent_version",
+];
+
 fn server_hub_name(server_id: &str) -> String {
     format!("server:{server_id}")
 }
@@ -427,6 +446,9 @@ fn batch_update_parts_at(
         let mut data = serde_json::to_value(report)?;
         if let Some(data) = data.as_object_mut() {
             data.remove("timestamp");
+            for key in BROWSER_OMITTED_REPORT_FIELDS {
+                data.remove(key);
+            }
         }
         samples.push(CachedLiveSample {
             ts: timestamp,
@@ -1382,9 +1404,10 @@ mod tests {
         consume_agent_message_budget, finish_d1_flush, live_ack_payload, next_d1_write_ms,
         outbound_close_code, trim_cached_live_samples, trim_socket_attachment, update_alert_window,
         AgentMessageBudget, AlertEvaluationServer, AlertWindowSample, CachedLiveSample,
-        SocketAttachment, TrafficAttachment, ALERT_WINDOW_SECONDS, CACHED_LIVE_TTL_SECONDS,
-        MAX_AGENT_BYTES_PER_WINDOW, MAX_AGENT_MESSAGES_PER_WINDOW, MAX_AGENT_SAMPLES_PER_WINDOW,
-        MAX_CACHED_LIVE_BYTES, MAX_CACHED_LIVE_SAMPLES, MAX_SERIALIZED_ATTACHMENT_BYTES,
+        SocketAttachment, TrafficAttachment, ALERT_WINDOW_SECONDS, BROWSER_OMITTED_REPORT_FIELDS,
+        CACHED_LIVE_TTL_SECONDS, MAX_AGENT_BYTES_PER_WINDOW, MAX_AGENT_MESSAGES_PER_WINDOW,
+        MAX_AGENT_SAMPLES_PER_WINDOW, MAX_CACHED_LIVE_BYTES, MAX_CACHED_LIVE_SAMPLES,
+        MAX_SERIALIZED_ATTACHMENT_BYTES,
     };
     use crate::db::HistoryMetricAggregate;
     use crate::latency::LatencyMetricAggregates;
@@ -1510,6 +1533,32 @@ mod tests {
         assert!(payload["updates"][0]["samples"][0]["data"]
             .get("timestamp")
             .is_none());
+        // 身份字段不上线：前端靠 bootstrap 那份。fixture 里 cpu_model="CPU"、
+        // agent_version="test" 都是非空的，所以这几条断言不是空转。
+        for field in BROWSER_OMITTED_REPORT_FIELDS {
+            assert!(
+                payload["updates"][0]["samples"][0]["data"]
+                    .get(field)
+                    .is_none(),
+                "{field} 不应出现在发往浏览器的样本里"
+            );
+        }
+        // 同一批的动态字段必须留着，别把剥离范围扩大了
+        for field in [
+            "cpu",
+            "mem_used",
+            "net_in",
+            "uptime",
+            "cpu_cores",
+            "gpu_usage",
+        ] {
+            assert!(
+                payload["updates"][0]["samples"][0]["data"]
+                    .get(field)
+                    .is_some(),
+                "{field} 是动态字段，不该被剥离"
+            );
+        }
         let attachment = SocketAttachment {
             role: "agent".to_string(),
             server_id: Some("node-a".to_string()),

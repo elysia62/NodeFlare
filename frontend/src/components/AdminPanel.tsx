@@ -518,18 +518,20 @@ export function AdminPanel({
 
   return (
     <div className={`admin-page ${dark ? "admin-dark" : ""}`}>
-      {error ? <div className="admin-toast error" role="alert" aria-live="assertive"><CircleAlert aria-hidden="true" /><span>{error}</span></div>
-        : notice ? <div className="admin-toast" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{notice}</span></div> : null}
+      {/* toast 的定位是按后台的顶栏算的；登录页没有顶栏，那里的错误走表单内提示 */}
+      {authenticated ? (error ? <div className="admin-toast error" role="alert" aria-live="assertive"><CircleAlert aria-hidden="true" /><span>{error}</span></div>
+        : notice ? <div className="admin-toast" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{notice}</span></div> : null) : null}
       {!authenticated ? <div className="admin-login-stage">
-        <button className="admin-back" type="button" onClick={onClose}><ArrowLeft size={14} />返回</button>
-        <button className="admin-login-theme" type="button" onClick={onToggleTheme} title={dark ? "切换浅色主题" : "切换深色主题"}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button>
+        <button className="admin-back" type="button" onClick={onClose}><ArrowLeft size={15} />返回</button>
+        <button className="admin-login-theme" type="button" onClick={onToggleTheme} title={dark ? "切换浅色主题" : "切换深色主题"}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
         <form className="login-form glass-panel" onSubmit={login}>
           <SiteLogo src={siteLogoUrl} alt="" width="48" height="48" />
-          <div className="login-copy"><h1>管理员登录</h1></div>
-          <label><span>用户名</span><input autoFocus type="text" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
-          <label><span>密码</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+          <div className="login-copy"><h1>管理员登录</h1><p>{config.site_name}</p></div>
+          <label><span>用户名</span><input autoFocus type="text" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required aria-invalid={error ? true : undefined} aria-describedby={error ? "login-error" : undefined} /></label>
+          <label><span>密码</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required aria-invalid={error ? true : undefined} aria-describedby={error ? "login-error" : undefined} /></label>
           {config.turnstile_login_enabled || config.turnstile_enabled ? <div className="login-turnstile"><TurnstileWidget siteKey={config.turnstile_site_key} action="admin-login" theme={dark ? "dark" : "light"} resetKey={turnstileReset} onVerify={setTurnstileToken} onError={setError} /></div> : null}
-          <button className="primary-btn login-submit" disabled={busy || ((config.turnstile_login_enabled || config.turnstile_enabled) && !turnstileToken)} type="submit"><KeyRound size={16} />{busy ? "验证中" : "登录"}</button>
+          {error ? <p className="login-error" id="login-error" role="alert"><CircleAlert size={15} aria-hidden="true" />{error}</p> : null}
+          <button className="primary-btn login-submit" disabled={busy || ((config.turnstile_login_enabled || config.turnstile_enabled) && !turnstileToken)} type="submit"><KeyRound size={15} />{busy ? "验证中" : "登录"}</button>
         </form>
       </div> : <section className="admin-shell" aria-label="管理面板">
         <header className="admin-topbar">
@@ -538,33 +540,38 @@ export function AdminPanel({
             <strong>{config.site_name}</strong>
           </div>
           <div className="admin-topbar-actions">
-            <button type="button" onClick={onToggleTheme} title={dark ? "切换浅色主题" : "切换深色主题"} aria-label={dark ? "切换浅色主题" : "切换深色主题"}>{dark ? <Sun size={17} /> : <Moon size={17} />}</button>
-            <button type="button" onClick={onClose} title="主页" aria-label="主页"><ArrowLeft size={17} />主页</button>
-            <button type="button" onClick={() => void logout()} title="退出" aria-label="退出"><LogOut size={17} />退出</button>
+            <button type="button" onClick={onToggleTheme} title={dark ? "切换浅色主题" : "切换深色主题"} aria-label={dark ? "切换浅色主题" : "切换深色主题"}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
+            <button type="button" onClick={onClose} title="主页" aria-label="主页"><ArrowLeft size={15} />主页</button>
+            <button type="button" onClick={() => void logout()} title="退出" aria-label="退出"><LogOut size={15} />退出</button>
           </div>
         </header>
 
           <div className="admin-body">
             <aside className="admin-sidebar">
-              <span className="admin-nav-label">管理</span>
-              <nav className="admin-tabs">
-                <button className={tab === "servers" ? "active" : ""} onClick={() => selectTab("servers")}><ServerCog size={19} />服务器</button>
-                <button className={tab === "latency" ? "active" : ""} onClick={() => selectTab("latency")}><RadioTower size={19} />延迟检测</button>
-                <button className={tab === "appearance" ? "active" : ""} onClick={() => selectTab("appearance")}><Eye size={19} />站点设置</button>
-                <button className={tab === "themes" ? "active" : ""} onClick={() => selectTab("themes")}><Palette size={19} />主题商店</button>
-                <button className={tab === "themeSettings" ? "active" : ""} onClick={() => { selectTab("themeSettings"); void loadThemeSettings(); }}><SlidersHorizontal size={19} />主题设置</button>
-                <button className={tab === "alerts" ? "active" : ""} onClick={() => selectTab("alerts")}><AlertTriangle size={19} />通知</button>
-                <button className={tab === "security" ? "active" : ""} onClick={() => selectTab("security")}><ShieldCheck size={19} />登录与安全</button>
-                <button className={tab === "data" ? "active" : ""} onClick={() => { selectTab("data"); if (!database) void loadDatabase(); }}><Database size={19} />监控数据库</button>
-                <button className={tab === "about" ? "active" : ""} onClick={() => selectTab("about")}><Info size={19} />关于</button>
+              {/* 这个 span 在窄屏是 display:none，但被 aria-labelledby 直接引用的节点即使隐藏也参与名称计算，
+                  所以地标名在所有断点都在，不用另写一份 aria-label。 */}
+              <span className="admin-nav-label" id="admin-nav-label">管理</span>
+              {/* 用 nav + aria-current 而不是 role="tablist"：tablist 会盖掉 nav 的导航地标，
+                  且 APG 的 tab 模式要求方向键 + roving tabindex，而主题设置和监控数据库点了要发请求，
+                  方向键扫过就会连带触发。每项换的是整块内容和它自己的 h1，本质是页内导航，不是 tab 面板。 */}
+              <nav className="admin-tabs" aria-labelledby="admin-nav-label">
+                <button type="button" className={tab === "servers" ? "active" : ""} aria-current={tab === "servers" ? "page" : undefined} onClick={() => selectTab("servers")}><ServerCog size={17} />服务器</button>
+                <button type="button" className={tab === "latency" ? "active" : ""} aria-current={tab === "latency" ? "page" : undefined} onClick={() => selectTab("latency")}><RadioTower size={17} />延迟检测</button>
+                <button type="button" className={tab === "appearance" ? "active" : ""} aria-current={tab === "appearance" ? "page" : undefined} onClick={() => selectTab("appearance")}><Eye size={17} />站点设置</button>
+                <button type="button" className={tab === "themes" ? "active" : ""} aria-current={tab === "themes" ? "page" : undefined} onClick={() => selectTab("themes")}><Palette size={17} />主题商店</button>
+                <button type="button" className={tab === "themeSettings" ? "active" : ""} aria-current={tab === "themeSettings" ? "page" : undefined} onClick={() => { selectTab("themeSettings"); void loadThemeSettings(); }}><SlidersHorizontal size={17} />主题设置</button>
+                <button type="button" className={tab === "alerts" ? "active" : ""} aria-current={tab === "alerts" ? "page" : undefined} onClick={() => selectTab("alerts")}><AlertTriangle size={17} />通知</button>
+                <button type="button" className={tab === "security" ? "active" : ""} aria-current={tab === "security" ? "page" : undefined} onClick={() => selectTab("security")}><ShieldCheck size={17} />登录与安全</button>
+                <button type="button" className={tab === "data" ? "active" : ""} aria-current={tab === "data" ? "page" : undefined} onClick={() => { selectTab("data"); if (!database) void loadDatabase(); }}><Database size={17} />监控数据库</button>
+                <button type="button" className={tab === "about" ? "active" : ""} aria-current={tab === "about" ? "page" : undefined} onClick={() => selectTab("about")}><Info size={17} />关于</button>
               </nav>
             </aside>
             <div className="admin-content">
               <header className="admin-content-header"><h1>{adminPages[tab].title}</h1><p>{adminPages[tab].description}</p></header>
               {tab === "servers" ? (
                 <div className="admin-section">
-                  <div className="section-head"><div><h3>监控节点</h3><span>{servers.length} 个节点 · 可拖动上下排序</span></div><div className="section-actions"><button className="primary-btn compact" onClick={() => openEditor()}><Plus size={16} />添加</button></div></div>
-                  <div className="batch-toolbar"><label className="select-all"><Checkbox checked={allSelected} onChange={() => setSelectedIds(allSelected ? [] : servers.map((server) => server.id))} />全选</label>{selectedIds.length ? <button className="danger-btn compact" onClick={() => void removeSelected()}><Trash2 size={14} />删除选中 ({selectedIds.length})</button> : <span>批量操作</span>}</div>
+                  <div className="section-head"><div><h3>监控节点</h3><span>{servers.length} 个节点 · 可拖动上下排序</span></div><div className="section-actions"><button className="primary-btn compact" onClick={() => openEditor()}><Plus size={15} />添加</button></div></div>
+                  <div className="batch-toolbar"><label className="select-all"><Checkbox checked={allSelected} onChange={() => setSelectedIds(allSelected ? [] : servers.map((server) => server.id))} />全选</label>{selectedIds.length ? <button className="danger-btn compact" onClick={() => void removeSelected()}><Trash2 size={15} />删除选中 ({selectedIds.length})</button> : <span>批量操作</span>}</div>
                   <div className="server-list">
                     {servers.map((server, index) => (
                       <div className={`server-row ${draggingId === server.id ? "dragging" : ""}`} key={server.id} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => void dropServer(event, server.id)}>
@@ -592,8 +599,8 @@ export function AdminPanel({
                           {!theme.builtin ? <a href={theme.url} target="_blank" rel="noreferrer"><span>{theme.url}</span><ExternalLink size={13} /></a> : null}
                         </div>
                         <div className="theme-row-actions">
-                          {!theme.builtin ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void previewTheme(theme)}><Eye size={14} />预览</button> : null}
-                          <button type="button" className={theme.active ? "theme-active-btn" : "primary-btn compact"} disabled={busy || theme.active} onClick={() => void activateTheme(theme)}>{theme.active ? <><Check size={14} />使用中</> : "启用"}</button>
+                          {!theme.builtin ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void previewTheme(theme)}><Eye size={15} />预览</button> : null}
+                          <button type="button" className={theme.active ? "theme-active-btn" : "primary-btn compact"} disabled={busy || theme.active} onClick={() => void activateTheme(theme)}>{theme.active ? <><Check size={15} />使用中</> : "启用"}</button>
                           {!theme.builtin ? <button type="button" className="icon-btn danger" disabled={busy} title="删除主题" onClick={() => void removeTheme(theme)}><Trash2 size={15} /></button> : null}
                         </div>
                       </article>)}
@@ -604,7 +611,7 @@ export function AdminPanel({
                     <p className="settings-hint">仅支持 GitHub 地址</p>
                     <div className="form-grid"><label><span>主题名称</span><input required maxLength={80} value={themeName} onChange={(event) => setThemeName(event.target.value)} placeholder="例如：Ocean" /></label><label><span>主题 URL</span><input required type="url" maxLength={2048} value={themeUrl} onChange={(event) => setThemeUrl(event.target.value)} placeholder="https://github.com/user/theme" /></label></div>
                     <label><span>主题说明（可选）</span><textarea rows={2} maxLength={300} value={themeDescription} onChange={(event) => setThemeDescription(event.target.value)} placeholder="简短描述主题风格和来源" /></label>
-                    <div className="form-actions"><button className="primary-btn" disabled={busy}><Plus size={16} />添加主题</button></div>
+                    <div className="form-actions"><button className="primary-btn" disabled={busy}><Plus size={15} />添加主题</button></div>
                   </form>
                 </div>
               ) : settings && tab !== "about" ? (
@@ -647,20 +654,20 @@ export function AdminPanel({
                     <div className="section-title"><Database size={15} />D1 数据维护</div>
                     <div className="data-stat-grid">{database ? <><DataStat label="节点" value={database.server_count} /><DataStat label="在线" value={database.online_count} /><DataStat label="历史行数" value={database.history_rows.toLocaleString()} /></> : <p className="settings-hint">正在读取数据库统计...</p>}</div>
                     <div className="usage-section">
-                      <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取 D1 汇率快照"}</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={14} />立即更新</button></div>
+                      <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取 D1 汇率快照"}</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={15} />立即更新</button></div>
                       {exchangeRates ? <div className="usage-table-wrap"><table className="usage-table"><thead><tr><th>币种</th><th>1 CNY 可兑换</th></tr></thead><tbody>{ASSET_CURRENCIES.map((currency) => <tr key={currency}><th scope="row">{currency}</th><td>{exchangeRates.rates[currency]?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "--"}</td></tr>)}</tbody></table></div> : <div className="usage-empty">尚未读取</div>}
                     </div>
                     <div className="usage-section">
-                      <div className="usage-head"><div><div className="section-title"><Cloud size={15} />Cloudflare 用量</div><p className="settings-hint">统计周期使用 UTC</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void loadCloudflareUsage()}><RotateCw size={14} />{cloudflareUsage ? "刷新用量" : "查询用量"}</button></div>
+                      <div className="usage-head"><div><div className="section-title"><Cloud size={15} />Cloudflare 用量</div><p className="settings-hint">统计周期使用 UTC</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void loadCloudflareUsage()}><RotateCw size={15} />{cloudflareUsage ? "刷新用量" : "查询用量"}</button></div>
                       <div className="form-grid"><label><span>Cloudflare Account ID</span><input autoComplete="off" type="password" maxLength={32} value={settings.cloudflare_account_id} onChange={(event) => updateSettings("cloudflare_account_id", event.target.value)} placeholder="32 位账户 ID" /></label><label><span>Cloudflare API Token</span><input autoComplete="off" type="password" value={settings.cloudflare_api_token} onChange={(event) => updateSettings("cloudflare_api_token", event.target.value)} placeholder="Account Analytics: Read" /></label></div>
-                      <div className="usage-config-actions"><p className="settings-hint">Token 需要账户级 Account Analytics: Read 权限，并授权对应账户；留空读取 Worker Secret。</p><button type="submit" className="primary-btn compact" disabled={busy}><Save size={14} />保存用量配置</button></div>
+                      <div className="usage-config-actions"><p className="settings-hint">Token 需要账户级 Account Analytics: Read 权限，并授权对应账户；留空读取 Worker Secret。</p><button type="submit" className="primary-btn compact" disabled={busy}><Save size={15} />保存用量配置</button></div>
                       {cloudflareUsage ? <><div className="usage-table-wrap"><table className="usage-table cloudflare-usage-table"><thead><tr><th>周期</th><th>D1 读取</th><th>D1 写入</th><th>Workers 请求</th><th>DO 请求（估算）</th><th>DO 时长 (GB-s)</th></tr></thead><tbody><UsageRow label="今日" usage={cloudflareUsage.today} /><UsageRow label="昨日" usage={cloudflareUsage.yesterday} /></tbody></table></div><div className="usage-do-breakdown"><UsageDoBreakdown label="今日" usage={cloudflareUsage.today} /><UsageDoBreakdown label="昨日" usage={cloudflareUsage.yesterday} /></div></> : <div className="usage-empty">尚未读取</div>}
                     </div>
                     <div className="data-actions"><button type="button" className="secondary-btn" onClick={() => void loadDatabase()}>刷新统计</button><button type="button" className="danger-btn" onClick={() => void clearHistory()}><Trash2 size={15} />清空历史指标</button></div>
                     <p className="settings-hint">清空历史不会删除节点、密钥或最新状态。</p>
                   </> : null}
 
-                  {tab !== "data" ? <div className="form-actions"><button className="primary-btn" disabled={busy}><Save size={16} />保存{tab === "security" ? "账号与安全设置" : "设置"}</button></div> : null}
+                  {tab !== "data" ? <div className="form-actions"><button className="primary-btn" disabled={busy}><Save size={15} />保存{tab === "security" ? "账号与安全设置" : "设置"}</button></div> : null}
                 </form>
               ) : tab === "about" ? (
                 <div className="admin-section about-page">
@@ -684,10 +691,10 @@ export function AdminPanel({
         <div className="form-grid three"><label><span>到期日期</span><input type="date" value={formatDate(form.expires_at)} onChange={(event) => updateForm("expires_at", event.target.value ? Math.floor(new Date(`${event.target.value}T00:00:00Z`).getTime() / 1000) : null)} /></label><label><span>Agent 上报间隔（秒）</span><input min="15" max="3600" type="number" value={form.report_interval} onChange={(event) => updateForm("report_interval", Number(event.target.value))} /></label><label><span>指标采样间隔（秒）</span><input min="1" max="60" type="number" value={form.collect_interval} onChange={(event) => updateForm("collect_interval", Number(event.target.value))} /></label></div>
         <div className="form-grid"><label><span>统计网卡（逗号分隔，留空自动）</span><input value={form.network_interface} onChange={(event) => updateForm("network_interface", event.target.value)} placeholder="eth0,ens3" /></label><label><span>下行流量当前值（GB）</span><input min="0" step="0.1" type="number" value={rxCurrentGb} onChange={(event) => setRxCurrentGb(event.target.value)} /></label><label><span>上行流量当前值（GB）</span><input min="0" step="0.1" type="number" value={txCurrentGb} onChange={(event) => setTxCurrentGb(event.target.value)} /></label><label><span>Agent 下载加速（可选）</span><input value={form.agent_mirror} onChange={(event) => updateForm("agent_mirror", event.target.value.trim())} placeholder="https://ghproxy.net" /></label></div>
         <div className="settings-toggles editor-toggles"><Toggle label="自动续费" checked={form.auto_renewal} onChange={(value) => updateForm("auto_renewal", value)} /><Toggle label="Agent 自动更新" checked={form.auto_update} onChange={(value) => updateForm("auto_update", value)} /><Toggle label="隐藏节点" checked={form.hidden} onChange={(value) => updateForm("hidden", value)} /><Toggle label="关闭离线告警" checked={form.offline_notify_disabled} onChange={(value) => updateForm("offline_notify_disabled", value)} /></div>
-        <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={16} />保存节点</button></div>
+        <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={15} />保存节点</button></div>
       </form></div> : null}
 
-      {installCommand ? <div className="submodal-backdrop" role="presentation" onMouseDown={installDialog.onBackdropMouseDown}><section ref={installDialog.dialogRef} className="install-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title" tabIndex={-1}><header><div><span className="eyebrow">Agent 部署</span><h3 id="install-dialog-title">安装命令</h3></div><div className="segmented install-platform" aria-label="Agent 平台"><button type="button" className={installPlatform === "linux" ? "active" : ""} onClick={() => setInstallPlatform("linux")}>Linux</button><button type="button" className={installPlatform === "windows" ? "active" : ""} onClick={() => setInstallPlatform("windows")}>Windows</button><button type="button" className={installPlatform === "macos" ? "active" : ""} onClick={() => setInstallPlatform("macos")}>macOS ARM</button><button type="button" className={installPlatform === "freebsd" ? "active" : ""} onClick={() => setInstallPlatform("freebsd")}>FreeBSD</button></div></header><div className="install-list"><pre>{installCommand}</pre></div><div className="form-actions"><button className="secondary-btn" type="button" onClick={() => setInstall(null)}>关闭</button><button className="primary-btn" type="button" onClick={() => void copyInstallCommand()}><Copy size={16} />复制</button></div></section></div> : null}
+      {installCommand ? <div className="submodal-backdrop" role="presentation" onMouseDown={installDialog.onBackdropMouseDown}><section ref={installDialog.dialogRef} className="install-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title" tabIndex={-1}><header><div><span className="eyebrow">Agent 部署</span><h3 id="install-dialog-title">安装命令</h3></div>{/* role="group" 是 aria-label 生效的前提，aria-pressed 表达选中态，理由同侧栏那处注释 */}<div className="segmented install-platform" role="group" aria-label="Agent 平台"><button type="button" className={installPlatform === "linux" ? "active" : ""} aria-pressed={installPlatform === "linux"} onClick={() => setInstallPlatform("linux")}>Linux</button><button type="button" className={installPlatform === "windows" ? "active" : ""} aria-pressed={installPlatform === "windows"} onClick={() => setInstallPlatform("windows")}>Windows</button><button type="button" className={installPlatform === "macos" ? "active" : ""} aria-pressed={installPlatform === "macos"} onClick={() => setInstallPlatform("macos")}>macOS ARM</button><button type="button" className={installPlatform === "freebsd" ? "active" : ""} aria-pressed={installPlatform === "freebsd"} onClick={() => setInstallPlatform("freebsd")}>FreeBSD</button></div></header><div className="install-list"><pre>{installCommand}</pre></div><div className="form-actions"><button className="secondary-btn" type="button" onClick={() => setInstall(null)}>关闭</button><button className="primary-btn" type="button" onClick={() => void copyInstallCommand()}><Copy size={15} />复制</button></div></section></div> : null}
     </div>
   );
 }

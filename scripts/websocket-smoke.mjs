@@ -284,7 +284,7 @@ try {
       ),
   );
   agent.send(JSON.stringify({ type: "update", batchId: `smoke-${timestamp}`, samples }));
-  const [ack] = await Promise.all([ackPromise, updatePromise]);
+  const [ack, update] = await Promise.all([ackPromise, updatePromise]);
   if (
     ack.ts <= 0 ||
     ack.persisted !== true ||
@@ -295,6 +295,37 @@ try {
     ack.nextWssReportAfterMs !== 5_000
   ) {
     throw new Error(`Invalid Agent metric ACK: ${JSON.stringify(ack)}`);
+  }
+
+  // 身份字段不该出现在发往浏览器的样本里（Worker 侧剥离），但必须仍能从
+  // bootstrap 拿到 —— 前端靠 { ...server, ...live.metrics } 的覆盖顺序兜底。
+  // fixture 里 gpu_model="NVIDIA T4"、agent_version="smoke" 都是非空的。
+  const omitted = [
+    "cpu_model",
+    "os",
+    "kernel",
+    "arch",
+    "virtualization",
+    "gpu_model",
+    "agent_version",
+  ];
+  for (const entry of update.updates.flatMap((u) => u.samples ?? [])) {
+    const leaked = omitted.filter((field) => entry.data?.[field] !== undefined);
+    if (leaked.length) {
+      throw new Error(`Live sample leaked identity fields: ${leaked.join(", ")}`);
+    }
+    if (entry.data?.cpu === undefined) {
+      throw new Error("Live sample lost a dynamic field (cpu)");
+    }
+  }
+  const bootstrap = await fetch(new URL("/api/bootstrap", baseUrl)).then((r) => r.json());
+  const persisted = bootstrap.servers?.find((s) => s.id === serverId);
+  if (!persisted) {
+    throw new Error(`Bootstrap missing server ${serverId}`);
+  }
+  const missing = omitted.filter((field) => !persisted[field]);
+  if (missing.length) {
+    throw new Error(`Bootstrap missing identity fields: ${missing.join(", ")}`);
   }
   }
 } finally {

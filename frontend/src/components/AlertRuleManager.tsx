@@ -94,13 +94,13 @@ export function AlertRuleManager({ servers, onError, onNotice }: {
   const unit = form.metric === "net_in" || form.metric === "net_out" ? "MiB/s" : "%";
 
   return <div className="alert-rule-manager">
-    <div className="section-head"><div><h3>资源告警规则</h3><span>最多 20 条，可指定服务器和统计窗口</span></div><button type="button" className="primary-btn compact" onClick={() => open()}><Plus size={14} />新建规则</button></div>
+    <div className="section-head"><div><h3>资源告警规则</h3><span>最多 20 条，可指定服务器和统计窗口</span></div><button type="button" className="primary-btn compact" onClick={() => open()}><Plus size={15} />新建规则</button></div>
     <div className="alert-rule-list">
       {rules.map((rule) => <div className="alert-rule-row" key={rule.id}>
         <Checkbox checked={rule.enabled} onChange={() => void toggle(rule)} ariaLabel={`${rule.name}启用状态`} />
         <div><strong>{rule.name}</strong><small>{metricLabels[rule.metric]} ≥ {rule.threshold} {rule.metric.startsWith("net_") ? "MiB/s" : "%"} · {rule.duration_minutes} 分钟{rule.aggregation === "continuous" ? "持续" : "平均"} · {rule.server_ids.length ? `${rule.server_ids.length} 台服务器` : "全部服务器"}</small></div>
-        <button type="button" className="icon-btn" title="编辑规则" onClick={() => open(rule)}><Pencil size={14} /></button>
-        <button type="button" className="icon-btn danger" title="删除规则" onClick={() => void remove(rule)}><Trash2 size={14} /></button>
+        <button type="button" className="icon-btn" title="编辑规则" onClick={() => open(rule)}><Pencil size={15} /></button>
+        <button type="button" className="icon-btn danger" title="删除规则" onClick={() => void remove(rule)}><Trash2 size={15} /></button>
       </div>)}
       {!rules.length ? <div className="list-empty">尚未配置资源告警规则</div> : null}
     </div>

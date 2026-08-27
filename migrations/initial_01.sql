@@ -71,7 +71,6 @@ CREATE TABLE metric_history (
   disk_utilization REAL NOT NULL DEFAULT 0,
   sample_count INTEGER NOT NULL DEFAULT 1 CHECK(sample_count > 0),
   latest_timestamp INTEGER NOT NULL,
-  latest_json TEXT NOT NULL CHECK(json_valid(latest_json)),
   latency_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(latency_json)),
   PRIMARY KEY(server_id, timestamp)
 ) WITHOUT ROWID;
@@ -109,7 +108,6 @@ CREATE TABLE metric_history_old (
   disk_utilization REAL NOT NULL DEFAULT 0,
   sample_count INTEGER NOT NULL DEFAULT 1 CHECK(sample_count > 0),
   latest_timestamp INTEGER NOT NULL,
-  latest_json TEXT NOT NULL CHECK(json_valid(latest_json)),
   latency_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(latency_json)),
   PRIMARY KEY(server_id, timestamp)
 ) WITHOUT ROWID;
@@ -144,7 +142,6 @@ CREATE TABLE metric_history_hourly (
   disk_utilization REAL NOT NULL DEFAULT 0,
   sample_count INTEGER NOT NULL DEFAULT 1 CHECK(sample_count > 0),
   latest_timestamp INTEGER NOT NULL,
-  latest_json TEXT NOT NULL CHECK(json_valid(latest_json)),
   latency_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(latency_json)),
   PRIMARY KEY(server_id, timestamp)
 ) WITHOUT ROWID;

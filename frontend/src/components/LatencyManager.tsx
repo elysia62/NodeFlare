@@ -136,7 +136,7 @@ export function LatencyManager({
   return <div className="admin-section latency-section">
     <div className="section-head">
       <div><h3>延迟任务</h3><span>{tasks.length} / 128 个任务 · TCP / ICMP</span></div>
-      <button className="primary-btn compact" type="button" disabled={tasks.length >= 128} onClick={() => open()}><Plus size={16} />添加</button>
+      <button className="primary-btn compact" type="button" disabled={tasks.length >= 128} onClick={() => open()}><Plus size={15} />添加</button>
     </div>
     <div className="latency-task-list">
       {tasks.map((task) => <div className="latency-task-row" key={task.id}>
@@ -164,7 +164,7 @@ export function LatencyManager({
         </div>
       </div>
       <label className="toggle-row"><span><b>默认分配给新服务器</b></span><Checkbox checked={form.default_enabled} onChange={(checked) => setForm((current) => ({ ...current, default_enabled: checked }))} /></label>
-      <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={16} />{busy ? "保存中" : "保存任务"}</button></div>
+      <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={15} />{busy ? "保存中" : "保存任务"}</button></div>
     </form></div> : null}
   </div>;
 }

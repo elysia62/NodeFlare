@@ -60,7 +60,6 @@ pub(crate) fn metric_history_ddl(table: &str) -> String {
   disk_utilization REAL NOT NULL DEFAULT 0,
   sample_count INTEGER NOT NULL DEFAULT 1 CHECK(sample_count > 0),
   latest_timestamp INTEGER NOT NULL,
-  latest_json TEXT NOT NULL CHECK(json_valid(latest_json)),
   latency_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(latency_json)),
   PRIMARY KEY(server_id, timestamp)
 ) WITHOUT ROWID"#
@@ -1028,14 +1027,14 @@ pub async fn save_reports_with_history(
           tcp_connections, udp_connections, gpu_usage,
           disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops,
           disk_await_ms, disk_utilization, sample_count,
-          latest_timestamp, latest_json, latency_json
+          latest_timestamp, latency_json
         ) SELECT
           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
           ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-          ?27, ?28, ?29, ?30
+          ?27, ?28, ?29
         WHERE NOT EXISTS (
           SELECT 1 FROM server_latest_state
-          WHERE server_id = ?1 AND last_batch_id = ?31
+          WHERE server_id = ?1 AND last_batch_id = ?30
         ) ON CONFLICT(server_id, timestamp) DO UPDATE SET
           cpu=(metric_history.cpu * metric_history.sample_count +
             excluded.cpu * excluded.sample_count) /
@@ -1074,9 +1073,6 @@ pub async fn save_reports_with_history(
           disk_utilization=MAX(metric_history.disk_utilization, excluded.disk_utilization),
           sample_count=metric_history.sample_count + excluded.sample_count,
           latest_timestamp=MAX(metric_history.latest_timestamp, excluded.latest_timestamp),
-          latest_json=CASE
-            WHEN excluded.latest_timestamp >= metric_history.latest_timestamp THEN excluded.latest_json
-            ELSE metric_history.latest_json END,
           latency_json=CASE
             WHEN json_array_length(excluded.latency_json) = 0 THEN metric_history.latency_json
             ELSE (
@@ -1161,7 +1157,6 @@ pub async fn save_reports_with_history(
         number(history_point.disk_utilization),
         number(sample_count.max(1)),
         number(latest_timestamp),
-        text(&latest_json),
         text(&latency_json),
         text(batch_id),
     ])?;
@@ -1657,14 +1652,14 @@ pub async fn cleanup_history(db: &D1Database, retention_days: i64) -> Result<()>
           net_rx_total, net_tx_total, processes, tcp_connections, udp_connections,
           gpu_usage, disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops,
           disk_await_ms, disk_utilization, sample_count,
-          latest_timestamp, latest_json, latency_json
+          latest_timestamp, latency_json
         ) SELECT
           m.server_id, m.bucket, m.cpu, m.load1, m.load5, m.load15, m.mem_used,
           m.mem_total, m.swap_used, m.swap_total, m.disk_used, m.disk_total,
           m.net_in, m.net_out, m.net_rx_total, m.net_tx_total, m.processes,
           m.tcp_connections, m.udp_connections, m.gpu_usage, m.disk_read_bps,
           m.disk_write_bps, m.disk_read_iops, m.disk_write_iops, m.disk_await_ms,
-          m.disk_utilization, m.sample_count, m.latest_timestamp, '{}',
+          m.disk_utilization, m.sample_count, m.latest_timestamp,
           COALESCE(l.latency_json, '[]')
         FROM metrics m LEFT JOIN latency_packed l
           ON l.server_id = m.server_id AND l.bucket = m.bucket
@@ -1693,7 +1688,6 @@ pub async fn cleanup_history(db: &D1Database, retention_days: i64) -> Result<()>
           disk_utilization=excluded.disk_utilization,
           sample_count=excluded.sample_count,
           latest_timestamp=excluded.latest_timestamp,
-          latest_json=excluded.latest_json,
           latency_json=excluded.latency_json"#,
         )
         .bind(&[number(cutoff), number(complete_hours_before)])?;

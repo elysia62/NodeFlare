@@ -412,12 +412,16 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
 
       <section className="chart-section">
         <div className="chart-controls">
-          <div className="segmented" aria-label="图表类型">
-            <button className={chartType === "load" ? "active" : ""} onClick={() => setChartType("load")}><Activity size={14} />{ui(locale, "负载", "Load")}</button>
-            {pingEnabled ? <button className={chartType === "latency" ? "active" : ""} onClick={() => setChartType("latency")}><RadioTower size={14} />{ui(locale, "延迟", "Latency")}</button> : null}
+          {/* role="group" 是让 aria-label 生效的前提：无 role 的 div 是 generic，
+              规范禁止给它命名，浏览器会把 aria-label 丢掉。下面几处同理。
+              选中态用 aria-pressed 而不是 role="radio"：radio 组要求方向键 + roving tabindex，
+              这里保持 Tab 逐个走的现状。同文件延迟任务图例用的也是 aria-pressed。 */}
+          <div className="segmented" role="group" aria-label={ui(locale, "图表类型", "Chart type")}>
+            <button className={chartType === "load" ? "active" : ""} aria-pressed={chartType === "load"} onClick={() => setChartType("load")}><Activity size={14} />{ui(locale, "负载", "Load")}</button>
+            {pingEnabled ? <button className={chartType === "latency" ? "active" : ""} aria-pressed={chartType === "latency"} onClick={() => setChartType("latency")}><RadioTower size={14} />{ui(locale, "延迟", "Latency")}</button> : null}
           </div>
-          <div className="segmented range-control" aria-label="时间范围">
-            {ranges.map((range) => <button className={hours === range.value ? "active" : ""} key={range.value} onClick={() => chartType === "load" ? setLoadHours(range.value) : setLatencyHours(range.value)}>{range.label}</button>)}
+          <div className="segmented range-control" role="group" aria-label={ui(locale, "时间范围", "Time range")}>
+            {ranges.map((range) => <button className={hours === range.value ? "active" : ""} aria-pressed={hours === range.value} key={range.value} onClick={() => chartType === "load" ? setLoadHours(range.value) : setLatencyHours(range.value)}>{range.label}</button>)}
           </div>
         </div>
 
@@ -447,7 +451,7 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
                 <small>{series.loss == null ? "--" : `${series.loss.toFixed(2)}%`} 平均丢包</small>
               </div>)}
             </div>
-            <div className="latency-task-legend" aria-label={ui(locale, "延迟任务", "Latency tasks")}>
+            <div className="latency-task-legend" role="group" aria-label={ui(locale, "延迟任务", "Latency tasks")}>
               {latencySeries.map((series) => {
                 const hidden = hiddenLatencyTaskIds.has(series.id);
                 return <button

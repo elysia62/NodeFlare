@@ -5,17 +5,22 @@
 .modal-backdrop, .submodal-backdrop { position: fixed; z-index: 80; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgb(5 10 12 / .56); backdrop-filter: blur(6px); }
 .submodal-backdrop { z-index: 90; background: rgb(5 10 12 / .42); }
 
+/* 两处色值受无障碍下限约束，改动前先算比值：
+   --admin-border-strong 是 input/select/textarea/secondary-btn/checkbox 的边界，
+   而这些控件的背景和容器同为 --admin-surface，边框是唯一可辨识的轮廓，
+   受 WCAG 1.4.11 约束需 >= 3:1（装饰性的 --admin-border 不受此约束）。
+   --admin-accent 会落在 --admin-active-bg 上当选中态文字，需 >= 4.5:1。 */
 .admin-page, .admin-loading {
   --admin-bg: #f4f6f8;
   --admin-surface: #fff;
   --admin-text: #111827;
   --admin-muted: #4b5563;
   --admin-border: #d9dee5;
-  --admin-border-strong: #c7ced8;
+  --admin-border-strong: #8592a6; /* 白底 3.15:1 */
   --admin-border-hover: #aeb8c5;
   --admin-hover: #eef1f5;
   --admin-active-bg: #e3f3ef;
-  --admin-accent: #0d7d6f;
+  --admin-accent: #0c7367; /* 选中底 5.00:1，白底 5.73:1 */
   --admin-accent-border: #0a6e61;
 }
 .admin-page.admin-dark, .admin-loading.admin-dark {
@@ -24,7 +29,7 @@
   --admin-text: #f3f4f6;
   --admin-muted: #b9c0c7;
   --admin-border: #343b40;
-  --admin-border-strong: #485159;
+  --admin-border-strong: #616d78; /* 卡片底 3.11:1 */
   --admin-border-hover: #65717b;
   --admin-hover: #242b2d;
   --admin-active-bg: #173830;
@@ -40,6 +45,9 @@
 .admin-page label > span { color: var(--admin-text); font-size: 13px; font-weight: 600; }
 .admin-page .icon-btn { color: var(--admin-muted); }
 .admin-page .icon-btn:hover { color: var(--admin-text); background: var(--admin-hover); }
+/* 后台按钮里的图标统一尺寸。lucide 的 size 渲染成 width/height 属性，
+   CSS 在层叠里压过表现属性，所以这条说了算 —— JSX 的 size 必须和这里一致，
+   否则代码里的数字是假的。改这里也要改对应的 size。 */
 .admin-page button svg { width: 15px; height: 15px; }
 .admin-page .primary-btn, .admin-page .secondary-btn, .admin-page .danger-btn { min-height: 36px; font-size: 13px; }
 .primary-btn.compact { min-height: 34px; padding: 6px 11px; }
@@ -62,6 +70,9 @@
 .login-turnstile { display: flex; min-height: 66px; justify-content: center; }
 .login-turnstile:has(.turnstile-widget.testing) { min-height: 51px; }
 .login-turnstile:has(.turnstile-widget.verified) { min-height: 0; }
+/* 登录错误就近显示，不用右上角的 toast —— 那个的 top 是按后台顶栏算的 */
+.login-error { display: flex; align-items: flex-start; gap: 7px; margin: 0; border: 1px solid color-mix(in srgb, var(--danger) 34%, var(--admin-border)); border-radius: 7px; padding: 9px 11px; color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, transparent); font-size: 13px; line-height: 1.5; }
+.login-error svg { flex: 0 0 auto; margin-top: 1px; }
 .login-submit { width: 100%; min-height: 40px; }
 .eyebrow { display: block; margin-bottom: 3px; color: var(--admin-accent); font-size: 11px; font-weight: 750; text-transform: uppercase; }
 
@@ -78,7 +89,7 @@
 .admin-nav-label { display: block; margin: 0 11px 8px; color: var(--admin-muted); font-size: 12px; font-weight: 700; }
 .admin-tabs { display: flex; flex-direction: column; gap: 5px; border: 0; padding: 0; }
 .admin-tabs button { display: flex; min-height: 44px; align-items: center; gap: 9px; border-radius: 6px; padding: 0 12px; color: var(--admin-text); font-size: 14px; font-weight: 600; text-align: left; }
-.admin-tabs button svg { width: 17px; height: 17px; }
+.admin-tabs button svg { width: 17px; height: 17px; } /* 覆盖上面的 15px，见该处注释 */
 .admin-tabs button:hover { background: var(--admin-hover); }
 .admin-tabs button.active { border-left: 3px solid var(--admin-accent-border); padding-left: 9px; color: var(--admin-accent); background: var(--admin-active-bg); font-weight: 700; }
 .admin-content { width: 100%; max-width: 100%; height: 100%; min-width: 0; overflow-y: auto; color: var(--admin-text); background: var(--admin-bg); }
@@ -244,36 +255,8 @@
   .telegram-token-field { grid-column: 1 / -1; }
 }
 
-@media (max-width: 639px) {
-  .modal-backdrop, .submodal-backdrop { align-items: stretch; padding: 0; }
-  .admin-shell, .editor-modal, .install-modal, .latency-editor { width: 100%; max-height: 100dvh; border: 0; border-radius: 0; }
-  .admin-shell { height: 100dvh; min-height: 100dvh; }
-  .admin-back { top: 12px; left: 12px; }
-  .login-form { width: calc(100% - 26px); padding: 24px 20px; }
-  .admin-body { display: flex; height: calc(100vh - 62px); min-height: 0; flex-direction: column; }
-  .admin-tabs { overflow-x: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--admin-border); padding: 7px 10px; }
-  .admin-tabs button { min-height: 33px; flex: 0 0 auto; }
-  .admin-content { height: calc(100vh - 112px); }
-  .admin-section, .settings-form { padding: 14px; }
-  .section-head { align-items: flex-start; }
-  .server-row { padding-block: 6px; grid-template-columns: 18px 20px 9px minmax(0, 1fr) auto; }
-  .form-grid, .form-grid.three, .settings-toggles, .theme-option-grid { grid-template-columns: 1fr; }
-  .theme-row { grid-template-columns: minmax(0, 1fr); }
-  .theme-row-actions { justify-content: flex-start; }
-  .data-stat-grid { grid-template-columns: 1fr 1fr 1fr; }
-  .usage-do-breakdown { grid-template-columns: 1fr; }
-  .usage-table th, .usage-table td { padding-inline: 5px; font-size: 11px; }
-  .editor-modal, .install-modal { padding: 15px 13px; }
-  .telegram-fields { grid-template-columns: 1fr; }
-  .telegram-token-field { grid-column: auto; }
-  .editor-toggles { grid-template-columns: 1fr 1fr; }
-  .latency-task-row { padding-block: 8px; grid-template-columns: 70px minmax(0, 1fr) auto; }
-  .latency-task-row .latency-task-meta:nth-of-type(2) { display: none; }
-  .latency-task-row .latency-task-meta:nth-of-type(3) { grid-column: 2; }
-  .latency-task-row .row-actions { grid-column: 3; grid-row: 1 / 3; }
-  .latency-editor { padding: 15px 13px; }
-}
-
+/* 断点顺序必须由宽到窄：760 和 639 都命中窄屏且特异性相同，写在后面的赢。
+   639 块只保留在 760 之上的收窄项，重复或已被 760 取代的声明都删掉了。 */
 @media (max-width: 760px) {
   .admin-shell { grid-template-rows: 58px minmax(0, 1fr); }
   .admin-topbar { gap: 10px; padding: 0 12px; }
@@ -301,6 +284,29 @@
   .alert-server-picker { grid-template-columns: 1fr; }
   .admin-back { top: 12px; left: 12px; }
   .admin-login-theme { top: 12px; right: 12px; }
+}
+
+@media (max-width: 639px) {
+  .modal-backdrop, .submodal-backdrop { align-items: stretch; padding: 0; }
+  .admin-shell, .editor-modal, .install-modal, .latency-editor { width: 100%; max-height: 100dvh; border: 0; border-radius: 0; }
+  .admin-shell { min-height: 100dvh; }
+  .login-form { width: calc(100% - 26px); padding: 24px 20px; }
+  .admin-section, .settings-form { padding: 14px; }
+  .server-row { padding-block: 6px; grid-template-columns: 18px 20px 9px minmax(0, 1fr) auto; }
+  .form-grid, .form-grid.three, .settings-toggles, .theme-option-grid { grid-template-columns: 1fr; }
+  /* 与 .settings-toggles 同元素，撤销上一行的单列 */
+  .editor-toggles { grid-template-columns: 1fr 1fr; }
+  .theme-row { grid-template-columns: minmax(0, 1fr); }
+  .theme-row-actions { justify-content: flex-start; }
+  .usage-do-breakdown { grid-template-columns: 1fr; }
+  .usage-table th, .usage-table td { padding-inline: 5px; font-size: 11px; }
+  .editor-modal, .install-modal, .latency-editor { padding: 15px 13px; }
+  .telegram-fields { grid-template-columns: 1fr; }
+  .telegram-token-field { grid-column: auto; }
+  .latency-task-row { padding-block: 8px; grid-template-columns: 70px minmax(0, 1fr) auto; }
+  .latency-task-row .latency-task-meta:nth-of-type(2) { display: none; }
+  .latency-task-row .latency-task-meta:nth-of-type(3) { grid-column: 2; }
+  .latency-task-row .row-actions { grid-column: 3; grid-row: 1 / 3; }
 }
 
 .server-name-main { display: flex; min-width: 0; align-items: center; gap: 7px; }
