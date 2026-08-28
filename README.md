@@ -26,8 +26,9 @@
 ## 部署到 Cloudflare
 
 1. Fork 本仓库并打开 [Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages/create)，选择 **Import a repository** 后连接仓库。
-2. 部署命令修改为 `bun run deploy`。
-3. 在 **高级设置** 中填写下表变量后部署。
+2. 在构建设置中将 **Build command（构建命令）清空**。Cloudflare 可能自动识别为 `bun run build`，需要手动删除；如果控制台不允许留空，可填写 `true`。
+3. 将 **Deploy command（部署命令）** 修改为 `bun run deploy`。该命令会按需构建前端和 Worker、应用 D1 迁移并完成部署，无需单独执行构建命令；同时配置 `bun run build` 会导致前端重复构建。
+4. 在 **高级设置** 中填写下表变量后部署。
 
 | 变量 | 必填/可选 | 说明 |
 | --- | ---: | --- |

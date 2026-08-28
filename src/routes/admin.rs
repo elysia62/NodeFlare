@@ -663,6 +663,7 @@ async fn settings_patch(req: &mut Request, ctx: &RouteContext) -> Result<Respons
     {
         return error("站点公告不能超过 1000 个字符", 400);
     }
+    // logo_url 同时作为站点 Logo 和浏览器标签图标使用。
     if input
         .logo_url
         .as_deref()
@@ -788,13 +789,6 @@ async fn settings_patch(req: &mut Request, ctx: &RouteContext) -> Result<Respons
         .is_some_and(|value| !matches!(value, "zh-CN" | "en"))
     {
         return error("界面语言仅支持简体中文或 English", 400);
-    }
-    if input
-        .favicon_url
-        .as_deref()
-        .is_some_and(|value| !valid_public_asset_url(value))
-    {
-        return error("站点图标必须使用 HTTPS 地址", 400);
     }
     let password_hash = if input
         .new_password

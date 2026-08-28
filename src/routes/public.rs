@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use serde::Deserialize;
 use worker::{Method, Request, Response, Result};
 
 use crate::auth::{
@@ -14,6 +15,13 @@ use crate::{
     live, no_content, now, public_server, request_json, requested_hours, server_id,
     set_admin_session_cookie, store_history_response, API_JSON_MAX_BYTES,
 };
+
+const MAX_WAKE_SERVER_IDS: usize = 500;
+
+#[derive(Deserialize)]
+struct WakeServersRequest {
+    server_ids: Vec<String>,
+}
 
 fn request_hostname(req: &Request) -> Option<String> {
     req.url()
@@ -55,6 +63,9 @@ pub(crate) async fn route(mut req: Request, ctx: &RouteContext) -> Result<RouteO
         }
         return Ok(RouteOutcome::Handled(live::upgrade(req, &ctx.env).await?));
     }
+    if method == Method::Post && path == "/api/live/wake" {
+        return Ok(RouteOutcome::Handled(wake_servers(&mut req, ctx).await?));
+    }
     if method == Method::Get && path == "/api/servers" {
         return Ok(RouteOutcome::Handled(servers(ctx).await?));
     }
@@ -84,7 +95,6 @@ fn config_value(ctx: &RouteContext) -> serde_json::Value {
         "site_description": settings.site_description,
         "site_announcement": settings.site_announcement,
         "logo_url": settings.logo_url,
-        "favicon_url": settings.favicon_url,
         "locale": settings.locale,
         "public_dashboard": settings.public_dashboard,
         "offline_threshold_seconds": settings.offline_threshold_seconds,
@@ -292,6 +302,28 @@ async fn servers(ctx: &RouteContext) -> Result<Response> {
     }
     let servers = server_values(ctx).await?;
     json(&serde_json::json!({ "servers": servers }), 200)
+}
+
+async fn wake_servers(req: &mut Request, ctx: &RouteContext) -> Result<Response> {
+    if let Some(denied) = public_access_denied(ctx) {
+        return denied;
+    }
+    let input: WakeServersRequest = match request_json(req, API_JSON_MAX_BYTES).await {
+        Ok(value) => value,
+        Err(_) => return error("请求格式无效", 400),
+    };
+    if input.server_ids.len() > MAX_WAKE_SERVER_IDS
+        || input
+            .server_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 80 || id.contains('/'))
+        || input.server_ids.iter().collect::<HashSet<_>>().len() != input.server_ids.len()
+    {
+        return error("节点列表无效", 400);
+    }
+    let visible_ids = db::visible_server_ids(&ctx.database, &input.server_ids).await?;
+    live::wake_agents(&ctx.env, &visible_ids).await?;
+    no_content()
 }
 
 async fn history(req: &Request, ctx: &RouteContext) -> Result<Response> {

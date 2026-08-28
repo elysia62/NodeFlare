@@ -2,8 +2,8 @@ export interface Config {
   site_name: string;
   site_description: string;
   site_announcement: string;
+  /** 站点 Logo，同时用作浏览器标签图标。空则回落到 /logo.svg。 */
   logo_url: string;
-  favicon_url: string;
   locale: "zh-CN" | "en";
   public_dashboard: boolean;
   offline_threshold_seconds: number;

@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use worker::*;
 
@@ -610,6 +611,29 @@ pub struct LiveHub {
     active_d1_flushes: RefCell<HashSet<String>>,
 }
 
+struct ActiveD1FlushGuard<'a> {
+    active: &'a RefCell<HashSet<String>>,
+    server_id: String,
+}
+
+impl<'a> ActiveD1FlushGuard<'a> {
+    fn acquire(active: &'a RefCell<HashSet<String>>, server_id: &str) -> Option<Self> {
+        if !active.borrow_mut().insert(server_id.to_string()) {
+            return None;
+        }
+        Some(Self {
+            active,
+            server_id: server_id.to_string(),
+        })
+    }
+}
+
+impl Drop for ActiveD1FlushGuard<'_> {
+    fn drop(&mut self) {
+        self.active.borrow_mut().remove(&self.server_id);
+    }
+}
+
 impl LiveHub {
     async fn broadcast_to_global_dashboard(&self, server_id: &str, payload: &str) -> bool {
         let result = async {
@@ -664,7 +688,7 @@ impl LiveHub {
                 .is_empty()
     }
 
-    fn hint_agents(&self, server_id: Option<&str>) {
+    fn hint_agents(&self, server_id: Option<&str>, force_realtime: bool) {
         let sockets = server_id.map_or_else(
             || self.state.get_websockets_with_tag("agents"),
             |server_id| {
@@ -680,7 +704,8 @@ impl LiveHub {
             let Some(agent_server_id) = attachment.server_id.as_deref() else {
                 continue;
             };
-            let realtime_active = !attachment.hidden && self.dashboard_active_for(agent_server_id);
+            let realtime_active = !attachment.hidden
+                && (force_realtime || self.dashboard_active_for(agent_server_id));
             let Ok(payload) = live_ack_payload(
                 now,
                 false,
@@ -846,6 +871,10 @@ impl DurableObject for LiveHub {
                     }
                     return Response::empty();
                 }
+                Some("hint-agents") => {
+                    self.hint_agents(None, true);
+                    return Response::empty();
+                }
                 Some("record-alert-sample") => {
                     let record = req.json::<AlertRecordRequest>().await?;
                     self.record_alert_point(&record.server_id, &record.point)
@@ -947,7 +976,7 @@ impl DurableObject for LiveHub {
         pair.server.serialize_attachment(dashboard_attachment())?;
         self.state.accept_websocket_with_tags(&pair.server, &[&tag]);
         self.replay_latest(&pair.server, server_id.as_deref());
-        self.hint_agents(server_id.as_deref());
+        self.hint_agents(server_id.as_deref(), false);
         Response::from_websocket(pair.client)
     }
 
@@ -1043,16 +1072,21 @@ impl DurableObject for LiveHub {
 
         let due_for_d1 = received_at.saturating_sub(attachment.last_d1_write_at)
             >= HISTORY_WRITE_INTERVAL_SECONDS;
-        let flush_active = self.active_d1_flushes.borrow().contains(&server_id);
-        let mut flush = if !unpersisted_reports.is_empty()
-            && (due_for_d1 || attachment.d1_flush.is_some())
-            && !flush_active
-        {
-            let database = self.env.d1("DB")?;
-            begin_d1_flush(&mut attachment).map(|snapshot| (database, snapshot))
-        } else {
-            None
-        };
+        let should_flush =
+            !unpersisted_reports.is_empty() && (due_for_d1 || attachment.d1_flush.is_some());
+        let mut flush_guard = None;
+        let mut flush = None;
+        if should_flush {
+            // Acquire before any external await below. Durable Object events may
+            // interleave while broadcasting or writing D1.
+            if let Some(guard) = ActiveD1FlushGuard::acquire(&self.active_d1_flushes, &server_id) {
+                let database = self.env.d1("DB")?;
+                flush = begin_d1_flush(&mut attachment).map(|snapshot| (database, snapshot));
+                if flush.is_some() {
+                    flush_guard = Some(guard);
+                }
+            }
+        }
         if flush.is_some() {
             if !trim_socket_attachment(&mut attachment) {
                 return ws.close(Some(1011), Some("live state exceeds attachment limit"));
@@ -1081,9 +1115,6 @@ impl DurableObject for LiveHub {
         let mut persistence_error = false;
         let mut attachment_serialized = false;
         if let Some((database, snapshot)) = flush.take() {
-            self.active_d1_flushes
-                .borrow_mut()
-                .insert(server_id.clone());
             let history_point = snapshot
                 .history
                 .point()
@@ -1110,7 +1141,6 @@ impl DurableObject for LiveHub {
                 }
                 Ok(inserted) => (true, inserted),
             };
-            self.active_d1_flushes.borrow_mut().remove(&server_id);
 
             let Some(mut current_attachment) = ws.deserialize_attachment::<SocketAttachment>()?
             else {
@@ -1134,6 +1164,7 @@ impl DurableObject for LiveHub {
             attachment = current_attachment;
             attachment_serialized = true;
             persisted = write_succeeded;
+            drop(flush_guard.take());
 
             if newly_written {
                 match crate::db::has_enabled_alert_rules(&database).await {
@@ -1314,6 +1345,36 @@ pub async fn disconnect_agents(env: &Env, server_ids: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub async fn wake_agents(env: &Env, server_ids: &[String]) -> Result<()> {
+    if server_ids.is_empty() {
+        return Ok(());
+    }
+    let namespace = env.durable_object("LIVE_HUB")?;
+    let results = stream::iter(server_ids.iter())
+        .map(|server_id| {
+            let namespace = &namespace;
+            async move {
+                let stub = namespace
+                    .id_from_name(&server_hub_name(server_id))?
+                    .get_stub()?;
+                let headers = Headers::new();
+                headers.set("X-Live-Action", "hint-agents")?;
+                let mut init = RequestInit::new();
+                init.with_method(Method::Post).with_headers(headers);
+                let req = Request::new_with_init("https://live.internal/hint-agents", &init)?;
+                let response = stub.fetch_with_request(req).await?;
+                ensure_live_success(&response, "hint-agents")
+            }
+        })
+        .buffer_unordered(6)
+        .collect::<Vec<_>>()
+        .await;
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
 pub async fn upgrade(req: Request, env: &Env) -> Result<Response> {
     let namespace = env.durable_object("LIVE_HUB")?;
     let server_id = req
@@ -1403,15 +1464,17 @@ mod tests {
         agent_wss_interval_ms, apply_live_traffic, batch_update_parts_at, begin_d1_flush,
         cached_update_value, consume_agent_message_budget, finish_d1_flush, live_ack_payload,
         next_d1_write_ms, outbound_close_code, trim_cached_live_samples, trim_socket_attachment,
-        update_alert_window, AgentMessageBudget, AlertEvaluationServer, AlertWindowSample,
-        CachedLiveSample, SocketAttachment, TrafficAttachment, ALERT_WINDOW_SECONDS,
-        BROWSER_OMITTED_REPORT_FIELDS, CACHED_LIVE_TTL_SECONDS, MAX_AGENT_BYTES_PER_WINDOW,
-        MAX_AGENT_MESSAGES_PER_WINDOW, MAX_AGENT_SAMPLES_PER_WINDOW, MAX_CACHED_LIVE_BYTES,
-        MAX_CACHED_LIVE_SAMPLES, MAX_SERIALIZED_ATTACHMENT_BYTES,
+        update_alert_window, ActiveD1FlushGuard, AgentMessageBudget, AlertEvaluationServer,
+        AlertWindowSample, CachedLiveSample, SocketAttachment, TrafficAttachment,
+        ALERT_WINDOW_SECONDS, BROWSER_OMITTED_REPORT_FIELDS, CACHED_LIVE_TTL_SECONDS,
+        MAX_AGENT_BYTES_PER_WINDOW, MAX_AGENT_MESSAGES_PER_WINDOW, MAX_AGENT_SAMPLES_PER_WINDOW,
+        MAX_CACHED_LIVE_BYTES, MAX_CACHED_LIVE_SAMPLES, MAX_SERIALIZED_ATTACHMENT_BYTES,
     };
     use crate::db::HistoryMetricAggregate;
     use crate::latency::LatencyMetricAggregates;
     use crate::models::{AgentLatencyResult, AgentReport, AlertRuleView, HistoryPoint};
+    use std::cell::RefCell;
+    use std::collections::HashSet;
 
     fn alert_point(timestamp: i64, cpu: f64, net_in: f64) -> HistoryPoint {
         HistoryPoint {
@@ -1497,6 +1560,16 @@ mod tests {
         assert_eq!(outbound_close_code(1006), None);
         assert_eq!(outbound_close_code(1015), None);
         assert_eq!(outbound_close_code(5000), None);
+    }
+
+    #[test]
+    fn d1_flush_guard_is_exclusive_and_releases_on_drop() {
+        let active = RefCell::new(HashSet::new());
+        let guard = ActiveD1FlushGuard::acquire(&active, "node-a").expect("first flush lock");
+        assert!(ActiveD1FlushGuard::acquire(&active, "node-a").is_none());
+        assert!(ActiveD1FlushGuard::acquire(&active, "node-b").is_some());
+        drop(guard);
+        assert!(ActiveD1FlushGuard::acquire(&active, "node-a").is_some());
     }
 
     #[test]

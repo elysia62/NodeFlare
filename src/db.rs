@@ -160,6 +160,11 @@ struct AgentConfigRow {
 }
 
 #[derive(Debug, Deserialize)]
+struct ServerIdRow {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AgentLiveContext {
     pub report_interval: i64,
     pub collect_interval: i64,
@@ -365,7 +370,6 @@ pub struct SettingsView {
     pub site_description: String,
     pub site_announcement: String,
     pub logo_url: String,
-    pub favicon_url: String,
     pub locale: String,
     pub public_dashboard: bool,
     pub offline_threshold_seconds: i64,
@@ -510,6 +514,27 @@ pub async fn list_servers(db: &D1Database, include_hidden: bool) -> Result<Vec<S
     };
     let query = format!("{SERVER_SELECT} {filter} ORDER BY s.sort_order ASC, s.created_at ASC");
     db.prepare(query).all().await?.results()
+}
+
+/// Returns only requested server IDs that exist and are visible, preserving request order.
+pub async fn visible_server_ids(db: &D1Database, ids: &[String]) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let requested = serde_json::to_string(ids)?;
+    let rows = db
+        .prepare(
+            r#"SELECT s.id
+               FROM json_each(?1) requested
+               JOIN servers s ON s.id = CAST(requested.value AS TEXT)
+               WHERE s.hidden = 0
+               ORDER BY CAST(requested.key AS INTEGER)"#,
+        )
+        .bind(&[text(&requested)])?
+        .all()
+        .await?
+        .results::<ServerIdRow>()?;
+    Ok(rows.into_iter().map(|row| row.id).collect())
 }
 
 pub async fn get_server(
@@ -1204,7 +1229,6 @@ pub async fn settings(
         site_description: string_setting(&values, "site_description", "轻量、实时的服务器运行状态"),
         site_announcement: string_setting(&values, "site_announcement", ""),
         logo_url: string_setting(&values, "logo_url", ""),
-        favicon_url: string_setting(&values, "favicon_url", ""),
         locale: string_setting(&values, "locale", "zh-CN"),
         public_dashboard: bool_setting(&values, "public_dashboard", true),
         offline_threshold_seconds: values
@@ -1279,9 +1303,6 @@ pub async fn update_settings(
     }
     if let Some(value) = input.logo_url.as_deref() {
         push_setting!("logo_url", value.trim());
-    }
-    if let Some(value) = input.favicon_url.as_deref() {
-        push_setting!("favicon_url", value.trim());
     }
     if let Some(value) = input.locale.as_deref() {
         push_setting!("locale", value.trim());
@@ -1658,24 +1679,22 @@ pub async fn cleanup_history(db: &D1Database, retention_days: i64) -> Result<()>
     let delete_archive = db
         .prepare("DELETE FROM metric_history_hourly WHERE timestamp < ?1")
         .bind(&[number(cutoff)])?;
-    // DDL 不和上面的语句放进同一个 batch：batch 是隐式事务，而 SQLite 不允许
-    // 在事务里 ALTER TABLE ... RENAME。压缩+删除先提交，轮换单独走；轮换中途
-    // 失败下一次 cron 重来即可，重复压缩无害（见上）。
+    // 压缩和保留期删除先原子提交；轮换随后在另一个原子 batch 中完成。
+    // 两个阶段都可独立重试，且轮换失败时不会留下缺少当前表的半完成状态。
     db.batch(vec![compact, delete_archive]).await?;
     rotate_recent_history(db).await
 }
 
 /// 丢弃上一代分钟历史，把当前代降级为上一代，再建一张空的当前代。
 async fn rotate_recent_history(db: &D1Database) -> Result<()> {
-    db.prepare("DROP TABLE IF EXISTS metric_history_old")
-        .run()
-        .await?;
-    db.prepare("ALTER TABLE metric_history RENAME TO metric_history_old")
-        .run()
-        .await?;
-    db.prepare(metric_history_ddl("metric_history"))
-        .run()
-        .await?;
+    // D1 batch guarantees transactional execution, including SQLite DDL. If any
+    // statement fails, the prior pair of recent-history tables remains intact.
+    db.batch(vec![
+        db.prepare("DROP TABLE IF EXISTS metric_history_old"),
+        db.prepare("ALTER TABLE metric_history RENAME TO metric_history_old"),
+        db.prepare(metric_history_ddl("metric_history")),
+    ])
+    .await?;
     Ok(())
 }
 

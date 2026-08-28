@@ -188,11 +188,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         servers: serversRef.current,
       })),
       onConnectedChange: (connected) => { liveConnectedRef.current = connected; },
-      wakeTargets: () => {
+      onOverviewConnected: () => {
         const now = Date.now() / 1000;
-        return serversRef.current
+        const serverIds = serversRef.current
           .filter((server) => server.timestamp && now - server.timestamp <= config.offline_threshold_seconds)
           .map((server) => server.id);
+        return serverIds.length ? api.wakeServers(serverIds) : Promise.resolve();
       },
     });
   }, [access, config.offline_threshold_seconds, loading, selectedId]);
@@ -211,8 +212,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       link.rel = "icon";
       document.head.append(link);
     }
-    link.href = config.favicon_url || config.logo_url || "/logo.svg";
-  }, [config.favicon_url, config.logo_url]);
+    link.removeAttribute("type");
+    link.href = config.logo_url || "/logo.svg";
+  }, [config.logo_url]);
 
   useEffect(() => {
     const media = matchMedia("(prefers-color-scheme: dark)");

@@ -5,7 +5,6 @@ export const demoConfig: Config = {
   site_description: "边缘节点与核心服务运行状态",
   site_announcement: "",
   logo_url: "",
-  favicon_url: "",
   locale: "zh-CN",
   public_dashboard: true,
   offline_threshold_seconds: 180,

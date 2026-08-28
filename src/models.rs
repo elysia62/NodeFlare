@@ -55,7 +55,6 @@ pub struct SettingsInput {
     pub site_description: Option<String>,
     pub site_announcement: Option<String>,
     pub logo_url: Option<String>,
-    pub favicon_url: Option<String>,
     pub locale: Option<String>,
     pub public_dashboard: Option<bool>,
     pub offline_threshold_seconds: Option<i64>,

@@ -188,6 +188,27 @@ try {
     throw new Error(`Invalid Agent config: ${JSON.stringify(config)}`);
   }
   if (!configOnly) {
+  const wakeHintPromise = waitForJsonMessage(
+    agent,
+    "batched overview wake hint",
+    (message) => message.type === "ack" && message.realtimeHint === true,
+  );
+  const wakeResponse = await fetch(new URL("/api/live/wake", baseUrl), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ server_ids: [serverId] }),
+  });
+  if (wakeResponse.status !== 204) {
+    throw new Error(`Batch wake returned HTTP ${wakeResponse.status}: ${await wakeResponse.text()}`);
+  }
+  const wakeHint = await wakeHintPromise;
+  if (wakeHint.nextWssReportAfterMs !== 5_000) {
+    throw new Error(`Invalid batch wake hint: ${JSON.stringify(wakeHint)}`);
+  }
+
   const timestamp = Math.floor(Date.now() / 1_000);
   const baseSample = {
     timestamp,

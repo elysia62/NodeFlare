@@ -63,15 +63,13 @@
     "crons": ["*/5 * * * *"]
   },
   "observability": {
-    "enabled": true,
+    "enabled": false,
     "logs": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "invocation_logs": true
+      "enabled": false,
+      "invocation_logs": false
     },
     "traces": {
-      "enabled": true,
-      "head_sampling_rate": 0.05
+      "enabled": false
     }
   },
   "dev": {
