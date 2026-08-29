@@ -155,10 +155,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // Poll as a safety net: often when the live feed is down, rarely when it is
   // healthy, so a missed frame cannot leave the page stale indefinitely.
+  // Hidden tabs skip polling entirely — the live socket is dropped while
+  // hidden, and a background tab has nobody to keep fresh.
   useEffect(() => {
     if (access !== "ok") return;
     let ticks = 0;
     const timer = window.setInterval(() => {
+      if (document.hidden) return;
       ticks += 1;
       if (!liveConnectedRef.current || ticks % BOOTSTRAP_POLL_TICKS_WHEN_LIVE === 0) void reload(true);
     }, BOOTSTRAP_POLL_INTERVAL);

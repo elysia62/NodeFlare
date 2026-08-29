@@ -68,6 +68,7 @@ fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/ins
 | `GET` | `/api/latency/:id?hours=24` | 节点延迟任务历史 |
 | `GET` | `/api/ws` | 实时 WebSocket |
 | `GET` | `/api/agent/ws` | Agent 配置同步与指标上报 WebSocket，节点 Bearer Token |
+| `POST` | `/api/live/wake` | 总览页连上实时通道后批量唤醒可见节点的实时推送 |
 | `POST` | `/api/admin/login` | 管理登录 |
 | `POST` | `/api/admin/logout` | 退出登录（清除会话 Cookie） |
 | `GET/POST` | `/api/admin/servers` | 管理节点 |

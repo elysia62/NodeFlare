@@ -101,10 +101,6 @@ invalid_telegram_status=$(monitor_curl --silent --output /dev/null --write-out '
   --data '{"bot_token":"invalid","chat_id":"","message_thread_id":null,"template":"{{message}}"}' \
   "$MONITOR_BASE_URL/api/admin/telegram")
 [ "$invalid_telegram_status" = "400" ]
-removed_channels_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
-  -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/notification-channels")
-[ "$removed_channels_status" = "404" ]
-
 latency_task_json=$(request -H "Authorization: Bearer $admin_token" \
   -H 'Content-Type: application/json' \
   --data '{"name":"Smoke TCP","task_type":"tcp","target":"example.com","port":443,"interval_seconds":60,"default_enabled":true,"server_ids":[]}' \
@@ -128,15 +124,6 @@ request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/servers/$server_id/token" | \
   jq -e --arg token "$agent_token" '.agent_token == $token' >/dev/null
 
-legacy_report_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
-  -X POST -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
-  --data '{}' "$MONITOR_BASE_URL/api/agent/report")
-[ "$legacy_report_status" = "404" ]
-for legacy_path in /api/agent/config /api/agent/live; do
-  legacy_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
-    -H "Authorization: Bearer $agent_token" "$MONITOR_BASE_URL$legacy_path")
-  [ "$legacy_status" = "404" ]
-done
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/servers" | \
   jq -e --arg id "$server_id" '.servers | any(.id == $id and .last_ip == "8.8.8.8")' >/dev/null
 

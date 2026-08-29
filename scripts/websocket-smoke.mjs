@@ -312,7 +312,7 @@ try {
     ack.persistenceError !== false ||
     !Number.isInteger(ack.persistedThroughTs) ||
     ack.persistedThroughTs < latestTimestamp ||
-    ack.nextD1WriteAfterMs !== 120_000 ||
+    ack.nextD1WriteAfterMs !== 60_000 ||
     ack.nextWssReportAfterMs !== 5_000
   ) {
     throw new Error(`Invalid Agent metric ACK: ${JSON.stringify(ack)}`);

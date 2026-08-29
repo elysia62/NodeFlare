@@ -29,7 +29,10 @@ function endpoint(serverId: string | null): URL {
 /**
  * WSS-only live feed. Returns a disposer; the caller owns when the connection
  * starts and stops. Reconnects on close, and asks the Worker to wake online
- * Agents in one batch when the overview connection opens.
+ * Agents in one batch when the overview connection opens. The socket is
+ * dropped while the tab is hidden and re-established on return, so the Worker
+ * only forwards live samples for pages somebody is actually watching; the
+ * reconnect also re-arms the overview wake.
  */
 export function connectLive(
   { serverId }: LiveTransportOptions,
@@ -38,6 +41,7 @@ export function connectLive(
   const sockets: WebSocket[] = [];
   const reconnects: number[] = [];
   let cancelled = false;
+  let suspended = document.hidden;
   let wakeInFlight = false;
 
   const reportConnected = () => {
@@ -54,7 +58,7 @@ export function connectLive(
   };
 
   const connect = () => {
-    if (cancelled) return;
+    if (cancelled || suspended) return;
     const socket = new WebSocket(endpoint(serverId));
     sockets.push(socket);
     socket.onopen = () => {
@@ -62,10 +66,14 @@ export function connectLive(
       wakeOverviewAgents();
     };
     socket.onclose = () => {
+      // Sockets we closed ourselves are removed up front, so only unexpected
+      // closes may schedule a reconnect.
       const index = sockets.indexOf(socket);
       if (index >= 0) sockets.splice(index, 1);
       reportConnected();
-      if (!cancelled) reconnects.push(window.setTimeout(connect, RECONNECT_DELAY));
+      if (index >= 0 && !cancelled && !suspended) {
+        reconnects.push(window.setTimeout(connect, RECONNECT_DELAY));
+      }
     };
     socket.onerror = () => handlers.onConnectedChange(false);
     socket.onmessage = (event) => {
@@ -83,15 +91,31 @@ export function connectLive(
     };
   };
 
+  const handleVisibility = () => {
+    if (cancelled) return;
+    if (document.hidden) {
+      suspended = true;
+      reconnects.forEach(clearTimeout);
+      reconnects.length = 0;
+      for (const socket of sockets.splice(0)) socket.close();
+      handlers.onConnectedChange(false);
+    } else {
+      suspended = false;
+      connect();
+    }
+  };
+
   connect();
   const heartbeat = window.setInterval(() => {
     for (const socket of sockets) {
       if (socket.readyState === WebSocket.OPEN) socket.send("ping");
     }
   }, HEARTBEAT_INTERVAL);
+  document.addEventListener("visibilitychange", handleVisibility);
 
   return () => {
     cancelled = true;
+    document.removeEventListener("visibilitychange", handleVisibility);
     handlers.onConnectedChange(false);
     clearInterval(heartbeat);
     reconnects.forEach(clearTimeout);

@@ -8,7 +8,10 @@ use crate::models::{
     ServerInput, ServerView, SettingsInput, ThemeInput, ThemeView,
 };
 
-pub(crate) const HISTORY_WRITE_INTERVAL_SECONDS: i64 = 120;
+/// 分钟粒度历史的落库间隔。`HistoryMetricAggregate::point` 按分钟取桶，取 60
+/// 让每一分钟都落到自己的桶里，1 小时图表（`history` 里 bucket=60）不再隔一个
+/// 桶空一个。代价是每台每天 1440 行而不是 720 行。
+pub(crate) const HISTORY_WRITE_INTERVAL_SECONDS: i64 = 60;
 pub(crate) const MAX_HISTORY_RETENTION_DAYS: i64 = 30;
 
 /// 分钟粒度历史按天轮换，`metric_history` 的上一代留在 `metric_history_old`。
@@ -1866,9 +1869,11 @@ mod tests {
     #[test]
     fn alert_coverage_tracks_report_interval_and_freshness() {
         let current = 10_000;
-        assert!(alert_window_covered(&row(3, current - 30, 60), 10, current));
+        // 落库间隔 60s 时分钟样本每分钟一行，10 分钟窗口期望 10 个样本，
+        // 覆盖线是 (10*3+4)/5 = 6 个；report_interval 300 高于下限，不受影响。
+        assert!(alert_window_covered(&row(6, current - 30, 60), 10, current));
         assert!(!alert_window_covered(
-            &row(2, current - 30, 60),
+            &row(5, current - 30, 60),
             10,
             current
         ));

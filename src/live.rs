@@ -24,6 +24,9 @@ const MAX_CACHED_LIVE_BYTES: usize = 12 * 1024;
 const MAX_CACHED_REPLAY_UPDATES: usize = 64;
 const MAX_CACHED_REPLAY_BYTES: usize = 256 * 1024;
 const CACHED_LIVE_TTL_SECONDS: i64 = 5 * 60;
+/// 一次唤醒后「相信首页有人在看」的基础时长。成功的转发会顺带续期，所以只要
+/// 上报还在继续，这个窗口就自己续下去；viewer 关掉后最多多发一次就会被判定收回。
+const DASHBOARD_PRESENCE_TTL_SECONDS: i64 = 5 * 60;
 const ALERT_WINDOW_SECONDS: i64 = 24 * 60 * 60;
 const MAX_ALERT_WINDOW_SAMPLES: usize = 24 * 60 + 1;
 const ALERT_STORAGE_PREFIX: &str = "resource-alert:";
@@ -33,7 +36,7 @@ const DASHBOARD_HUB_NAME: &str = "dashboard";
 ///
 /// 前端 `mergeServerLive` 是 `{ ...server, ...live.metrics }`，样本里缺的键会露出
 /// bootstrap 那份，而 `SERVER_SELECT` 从 `server_latest_state.latest_json` 里
-/// `json_extract` 出这七个字段，所以前端不需要任何改动。
+/// `json_extract` 出这七个字段；两处任一改动都要跟着这份契约对齐。
 ///
 /// 代价：agent 升级后这些值要等下一次 bootstrap 轮询才刷新。
 /// 只影响展示，不影响任何判定 —— 告警和持久化读的是 `AgentReport` 本身，
@@ -298,6 +301,10 @@ struct SocketAttachment {
     latest_received_at: i64,
     #[serde(rename = "mb")]
     message_budget: AgentMessageBudget,
+    /// 全局 dashboard 上「相信有人在看」的截止时间。为 0 或已过期就不再向
+    /// dashboard DO 转发，省掉那次按 1:1 全价计费的 DO 间 fetch。
+    #[serde(rename = "dp")]
+    dashboard_present_until: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -349,6 +356,39 @@ fn agent_wss_interval_ms(attachment: &SocketAttachment, realtime_active: bool) -
         return realtime;
     }
     report_interval * 1000
+}
+
+/// 至少覆盖两个上报周期，否则上报间隔比 TTL 还长时窗口会在两次上报之间过期，
+/// 导致明明有人在看却停止转发。`report_interval` 接受未 clamp 的原始值。
+fn dashboard_presence_ttl(report_interval: i64) -> i64 {
+    report_interval
+        .clamp(15, 3600)
+        .saturating_mul(2)
+        .max(DASHBOARD_PRESENCE_TTL_SECONDS)
+}
+
+/// 处理一条上报期间会 await（转发、写 D1），这中间可能插进来一次 `hint-agents`
+/// 把 presence 写新。落盘前用这个函数判一下：字段被别人动过就让对方赢，否则写
+/// 我们自己算出来的值。只取 max 不行——收回 presence 时要能写回更小的值。
+fn merge_dashboard_presence(current: i64, observed: i64, computed: i64) -> i64 {
+    if current != observed {
+        current
+    } else {
+        computed
+    }
+}
+
+fn agent_realtime_active(
+    hidden: bool,
+    dashboard_present_until: i64,
+    current_time: i64,
+    global_dashboard_active: bool,
+    local_dashboard_active: bool,
+) -> bool {
+    !hidden
+        && (global_dashboard_active
+            || current_time < dashboard_present_until
+            || local_dashboard_active)
 }
 
 fn next_d1_write_ms(attachment: &SocketAttachment, now: i64) -> i64 {
@@ -557,6 +597,11 @@ fn agent_attachment(
         latest_samples: Vec::new(),
         latest_received_at: 0,
         message_budget: AgentMessageBudget::default(),
+        // agent 可能连在 viewer 之后，此时没有 hint 会送过来。初始窗口同样按
+        // report_interval 覆盖两个上报周期，慢上报的 agent 才不会在首个上报
+        // 之前过期；没人在看的话首批转发会返回 false 并立即收回。
+        dashboard_present_until: crate::now()
+            .saturating_add(dashboard_presence_ttl(context.report_interval)),
     }
 }
 
@@ -601,6 +646,7 @@ fn dashboard_attachment() -> SocketAttachment {
         latest_samples: Vec::new(),
         latest_received_at: 0,
         message_budget: AgentMessageBudget::default(),
+        dashboard_present_until: 0,
     }
 }
 
@@ -635,29 +681,22 @@ impl Drop for ActiveD1FlushGuard<'_> {
 }
 
 impl LiveHub {
-    async fn broadcast_to_global_dashboard(&self, server_id: &str, payload: &str) -> bool {
-        let result = async {
-            let namespace = self.env.durable_object("LIVE_HUB")?;
-            let stub = namespace.id_from_name(DASHBOARD_HUB_NAME)?.get_stub()?;
-            let headers = Headers::new();
-            headers.set("X-Server-ID", server_id)?;
-            let mut init = RequestInit::new();
-            init.with_method(Method::Post)
-                .with_headers(headers)
-                .with_body(Some(worker::wasm_bindgen::JsValue::from_str(payload)));
-            let req = Request::new_with_init("https://live.internal/push", &init)?;
-            let mut response = stub.fetch_with_request(req).await?;
-            ensure_live_success(&response, "global-push")?;
-            response.json::<bool>().await
-        }
-        .await;
-        match result {
-            Ok(active) => active,
-            Err(error) => {
-                console_warn!("global live broadcast failed for {server_id}: {error:?}");
-                false
-            }
-        }
+    /// `Ok(false)` 是 dashboard 明确回答「没人在看」，会被用来收回 presence；
+    /// `Err` 只是这一次没送到，不能当成没人在看，否则一次瞬时故障就要等到下次
+    /// 唤醒才能恢复推送。
+    async fn broadcast_to_global_dashboard(&self, server_id: &str, payload: &str) -> Result<bool> {
+        let namespace = self.env.durable_object("LIVE_HUB")?;
+        let stub = namespace.id_from_name(DASHBOARD_HUB_NAME)?.get_stub()?;
+        let headers = Headers::new();
+        headers.set("X-Server-ID", server_id)?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(worker::wasm_bindgen::JsValue::from_str(payload)));
+        let req = Request::new_with_init("https://live.internal/push", &init)?;
+        let mut response = stub.fetch_with_request(req).await?;
+        ensure_live_success(&response, "global-push")?;
+        response.json::<bool>().await
     }
 
     async fn record_global_alert_point(&self, server_id: &str, point: &HistoryPoint) {
@@ -698,7 +737,8 @@ impl LiveHub {
         );
         let now = crate::now();
         for socket in sockets {
-            let Ok(Some(attachment)) = socket.deserialize_attachment::<SocketAttachment>() else {
+            let Ok(Some(mut attachment)) = socket.deserialize_attachment::<SocketAttachment>()
+            else {
                 continue;
             };
             let Some(agent_server_id) = attachment.server_id.as_deref() else {
@@ -706,6 +746,16 @@ impl LiveHub {
             };
             let realtime_active = !attachment.hidden
                 && (force_realtime || self.dashboard_active_for(agent_server_id));
+            // 只有 `/api/live/wake` 扇出来的唤醒才代表首页有 viewer；本地详情页
+            // viewer 走的是同一个 DO 内广播，不需要转发。
+            if force_realtime {
+                attachment.dashboard_present_until =
+                    now.saturating_add(dashboard_presence_ttl(attachment.report_interval));
+                if socket.serialize_attachment(&attachment).is_err() {
+                    let _ = socket.close(Some(1011), Some("attachment write failed"));
+                    continue;
+                }
+            }
             let Ok(payload) = live_ack_payload(
                 now,
                 false,
@@ -1094,7 +1144,10 @@ impl DurableObject for LiveHub {
             ws.serialize_attachment(&attachment)?;
         }
 
+        // 本地广播是同一个 DO 内的内存操作，不计费，无条件做。
         let mut global_dashboard_active = false;
+        let observed_presence = attachment.dashboard_present_until;
+        let mut computed_presence = observed_presence;
         if !fresh_reports.is_empty() && !attachment.hidden {
             let mut sockets = self.state.get_websockets_with_tag("all");
             sockets.extend(
@@ -1106,9 +1159,27 @@ impl DurableObject for LiveHub {
                     let _ = dashboard.close(Some(1011), Some("send failed"));
                 }
             }
-            global_dashboard_active = self
-                .broadcast_to_global_dashboard(&server_id, &payload)
-                .await;
+            // 转发是一次 DO 间 fetch，按 1:1 全价计一个 request，而上报本身只算
+            // 1/20。相信没人在看时就整个跳过。
+            if received_at < observed_presence {
+                match self
+                    .broadcast_to_global_dashboard(&server_id, &payload)
+                    .await
+                {
+                    Ok(active) => {
+                        global_dashboard_active = active;
+                        computed_presence = if active {
+                            received_at
+                                .saturating_add(dashboard_presence_ttl(attachment.report_interval))
+                        } else {
+                            0
+                        };
+                    }
+                    Err(error) => {
+                        console_warn!("global live broadcast failed for {server_id}: {error:?}");
+                    }
+                }
+            }
         }
 
         let mut persisted = false;
@@ -1157,6 +1228,11 @@ impl DurableObject for LiveHub {
                 received_at,
                 traffic_state.timestamp,
             );
+            current_attachment.dashboard_present_until = merge_dashboard_presence(
+                current_attachment.dashboard_present_until,
+                observed_presence,
+                computed_presence,
+            );
             if !trim_socket_attachment(&mut current_attachment) {
                 return ws.close(Some(1011), Some("live state exceeds attachment limit"));
             }
@@ -1179,8 +1255,31 @@ impl DurableObject for LiveHub {
                 }
             }
         }
-        let realtime_active = !attachment.hidden
-            && (global_dashboard_active || self.dashboard_active_for(&server_id));
+        if !attachment_serialized {
+            // 转发那一步 await 过，期间可能插进来一次 hint 改了 presence，所以
+            // 以 socket 上的当前值为准重新判一次。先合并再生成 ACK，避免刚收到的
+            // realtime hint 被这条上报的普通间隔覆盖。
+            let current_presence = ws
+                .deserialize_attachment::<SocketAttachment>()?
+                .map_or(observed_presence, |current| current.dashboard_present_until);
+            attachment.dashboard_present_until =
+                merge_dashboard_presence(current_presence, observed_presence, computed_presence);
+            if !trim_socket_attachment(&mut attachment) {
+                return ws.close(Some(1011), Some("live state exceeds attachment limit"));
+            }
+            ws.serialize_attachment(&attachment)?;
+        } else if let Some(current_attachment) = ws.deserialize_attachment::<SocketAttachment>()? {
+            // D1 写完之后还可能 await 告警处理；若此时收到 hint，以刚落到 socket
+            // 上的 attachment 为准，不能再用较旧的局部副本生成 ACK。
+            attachment = current_attachment;
+        }
+        let realtime_active = agent_realtime_active(
+            attachment.hidden,
+            attachment.dashboard_present_until,
+            received_at,
+            global_dashboard_active,
+            self.dashboard_active_for(&server_id),
+        );
         let next_wss_ms = agent_wss_interval_ms(&attachment, realtime_active);
         let next_d1_ms = if persisted {
             HISTORY_WRITE_INTERVAL_SECONDS * 1000
@@ -1196,12 +1295,6 @@ impl DurableObject for LiveHub {
             next_wss_ms,
             false,
         )?;
-        if !attachment_serialized {
-            if !trim_socket_attachment(&mut attachment) {
-                return ws.close(Some(1011), Some("live state exceeds attachment limit"));
-            }
-            ws.serialize_attachment(attachment)?;
-        }
         ws.send_with_str(&ack)?;
         Ok(())
     }
@@ -1461,12 +1554,13 @@ pub async fn upgrade_agent(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_wss_interval_ms, apply_live_traffic, batch_update_parts_at, begin_d1_flush,
-        cached_update_value, consume_agent_message_budget, finish_d1_flush, live_ack_payload,
-        next_d1_write_ms, outbound_close_code, trim_cached_live_samples, trim_socket_attachment,
-        update_alert_window, ActiveD1FlushGuard, AgentMessageBudget, AlertEvaluationServer,
-        AlertWindowSample, CachedLiveSample, SocketAttachment, TrafficAttachment,
-        ALERT_WINDOW_SECONDS, BROWSER_OMITTED_REPORT_FIELDS, CACHED_LIVE_TTL_SECONDS,
+        agent_realtime_active, agent_wss_interval_ms, apply_live_traffic, batch_update_parts_at,
+        begin_d1_flush, cached_update_value, consume_agent_message_budget, dashboard_presence_ttl,
+        finish_d1_flush, live_ack_payload, merge_dashboard_presence, next_d1_write_ms,
+        outbound_close_code, trim_cached_live_samples, trim_socket_attachment, update_alert_window,
+        ActiveD1FlushGuard, AgentMessageBudget, AlertEvaluationServer, AlertWindowSample,
+        CachedLiveSample, SocketAttachment, TrafficAttachment, ALERT_WINDOW_SECONDS,
+        BROWSER_OMITTED_REPORT_FIELDS, CACHED_LIVE_TTL_SECONDS, DASHBOARD_PRESENCE_TTL_SECONDS,
         MAX_AGENT_BYTES_PER_WINDOW, MAX_AGENT_MESSAGES_PER_WINDOW, MAX_AGENT_SAMPLES_PER_WINDOW,
         MAX_CACHED_LIVE_BYTES, MAX_CACHED_LIVE_SAMPLES, MAX_SERIALIZED_ATTACHMENT_BYTES,
     };
@@ -1490,8 +1584,6 @@ mod tests {
         }
     }
 
-    /// 流量累加以前在 db.rs 里有一份手抄的 `TrafficCounterState::apply` 供测试用，
-    /// 测的是副本、生产这份没人测。现在直接驱动 `apply_live_traffic`。
     /// correction 置 0，隔离出纯累加行为；correction 的效果由
     /// live_payload_contains_cycle_adjusted_traffic_and_latency 覆盖。
     #[test]
@@ -1560,6 +1652,34 @@ mod tests {
         assert_eq!(outbound_close_code(1006), None);
         assert_eq!(outbound_close_code(1015), None);
         assert_eq!(outbound_close_code(5000), None);
+    }
+
+    #[test]
+    fn dashboard_presence_ttl_covers_two_report_cycles() {
+        // 接受未 clamp 的原始间隔：过短取下限，过长按 3600 封顶，
+        // 默认间隔落在 5 分钟基础窗口内。
+        assert_eq!(dashboard_presence_ttl(1), DASHBOARD_PRESENCE_TTL_SECONDS);
+        assert_eq!(dashboard_presence_ttl(60), DASHBOARD_PRESENCE_TTL_SECONDS);
+        assert_eq!(dashboard_presence_ttl(300), 600);
+        assert_eq!(dashboard_presence_ttl(7200), 7200);
+    }
+
+    #[test]
+    fn merge_dashboard_presence_yields_to_concurrent_writes() {
+        // 字段没被并发改过：写自己的计算值，续期和收回都要生效。
+        assert_eq!(merge_dashboard_presence(500, 500, 700), 700);
+        assert_eq!(merge_dashboard_presence(500, 500, 0), 0);
+        // 处理期间被 hint 改写：让位，即使自己算出来要收回。
+        assert_eq!(merge_dashboard_presence(900, 500, 0), 900);
+    }
+
+    #[test]
+    fn valid_dashboard_presence_keeps_agent_realtime_after_transfer_failure() {
+        assert!(agent_realtime_active(false, 700, 500, false, false));
+        assert!(!agent_realtime_active(false, 500, 500, false, false));
+        assert!(agent_realtime_active(false, 0, 500, true, false));
+        assert!(agent_realtime_active(false, 0, 500, false, true));
+        assert!(!agent_realtime_active(true, 700, 500, true, true));
     }
 
     #[test]
@@ -1706,10 +1826,12 @@ mod tests {
             latest_samples: Vec::new(),
             latest_received_at: 0,
             message_budget: AgentMessageBudget::default(),
+            dashboard_present_until: 0,
         };
         assert_eq!(agent_wss_interval_ms(&attachment, true), 4_000);
         assert_eq!(agent_wss_interval_ms(&attachment, false), 60_000);
-        assert_eq!(next_d1_write_ms(&attachment, 1_235), 85_000);
+        // 1_200 + 60s 落库间隔 - now 1_235 = 25s。
+        assert_eq!(next_d1_write_ms(&attachment, 1_235), 25_000);
         let hint: serde_json::Value = serde_json::from_str(
             &live_ack_payload(1_235, false, false, 1_190, 25_000, 4_000, true).unwrap(),
         )
@@ -1761,6 +1883,7 @@ mod tests {
             latest_samples: samples,
             latest_received_at: 100,
             message_budget: AgentMessageBudget::default(),
+            dashboard_present_until: 0,
         };
         let update = cached_update_value(&attachment, 102, Some("node-a")).unwrap();
         assert_eq!(update["serverId"], "node-a");
@@ -1833,6 +1956,7 @@ mod tests {
             latest_samples: Vec::new(),
             latest_received_at: 0,
             message_budget: AgentMessageBudget::default(),
+            dashboard_present_until: 0,
         };
         attachment
             .history_aggregate

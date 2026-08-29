@@ -142,11 +142,10 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
           <Metric label={ui(locale, "流量", "Traffic")} value={server.traffic_limit > 0 ? `${traffic.toFixed(1)}%` : "∞"} used={traffic} sub={`${formatBytes(usedTraffic)} / ${server.traffic_limit > 0 ? formatBytes(server.traffic_limit) : "∞"}`} muted={!online} valueTone={server.traffic_limit <= 0 ? "" : traffic >= 95 ? "danger-text" : traffic >= 60 ? "warning-text" : "success-text"} />
         </div>
 
-        {/* 这三个面板原来各挂一个 aria-label（实时速率 / 累计流量 / 剩余周期），全都没生效：
-            无 role 的 div 是 generic，规范禁止命名；就算补上 role="group"，整张卡片是 <button>，
-            role=button 的子树在无障碍树里会被整体裁掉，里面加什么都读不到。所以移除而不是修补。
-            读屏用户拿不到这些数值，真正的出路是把卡片从 <button> 改成内容 + 覆盖层按钮，
-            那是一次会动 CSS 和焦点行为的改造，没在这次一并做。 */}
+        {/* 这三个面板不挂 aria-label：无 role 的 div 是 generic，规范禁止命名；就算补上
+            role="group"，整张卡片是 <button>，role=button 的子树在无障碍树里会被整体裁掉，
+            里面加什么都读不到，所以移除而不是修补。读屏用户拿不到这些数值，真正的出路是
+            把卡片从 <button> 改成内容 + 覆盖层按钮，会动 CSS 和焦点行为，暂未做。 */}
         <div className={`data-grid ${showExpiryPanel ? "" : "two-columns"}`}>
           <div className="data-panel">
             <CompactLine icon={<ChevronUp size={11} />} tone="success-text">{formatSpeed(server.net_out)}</CompactLine>
