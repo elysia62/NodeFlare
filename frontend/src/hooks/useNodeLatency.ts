@@ -152,8 +152,9 @@ export function useNodeLatency(
     }
 
     return {
-      latencyDisplay: averageLatency === null ? placeholder : `${Math.round(averageLatency)} ms`,
-      lossDisplay: averageLoss === null ? placeholder : `${averageLoss.toFixed(1)}%`,
+      // 与 Komari 原版一致：无数据时汇总显示 "-"，「无采样数据」只出现在空柱的 tooltip 里。
+      latencyDisplay: averageLatency === null ? (loading ? placeholder : "-") : `${Math.round(averageLatency)} ms`,
+      lossDisplay: averageLoss === null ? (loading ? placeholder : "-") : `${averageLoss.toFixed(1)}%`,
       latencyBars: buckets.length ? latencyBars(buckets, "all", locale) : emptyBars(placeholder),
       lossBars: buckets.length ? lossBars(buckets, "all", locale) : emptyBars(placeholder),
       carriers,

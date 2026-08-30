@@ -30,9 +30,9 @@ import {
   Check,
   ExternalLink,
 } from "lucide-react";
-import { DragEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError, getToken, setToken } from "../api";
-import { isOnline } from "../format";
+import { formatByteSize, isOnline, parseByteSize } from "../format";
 import { derivePassword } from "../password";
 import { ASSET_CURRENCIES, type AdminServer, type CloudflareUsage, type Config, type DatabaseStats, type ExchangeRates, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue } from "../types";
 import { Checkbox } from "./Checkbox";
@@ -119,6 +119,46 @@ function toInput(server: AdminServer): ServerInput {
   };
 }
 
+// 计费周期下拉预设；存量节点里的自定义天数会以「N 天」选项追加在后面。
+const BILLING_CYCLES: Array<{ days: number; label: string }> = [
+  { days: 30, label: "月" },
+  { days: 90, label: "季" },
+  { days: 180, label: "半年" },
+  { days: 365, label: "年" },
+  { days: 0, label: "一次性" },
+];
+
+// 流量限额输入："-1" 表示不限，其余按字节单位解析。
+function parseTrafficLimit(raw: string): number | null {
+  return raw.trim() === "-1" ? -1 : parseByteSize(raw);
+}
+
+// last_ip 来自 CF-Connecting-IP，是裸 IP；v6 带冒号，v4 是四段数字。
+function ipFamily(ip: string): "v4" | "v6" | null {
+  const value = ip.trim();
+  if (!value) return null;
+  if (value.includes(":")) return "v6";
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) ? "v4" : null;
+}
+
+function ServerIpMeta({ ip, agentVersion, onCopy }: { ip: string; agentVersion: string | null; onCopy: (ip: string) => void }) {
+  const family = ipFamily(ip);
+  return (
+    <div className="server-name-meta">
+      {family ? (
+        <>
+          <span className={`ip-badge ${family}`}>{family === "v6" ? "IPv6" : "IPv4"}</span>
+          <button type="button" className="ip-value" title={`点击复制：${ip}`} onClick={() => onCopy(ip)}>{ip}</button>
+        </>
+      ) : (
+        <span className="meta-item">{ip || "尚未上报 IP"}</span>
+      )}
+      <span className="meta-dot">·</span>
+      <span className="meta-item">{agentVersion ? `Agent v${agentVersion}` : "Agent 未上报版本"}</span>
+    </div>
+  );
+}
+
 function formatDate(value: number | null) {
   return value ? new Date(value * 1000).toISOString().slice(0, 10) : "";
 }
@@ -172,8 +212,12 @@ export function AdminPanel({
   const [editing, setEditing] = useState<AdminServer | "new" | null>(null);
   const [form, setForm] = useState<ServerInput>(emptyServer);
   const [install, setInstall] = useState<AgentInstallInfo | null>(null);
-  const [rxCurrentGb, setRxCurrentGb] = useState("0");
-  const [txCurrentGb, setTxCurrentGb] = useState("0");
+  const [priceText, setPriceText] = useState("0");
+  const [trafficLimitText, setTrafficLimitText] = useState("0");
+  const [rxCurrentText, setRxCurrentText] = useState("0");
+  const [txCurrentText, setTxCurrentText] = useState("0");
+  const [rxCurrentBytes, setRxCurrentBytes] = useState(0);
+  const [txCurrentBytes, setTxCurrentBytes] = useState(0);
   const [rxBaseBytes, setRxBaseBytes] = useState(0);
   const [txBaseBytes, setTxBaseBytes] = useState(0);
   const [installPlatform, setInstallPlatform] = useState<AgentPlatform>("linux");
@@ -247,14 +291,41 @@ export function AdminPanel({
   function openEditor(server?: AdminServer) {
     setEditing(server ?? "new");
     setForm(server ? toInput(server) : { ...emptyServer });
+    setPriceText(server ? String(server.price) : "0");
+    setTrafficLimitText(formatByteSize(server?.traffic_limit ?? 0));
     // 修正值输入展示“当前累计用量”（已上报 + 已修正），保存时换算回差值。
-    const rxBase = server ? (server.net_rx_total ?? 0) - server.rx_correction : 0;
-    const txBase = server ? (server.net_tx_total ?? 0) - server.tx_correction : 0;
-    setRxCurrentGb(((server ? (server.net_rx_total ?? 0) : 0) / 1024 ** 3).toFixed(2));
-    setTxCurrentGb(((server ? (server.net_tx_total ?? 0) : 0) / 1024 ** 3).toFixed(2));
-    setRxBaseBytes(rxBase);
-    setTxBaseBytes(txBase);
+    const rxCurrent = server?.net_rx_total ?? 0;
+    const txCurrent = server?.net_tx_total ?? 0;
+    setRxCurrentText(formatByteSize(rxCurrent));
+    setTxCurrentText(formatByteSize(txCurrent));
+    setRxCurrentBytes(rxCurrent);
+    setTxCurrentBytes(txCurrent);
+    setRxBaseBytes(rxCurrent - (server?.rx_correction ?? 0));
+    setTxBaseBytes(txCurrent - (server?.tx_correction ?? 0));
     setError("");
+  }
+
+  // 价格框放行 "-"、"1." 这类数字骨架中间态，能解析出数字才提交到表单。
+  function updatePriceText(raw: string) {
+    if (!/^-?\d*\.?\d*$/.test(raw)) return;
+    setPriceText(raw);
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) updateForm("price", parsed);
+  }
+
+  // 带单位输入（如 100 G / 0.5 T）：解析不了的中间态留在框里，失焦回显最后一次有效值。
+  function sizeInputProps(text: string, setText: (value: string) => void, commit: (bytes: number) => void, current: number, parse: (raw: string) => number | null = parseByteSize) {
+    return {
+      value: text,
+      inputMode: "decimal" as const,
+      onChange: (event: ChangeEvent<HTMLInputElement>) => {
+        const raw = event.target.value;
+        setText(raw);
+        const parsed = parse(raw);
+        if (parsed !== null) commit(parsed);
+      },
+      onBlur: () => setText(formatByteSize(current)),
+    };
   }
 
   async function saveServer(event: FormEvent) {
@@ -263,8 +334,8 @@ export function AdminPanel({
     setError("");
     const payload: ServerInput = {
       ...form,
-      rx_correction: Math.round(((Number(rxCurrentGb) || 0) * 1024 ** 3) - rxBaseBytes),
-      tx_correction: Math.round(((Number(txCurrentGb) || 0) * 1024 ** 3) - txBaseBytes),
+      rx_correction: Math.round(rxCurrentBytes - rxBaseBytes),
+      tx_correction: Math.round(txCurrentBytes - txBaseBytes),
     };
     try {
       if (editing === "new") {
@@ -317,6 +388,15 @@ export function AdminPanel({
       if (installCommand) await navigator.clipboard.writeText(installCommand);
     } catch {
       setError("复制失败，请手动选择命令复制");
+    }
+  }
+
+  async function copyServerIp(ip: string) {
+    try {
+      await navigator.clipboard.writeText(ip);
+      setNotice("IP 已复制");
+    } catch {
+      setError("复制失败，请手动选择复制");
     }
   }
 
@@ -578,7 +658,7 @@ export function AdminPanel({
                         <button type="button" className="drag-handle" draggable onDragStart={(event) => startDrag(event, server.id)} onDragEnd={() => setDraggingId("")} title={`拖动排序：${server.name}`}><GripVertical size={15} /></button>
                         <Checkbox checked={selectedIds.includes(server.id)} onChange={() => toggleSelected(server.id)} ariaLabel={`选择 ${server.name}`} />
                         <span className={`status-dot ${settings && isOnline(server, settings.offline_threshold_seconds) ? "online" : ""}`} />
-                        <div className="server-name"><div className="server-name-main"><Flag region={server.region} size={17} /><strong>{server.name}</strong><small>{server.last_ip || "尚未上报 IP"} · {server.agent_version ? `Agent v${server.agent_version}` : "Agent 未上报版本"}</small></div></div>
+                        <div className="server-name"><div className="server-name-main"><Flag region={server.region} size={17} /><strong>{server.name}</strong></div><ServerIpMeta ip={server.last_ip} agentVersion={server.agent_version} onCopy={(value) => void copyServerIp(value)} /></div>
                         <div className="row-actions"><button className="icon-btn" disabled={index === 0} onClick={() => void move(index, -1)} title="上移"><ChevronUp size={15} /></button><button className="icon-btn" disabled={index === servers.length - 1} onClick={() => void move(index, 1)} title="下移"><ChevronDown size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => void showInstallCommand(server)} title="显示安装命令"><Download size={15} /></button><button className="icon-btn" onClick={() => openEditor(server)} title="编辑节点"><Pencil size={15} /></button><button className="icon-btn danger" onClick={() => void remove(server)} title="删除节点"><Trash2 size={15} /></button></div>
                       </div>
                     ))}
@@ -655,7 +735,7 @@ export function AdminPanel({
                     <div className="data-stat-grid">{database ? <><DataStat label="节点" value={database.server_count} /><DataStat label="在线" value={database.online_count} /><DataStat label="历史行数" value={database.history_rows.toLocaleString()} /></> : <p className="settings-hint">正在读取数据库统计...</p>}</div>
                     <div className="usage-section">
                       <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取 D1 汇率快照"}</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={15} />立即更新</button></div>
-                      {exchangeRates ? <div className="usage-table-wrap"><table className="usage-table"><thead><tr><th>币种</th><th>1 CNY 可兑换</th></tr></thead><tbody>{ASSET_CURRENCIES.map((currency) => <tr key={currency}><th scope="row">{currency}</th><td>{exchangeRates.rates[currency]?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "--"}</td></tr>)}</tbody></table></div> : <div className="usage-empty">尚未读取</div>}
+                      {exchangeRates ? <div className="usage-table-wrap"><table className="usage-table"><thead><tr><th>币种</th><th>1 CNY 可兑换</th></tr></thead><tbody>{ASSET_CURRENCIES.filter((currency) => currency !== "CNY").map((currency) => <tr key={currency}><th scope="row">{currency}</th><td>{exchangeRates.rates[currency]?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "--"}</td></tr>)}</tbody></table></div> : <div className="usage-empty">尚未读取</div>}
                     </div>
                     <div className="usage-section">
                       <div className="usage-head"><div><div className="section-title"><Cloud size={15} />Cloudflare 用量</div><p className="settings-hint">统计周期使用 UTC</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void loadCloudflareUsage()}><RotateCw size={15} />{cloudflareUsage ? "刷新用量" : "查询用量"}</button></div>
@@ -686,10 +766,10 @@ export function AdminPanel({
       {editing ? <div className="submodal-backdrop" role="presentation" onMouseDown={serverDialog.onBackdropMouseDown}><form ref={serverDialog.dialogRef} className="editor-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="server-editor-title" tabIndex={-1} onSubmit={saveServer}>
         <header><div><span className="eyebrow">节点配置</span><h3 id="server-editor-title">{editing === "new" ? "添加节点" : `编辑 · ${editing.name}`}</h3></div></header>
         <div className="form-grid"><label><span>名称</span><input autoFocus required value={form.name} onChange={(event) => updateForm("name", event.target.value)} /></label><label><span>地区代码</span><input maxLength={16} placeholder="CN / JP / DE" value={form.region} onChange={(event) => updateForm("region", event.target.value.toUpperCase())} /></label><label><span>分组</span><input value={form.group_name} onChange={(event) => updateForm("group_name", event.target.value)} /></label><label><span>标签</span><input placeholder="主力, 线路:BGP" value={form.tags} onChange={(event) => updateForm("tags", event.target.value)} /></label></div>
-        <div className="form-grid three"><label><span>流量限额（GB）</span><input min="0" type="number" value={Math.round(form.traffic_limit / 1024 ** 3)} onChange={(event) => updateForm("traffic_limit", Number(event.target.value) * 1024 ** 3)} /></label><label><span>流量口径</span><select value={form.traffic_limit_type} onChange={(event) => updateForm("traffic_limit_type", event.target.value as ServerInput["traffic_limit_type"])}><option value="sum">上下行合计</option><option value="max">取较大值</option><option value="min">取较小值</option><option value="up">仅上行</option><option value="down">仅下行</option></select></label><label><span>流量重置日</span><input min="1" max="31" type="number" value={form.reset_day} onChange={(event) => updateForm("reset_day", Number(event.target.value))} /></label></div>
-        <div className="form-grid three"><label><span>价格（0 隐藏，-1 免费）</span><input min="-1" step="0.01" type="number" value={form.price} onChange={(event) => updateForm("price", Number(event.target.value))} /></label><label><span>币种</span><select value={form.currency} onChange={(event) => updateForm("currency", event.target.value)}>{ASSET_CURRENCIES.map((code) => <option key={code}>{code}</option>)}</select></label><label><span>计费周期（天）</span><input min="1" max="3650" type="number" value={form.billing_cycle} onChange={(event) => updateForm("billing_cycle", Number(event.target.value))} /></label></div>
+        <div className="form-grid three"><label><span>流量限额（-1 不限）</span><input placeholder="如 100 G，不带单位按 GB" {...sizeInputProps(trafficLimitText, setTrafficLimitText, (bytes) => updateForm("traffic_limit", bytes), form.traffic_limit, parseTrafficLimit)} /></label><label><span>流量口径</span><select value={form.traffic_limit_type} onChange={(event) => updateForm("traffic_limit_type", event.target.value as ServerInput["traffic_limit_type"])}><option value="sum">上下行合计</option><option value="max">取较大值</option><option value="min">取较小值</option><option value="up">仅上行</option><option value="down">仅下行</option></select></label><label><span>流量重置日</span><input min="1" max="31" type="number" value={form.reset_day} onChange={(event) => updateForm("reset_day", Number(event.target.value))} /></label></div>
+        <div className="form-grid three"><label><span>价格（0 隐藏，-1 免费）</span><input inputMode="decimal" value={priceText} onChange={(event) => updatePriceText(event.target.value)} onBlur={() => setPriceText(String(form.price))} /></label><label><span>币种</span><select value={form.currency} onChange={(event) => updateForm("currency", event.target.value)}>{ASSET_CURRENCIES.map((code) => <option key={code}>{code}</option>)}</select></label><label><span>计费周期</span><select value={String(form.billing_cycle)} onChange={(event) => updateForm("billing_cycle", Number(event.target.value))}>{BILLING_CYCLES.map((cycle) => <option key={cycle.days} value={cycle.days}>{cycle.label}</option>)}{BILLING_CYCLES.every((cycle) => cycle.days !== form.billing_cycle) ? <option value={form.billing_cycle}>{form.billing_cycle} 天</option> : null}</select></label></div>
         <div className="form-grid three"><label><span>到期日期</span><input type="date" value={formatDate(form.expires_at)} onChange={(event) => updateForm("expires_at", event.target.value ? Math.floor(new Date(`${event.target.value}T00:00:00Z`).getTime() / 1000) : null)} /></label><label><span>Agent 上报间隔（秒）</span><input min="15" max="3600" type="number" value={form.report_interval} onChange={(event) => updateForm("report_interval", Number(event.target.value))} /></label><label><span>指标采样间隔（秒）</span><input min="1" max="60" type="number" value={form.collect_interval} onChange={(event) => updateForm("collect_interval", Number(event.target.value))} /></label></div>
-        <div className="form-grid"><label><span>统计网卡（逗号分隔，留空自动）</span><input value={form.network_interface} onChange={(event) => updateForm("network_interface", event.target.value)} placeholder="eth0,ens3" /></label><label><span>下行流量当前值（GB）</span><input min="0" step="0.1" type="number" value={rxCurrentGb} onChange={(event) => setRxCurrentGb(event.target.value)} /></label><label><span>上行流量当前值（GB）</span><input min="0" step="0.1" type="number" value={txCurrentGb} onChange={(event) => setTxCurrentGb(event.target.value)} /></label><label><span>Agent 下载加速（可选）</span><input value={form.agent_mirror} onChange={(event) => updateForm("agent_mirror", event.target.value.trim())} placeholder="https://ghproxy.net" /></label></div>
+        <div className="form-grid"><label><span>统计网卡（逗号分隔，留空自动）</span><input value={form.network_interface} onChange={(event) => updateForm("network_interface", event.target.value)} placeholder="eth0,ens3" /></label><label><span>下行流量当前值</span><input placeholder="如 500 G" {...sizeInputProps(rxCurrentText, setRxCurrentText, setRxCurrentBytes, rxCurrentBytes)} /></label><label><span>上行流量当前值</span><input placeholder="如 500 G" {...sizeInputProps(txCurrentText, setTxCurrentText, setTxCurrentBytes, txCurrentBytes)} /></label><label><span>Agent 下载加速（可选）</span><input value={form.agent_mirror} onChange={(event) => updateForm("agent_mirror", event.target.value.trim())} placeholder="https://ghproxy.net" /></label></div>
         <div className="settings-toggles editor-toggles"><Toggle label="自动续费" checked={form.auto_renewal} onChange={(value) => updateForm("auto_renewal", value)} /><Toggle label="Agent 自动更新" checked={form.auto_update} onChange={(value) => updateForm("auto_update", value)} /><Toggle label="隐藏节点" checked={form.hidden} onChange={(value) => updateForm("hidden", value)} /><Toggle label="关闭离线告警" checked={form.offline_notify_disabled} onChange={(value) => updateForm("offline_notify_disabled", value)} /></div>
         <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={15} />保存节点</button></div>
       </form></div> : null}

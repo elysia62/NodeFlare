@@ -676,8 +676,8 @@ pub(crate) fn validate_server(input: &ServerInput) -> Option<&'static str> {
     if input.tags.chars().count() > 240 {
         return Some("标签字段过长");
     }
-    if input.traffic_limit < 0 {
-        return Some("流量限额不能为负数");
+    if input.traffic_limit < -1 {
+        return Some("流量限额不能小于 -1（-1 表示不限）");
     }
     if !matches!(
         input.traffic_limit_type.as_str(),
@@ -688,8 +688,8 @@ pub(crate) fn validate_server(input: &ServerInput) -> Option<&'static str> {
     if !valid_server_price(input.price) {
         return Some("价格无效");
     }
-    if !(1..=3650).contains(&input.billing_cycle) {
-        return Some("计费周期应为 1 至 3650 天");
+    if !(0..=3650).contains(&input.billing_cycle) {
+        return Some("计费周期应为 0（一次性）或 1 至 3650 天");
     }
     if input.currency.len() != 3
         || !input

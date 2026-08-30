@@ -16,7 +16,6 @@ import {
   isOnline,
   number,
   percent,
-  timeAgo,
   trafficUsed,
 } from "../format";
 import type { Config, Server } from "../types";
@@ -114,6 +113,7 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
   const carrierEmpty = quality.loading
     ? ui(locale, "加载中", "Loading")
     : ui(locale, "未匹配到线路", "No lines matched");
+  const lastUpdated = new Date(number(server.timestamp) * 1000).toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
   // 名字后面带上在线状态：卡片是 <button>，子树被裁掉，这个 aria-label 是读屏唯一能拿到的字符串。
   // 状态在视觉上只由 status-dot 的颜色表达（WCAG 1.4.1 靠颜色传达信息），这里补成文字。
@@ -129,9 +129,7 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
 
       <div className="node-body">
         <div className="node-chips">
-          {config.show_uptime ? <span>{online
-            ? ui(locale, `在线 ${Math.floor(number(server.uptime) / 86400)} 天`, `Online ${Math.floor(number(server.uptime) / 86400)} days`)
-            : ui(locale, `离线 · ${timeAgo(server.timestamp, locale)}`, `Offline · ${timeAgo(server.timestamp, locale)}`)}</span> : null}
+          {config.show_uptime ? <span>{ui(locale, `在线 ${Math.floor(number(server.uptime) / 86400)} 天`, `Online ${Math.floor(number(server.uptime) / 86400)} days`)}</span> : null}
           {config.show_price && price ? <span title={price}>{price}</span> : null}
         </div>
 
@@ -147,15 +145,15 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
             里面加什么都读不到，所以移除而不是修补。读屏用户拿不到这些数值，真正的出路是
             把卡片从 <button> 改成内容 + 覆盖层按钮，会动 CSS 和焦点行为，暂未做。 */}
         <div className={`data-grid ${showExpiryPanel ? "" : "two-columns"}`}>
-          <div className="data-panel">
+          <div className="data-panel" title={ui(locale, "实时速率", "Live speed")}>
             <CompactLine icon={<ChevronUp size={11} />} tone="success-text">{formatSpeed(server.net_out)}</CompactLine>
             <CompactLine icon={<ChevronDown size={11} />} tone="info-text">{formatSpeed(server.net_in)}</CompactLine>
           </div>
-          <div className="data-panel">
+          <div className="data-panel" title={ui(locale, "累计流量", "Total traffic")}>
             <CompactLine icon={<Upload size={11} />}>{formatBytes(server.net_tx_total)}</CompactLine>
             <CompactLine icon={<Download size={11} />}>{formatBytes(server.net_rx_total)}</CompactLine>
           </div>
-          {showExpiryPanel ? <div className="data-panel">
+          {showExpiryPanel ? <div className="data-panel" title={ui(locale, "剩余周期", "Billing cycle")}>
             {config.show_expiry ? <CompactLine icon={<CalendarDays size={11} />}>{formatExpire(server, locale)}</CompactLine> : null}
             {config.show_price ? <CompactLine icon={<Coins size={11} />}>{server.price === -1
               ? ui(locale, "免费", "Free")
@@ -171,6 +169,13 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
             <QualityPanel label={ui(locale, "延迟", "Latency")} value={quality.latencyDisplay} bars={quality.latencyBars} />
             <QualityPanel label={ui(locale, "丢包", "Packet loss")} value={quality.lossDisplay} bars={quality.lossBars} />
           </>}
+        </div> : null}
+
+        {!online ? <div className="node-offline-overlay" aria-hidden="true">
+          <span>{ui(locale, "离线", "Offline")}</span>
+          <small>{server.timestamp
+            ? ui(locale, `最后更新 ${lastUpdated}`, `Last update ${lastUpdated}`)
+            : ui(locale, "暂无更新时间", "No update yet")}</small>
         </div> : null}
       </div>
     </button>

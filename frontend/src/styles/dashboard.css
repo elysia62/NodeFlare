@@ -43,9 +43,9 @@
 .group-tabs button.active { color: var(--foreground); background: var(--card-solid); box-shadow: 0 1px 4px rgb(20 35 42 / .08); }
 .result-count { margin-left: auto; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
 
-.node-grid, .loading-grid { display: grid; align-items: start; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.node-grid { display: grid; align-items: start; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
 .node-card { position: relative; display: flex; width: 100%; min-width: 0; min-height: var(--node-card-min-height); align-self: start; flex-direction: column; overflow: hidden; border-radius: 12px; padding: 0; text-align: left; box-shadow: var(--node-card-shadow); transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease; }
-.node-grid.carrier-latency .node-card, .loading-grid.carrier-latency span { min-height: var(--node-card-carrier-min-height); }
+.node-grid.carrier-latency .node-card { min-height: var(--node-card-carrier-min-height); }
 .node-card:hover { z-index: 2; border-color: color-mix(in srgb, var(--foreground) 24%, var(--node-card-border)); background: var(--node-card-hover); box-shadow: 0 12px 38px rgb(15 23 42 / .2); }
 .dark .node-card:hover { box-shadow: 0 12px 38px rgb(0 0 0 / .54); }
 .node-card.offline { box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger-bar) 30%, transparent), var(--node-card-shadow); }
@@ -95,9 +95,9 @@
 .carrier-row .quality-bars { min-height: 8px; }
 .empty-inline { display: grid; min-height: 0; flex: 1; place-items: center; color: var(--muted-foreground); font-size: 11px; }
 .quality-panel b { color: var(--foreground); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
-.quality-bars { display: grid; min-height: 0; flex: 1; align-items: end; gap: 1px; opacity: .85; }
+.quality-bars { display: grid; min-height: 0; flex: 1; align-items: end; gap: 1px; opacity: .85; transition: opacity 150ms ease; }
 .quality-bars > span { position: relative; display: flex; height: 100%; min-width: 0; align-items: end; overflow: visible; border-radius: 1px; background: color-mix(in srgb, var(--foreground) 6%, transparent); }
-.quality-bars i { display: block; width: 100%; height: 100%; min-height: 3px; border-radius: 1px; }
+.quality-bars i { display: block; width: 100%; height: 100%; min-height: 3px; border-radius: 1px; transform-origin: bottom; transition: transform 150ms ease, opacity 150ms ease; }
 .quality-bars i.good { background: var(--success-bar); }
 .quality-bars i.fair { background: #a3e635; }
 .quality-bars i.warning { background: #eab308; }
@@ -118,6 +118,19 @@
 .node-card:focus-visible .quality-bar:first-child .quality-tooltip.center,
 .node-card:focus-visible .quality-bar:last-child .quality-tooltip.center { transform: translate(-50%, 0); }
 
+/* 悬停面板时压暗其余柱、放大悬停柱，与 Komari 原版一致。 */
+.quality-panel:hover .quality-bars { opacity: 1; }
+.quality-panel:hover .quality-bars i { opacity: .6; }
+.quality-panel:hover .quality-bar:hover i { opacity: 1; transform: scaleY(1.6); }
+
+.node-offline-overlay { position: absolute; z-index: 20; display: flex; inset: 0; flex-direction: column; align-items: center; justify-content: center; background: rgb(255 255 255 / .2); }
+.dark .node-offline-overlay { background: rgb(0 0 0 / .2); }
+html[data-blur="on"] .node-offline-overlay { backdrop-filter: blur(2px); }
+.node-offline-overlay span { color: var(--danger); font-size: 14px; font-weight: 600; }
+.node-offline-overlay small { margin-top: 4px; color: var(--muted-foreground); font-size: 11px; }
+/* 离线卡的柱状面板再压一层，避免细小的色柱在遮罩下仍显得“活着”。 */
+.node-card.offline .quality-panel { opacity: .5; filter: blur(1px); }
+
 .error-band { display: flex; align-items: center; justify-content: space-between; border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border)); border-radius: 7px; padding: 12px 14px; color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, transparent); font-size: 12px; }
 .error-band button { font-weight: 700; }
 .empty-state, .chart-loading { display: flex; min-height: 340px; align-items: center; justify-content: center; flex-direction: column; gap: 16px; color: var(--muted-foreground); font-size: 13px; }
@@ -136,8 +149,10 @@
 .dashboard-login-turnstile .turnstile-widget { width: 100%; }
 .dashboard-login-submit { width: 100%; min-height: 42px; }
 .verification-status { color: var(--primary); font-size: 11px; }
-.loading-grid span { height: var(--node-card-min-height); border: 1px solid var(--border); border-radius: 12px; background: var(--card); animation: loading-pulse 1.3s ease-in-out infinite alternate; }
-@keyframes loading-pulse { to { opacity: .46; } }
+/* 首屏加载：居中旋转环 + 提示文案，与 Komari 原版的 Loading 一致。 */
+.dashboard-loading { display: flex; min-height: 40vh; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted-foreground); font-size: 13px; }
+.loading-ring { width: 36px; height: 36px; flex: 0 0 auto; border: 2px solid color-mix(in srgb, var(--primary) 20%, transparent); border-top-color: var(--primary); border-radius: 50%; animation: loading-spin 1s linear infinite; }
+@keyframes loading-spin { to { transform: rotate(360deg); } }
 
 .detail-page { display: flex; flex-direction: column; gap: 14px; }
 .detail-hero { display: flex; min-width: 0; align-items: center; gap: 12px; border-radius: 8px; padding: 14px 20px; }
@@ -217,7 +232,7 @@
   .toolbar { flex-wrap: wrap; gap: 8px; }
   .search-box { width: 100%; }
   .group-tabs { max-width: calc(100% - 58px); }
-  .node-grid, .loading-grid { grid-template-columns: 1fr; }
+  .node-grid { grid-template-columns: 1fr; }
   .detail-hero { padding: 14px 16px; }
   .detail-hero > .icon-btn { margin-left: -4px; }
   .detail-flag { font-size: 19px; }

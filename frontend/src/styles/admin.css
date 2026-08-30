@@ -116,9 +116,8 @@
 .server-row.dragging { opacity: .45; background: color-mix(in srgb, var(--primary) 8%, transparent); }
 .drag-handle { display: inline-flex; width: 18px; height: 32px; align-items: center; justify-content: center; padding: 0; color: var(--admin-muted); cursor: grab; touch-action: none; }
 .drag-handle:active { cursor: grabbing; }
-.server-name { display: flex; min-width: 0; flex-direction: column; }
+.server-name { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .server-row strong { overflow: hidden; color: var(--admin-text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.server-row small { color: var(--admin-muted); font-size: 12px; }
 .server-row .row-actions { margin-left: 3px; }
 .server-row .icon-btn { width: 32px; height: 32px; }
 .list-empty { padding: 72px 0; color: var(--admin-muted); font-size: 13px; text-align: center; }
@@ -311,7 +310,13 @@
 .server-name-main { display: flex; min-width: 0; align-items: center; gap: 7px; }
 .server-name-main .region-flag { flex: 0 0 auto; font-size: 16px; line-height: 1; }
 .server-name-main strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.server-name-main small { overflow: hidden; color: var(--admin-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.server-name-meta { display: flex; min-width: 0; align-items: center; gap: 7px; color: var(--admin-muted); font-size: 12px; }
+.ip-badge { flex: 0 0 auto; padding: 0 6px; border: 1px solid var(--admin-border); border-radius: 999px; font-size: 10px; font-weight: 600; line-height: 1.5; letter-spacing: .03em; }
+.ip-badge.v6 { color: var(--admin-accent); border-color: color-mix(in srgb, var(--admin-accent) 40%, transparent); }
+.ip-value { overflow: hidden; min-width: 0; max-width: 30ch; padding: 0; border: 0; background: none; color: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: copy; }
+.ip-value:hover { color: var(--admin-text); text-decoration: underline; text-underline-offset: 3px; }
+.meta-dot { flex: 0 0 auto; opacity: .55; }
+.meta-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .about-page { display: flex; flex-direction: column; gap: 20px; }
 .about-brand { display: flex; align-items: center; gap: 14px; }
 .about-brand img { flex: 0 0 auto; }

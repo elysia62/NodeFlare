@@ -22,6 +22,35 @@ export function formatSpeed(value: number | null | undefined) {
   return `${formatBytes(value)}/s`;
 }
 
+// 节点编辑框的手动单位输入："100 G"、"0.5 T"；不带单位按 GB。
+const BYTE_UNIT_FACTORS: Record<string, number> = {
+  "": 1024 ** 3,
+  b: 1,
+  k: 1024, kb: 1024, kib: 1024,
+  m: 1024 ** 2, mb: 1024 ** 2, mib: 1024 ** 2,
+  g: 1024 ** 3, gb: 1024 ** 3, gib: 1024 ** 3,
+  t: 1024 ** 4, tb: 1024 ** 4, tib: 1024 ** 4,
+};
+
+/** 解析 "100 G" 风格的流量输入为字节数，非法输入返回 null。 */
+export function parseByteSize(text: string): number | null {
+  const match = /^(\d+(?:\.\d+)?)\s*([a-zA-Z]*)$/.exec(text.trim());
+  if (!match) return null;
+  const factor = BYTE_UNIT_FACTORS[match[2].toLowerCase()];
+  return factor === undefined ? null : Math.round(Number(match[1]) * factor);
+}
+
+/** 字节数 → "100 G" 风格短文本，编辑框失焦时回显；-1 是「不限」哨兵，原样回显。 */
+export function formatByteSize(bytes: number): string {
+  if (bytes < 0) return "-1";
+  const size = Math.max(0, Math.round(number(bytes)));
+  if (size === 0) return "0";
+  for (const [suffix, factor] of [["T", 1024 ** 4], ["G", 1024 ** 3], ["M", 1024 ** 2], ["K", 1024]] as const) {
+    if (size >= factor) return `${Math.round((size / factor) * 100) / 100} ${suffix}`;
+  }
+  return `${size} B`;
+}
+
 export function formatCpuName(model: string | null | undefined, cores: number | null | undefined) {
   const name = (model ?? "").replace(/\s+/g, " ").trim() || "--";
   const count = Math.max(0, Math.trunc(number(cores)));
@@ -81,15 +110,6 @@ export function isOnline(server: Pick<Server, "timestamp">, threshold: number, a
   return !!server.timestamp && at - server.timestamp <= threshold;
 }
 
-export function timeAgo(timestamp: number | null, locale: UiLocale = "zh-CN") {
-  if (!timestamp) return ui(locale, "尚未上报", "never reported");
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - timestamp));
-  if (seconds < 60) return ui(locale, `${seconds} 秒前`, `${seconds}s ago`);
-  if (seconds < 3600) return ui(locale, `${Math.floor(seconds / 60)} 分钟前`, `${Math.floor(seconds / 60)}m ago`);
-  if (seconds < 86400) return ui(locale, `${Math.floor(seconds / 3600)} 小时前`, `${Math.floor(seconds / 3600)}h ago`);
-  return ui(locale, `${Math.floor(seconds / 86400)} 天前`, `${Math.floor(seconds / 86400)}d ago`);
-}
-
 export function countryFlag(region: string) {
   const code = region.trim().slice(0, 2).toUpperCase();
   if (!/^[A-Z]{2}$/.test(code)) return "";
@@ -123,7 +143,8 @@ export function formatPrice(server: Pick<Server, "price" | "billing_cycle" | "cu
   if (server.price === -1) return ui(locale, "免费", "Free");
   if (server.price === 0) return "";
   if (server.price < 0) return "";
-  const cycle = server.billing_cycle >= 27 && server.billing_cycle <= 32 ? ui(locale, "月", "month")
+  const cycle = server.billing_cycle <= 0 ? ui(locale, "一次性", "one-time")
+    : server.billing_cycle >= 27 && server.billing_cycle <= 32 ? ui(locale, "月", "month")
     : server.billing_cycle >= 87 && server.billing_cycle <= 95 ? ui(locale, "季", "quarter")
       : server.billing_cycle >= 175 && server.billing_cycle <= 185 ? ui(locale, "半年", "half-year")
         : server.billing_cycle >= 360 && server.billing_cycle <= 370 ? ui(locale, "年", "year")

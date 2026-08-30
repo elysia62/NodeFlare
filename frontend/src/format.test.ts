@@ -1,0 +1,41 @@
+import { describe, expect, test } from "bun:test";
+import { formatByteSize, formatPrice, parseByteSize } from "./format";
+
+describe("parseByteSize", () => {
+  test("accepts manual units and defaults to GB", () => {
+    expect(parseByteSize("100 G")).toBe(100 * 1024 ** 3);
+    expect(parseByteSize("0.5T")).toBe(0.5 * 1024 ** 4);
+    expect(parseByteSize("512 m")).toBe(512 * 1024 ** 2);
+    expect(parseByteSize("2048 kb")).toBe(2048 * 1024);
+    expect(parseByteSize("200")).toBe(200 * 1024 ** 3);
+  });
+
+  test("rejects malformed input", () => {
+    expect(parseByteSize("100 X")).toBeNull();
+    expect(parseByteSize("abc")).toBeNull();
+    expect(parseByteSize("")).toBeNull();
+    expect(parseByteSize("-5 G")).toBeNull();
+    expect(parseByteSize("-1")).toBeNull();
+  });
+});
+
+describe("formatByteSize", () => {
+  test("round-trips through parseByteSize", () => {
+    for (const bytes of [0, 512 * 1024 ** 2, 100 * 1024 ** 3, 2 * 1024 ** 4]) {
+      expect(parseByteSize(formatByteSize(bytes))).toBe(bytes);
+    }
+  });
+
+  test("passes the unlimited sentinel through unchanged", () => {
+    expect(formatByteSize(-1)).toBe("-1");
+  });
+});
+
+describe("formatPrice", () => {
+  test("renders free, hidden and one-time cycles", () => {
+    expect(formatPrice({ price: -1, billing_cycle: 30, currency: "CNY" })).toBe("免费");
+    expect(formatPrice({ price: 0, billing_cycle: 30, currency: "CNY" })).toBe("");
+    expect(formatPrice({ price: 5, billing_cycle: 0, currency: "CNY" })).toBe("¥5 / 一次性");
+    expect(formatPrice({ price: 5, billing_cycle: 365, currency: "CNY" })).toBe("¥5 / 年");
+  });
+});

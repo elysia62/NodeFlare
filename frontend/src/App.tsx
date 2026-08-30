@@ -114,7 +114,7 @@ function HomeView() {
       </div> : null}
       {error ? <div className="error-band"><span>{error}</span><button onClick={() => void reload()}>{ui(locale, "重试", "Retry")}</button></div> : null}
       {loading && !servers.length ? (
-        <div className={`loading-grid ${carrierLatency ? "carrier-latency" : ""}`}>{Array.from({ length: 8 }).map((_, index) => <span key={index} />)}</div>
+        <div className="dashboard-loading"><span className="loading-ring" aria-hidden="true" /><p>{ui(locale, "加载中…", "Loading…")}</p></div>
       ) : visible.length ? (
         <section className={`node-grid ${carrierLatency ? "carrier-latency" : ""}`}>
           {visible.map((server) => <NodeCard key={server.id} server={server} config={config} onOpen={() => openServer(server)} />)}
