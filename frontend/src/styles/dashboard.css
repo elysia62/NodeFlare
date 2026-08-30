@@ -186,23 +186,18 @@ html[data-blur="on"] .node-offline-overlay { backdrop-filter: blur(2px); }
 .detail-chart header span { overflow: hidden; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .detail-chart > div { width: 100%; height: 208px; }
 .latency-overview { min-width: 0; overflow: hidden; border-radius: 8px; }
-.latency-summary-grid { display: grid; min-width: 100%; overflow-x: auto; border-bottom: 1px solid var(--border); }
-.latency-summary { min-width: 180px; border-right: 1px solid var(--border); padding: 17px 20px; }
-.latency-summary:last-child { border-right: 0; }
-.latency-summary > span { display: flex; min-width: 0; align-items: center; gap: 7px; overflow: hidden; color: var(--muted-foreground); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.latency-summary > span i { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 2px; }
-.latency-summary strong { display: block; margin-top: 6px; font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: 0; }
-.latency-summary small { display: block; margin-top: 5px; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
-.latency-summary.hidden { opacity: .42; }
-.latency-task-legend { display: flex; min-width: 0; align-items: center; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--border); padding: 10px 16px; }
-.latency-task-toggle { display: inline-flex; min-width: 0; min-height: 28px; flex: 0 0 auto; align-items: center; gap: 6px; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
-.latency-task-toggle:hover { color: var(--foreground); background: color-mix(in srgb, var(--foreground) 6%, transparent); }
+.latency-task-legend { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px 20px; border-bottom: 1px solid var(--border); padding: 10px 16px; }
+.latency-task-toggle { display: inline-flex; min-width: 0; max-width: 100%; min-height: 28px; flex: 0 0 auto; align-items: center; gap: 7px; border: 0; border-radius: 6px; padding: 4px 6px; color: var(--foreground); font-size: 12px; white-space: nowrap; transition: opacity 150ms ease; }
+.latency-task-toggle:hover { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
 .latency-task-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-.latency-task-toggle i { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 2px; }
-.latency-task-toggle.hidden { border-color: var(--border); color: var(--muted-foreground); opacity: .58; }
-.latency-task-toggle.hidden i { opacity: .38; }
-.latency-line-chart { width: 100%; height: 320px; padding: 16px 18px 10px 10px; }
+.latency-task-toggle i { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; }
+.latency-task-toggle span { min-width: 0; overflow: hidden; max-width: 160px; font-weight: 500; text-overflow: ellipsis; }
+.latency-task-toggle em { flex: 0 0 auto; color: var(--muted-foreground); font-style: normal; font-variant-numeric: tabular-nums; }
+.latency-task-toggle.hidden { opacity: .35; }
+.latency-task-toggle.hidden:hover { opacity: .65; }
+.latency-line-chart { position: relative; width: 100%; height: 288px; padding: 16px 18px 10px 10px; }
 .latency-empty { display: grid; width: 100%; height: 100%; place-items: center; color: var(--muted-foreground); font-size: 13px; }
+.latency-empty-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted-foreground); font-size: 12px; pointer-events: none; }
 
 @media (min-width: 640px) {
   .brand strong { font-size: 18px; }
@@ -245,11 +240,5 @@ html[data-blur="on"] .node-offline-overlay { backdrop-filter: blur(2px); }
   .range-control { width: 100%; }
   .range-control button { flex: 0 0 auto; }
   .detail-chart > div { height: 192px; }
-  .latency-summary { padding: 14px 16px; }
-  .latency-summary strong { font-size: 19px; }
-  .latency-summary-grid { overflow: visible; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-  .latency-summary { min-width: 0; }
-  .latency-summary:nth-child(2n) { border-right: 0; }
-  .latency-summary:nth-child(n+3) { border-top: 1px solid var(--border); }
   .latency-line-chart { height: 270px; padding: 12px 10px 8px 4px; }
 }

@@ -127,7 +127,7 @@ function HomeView() {
 }
 
 function DetailView() {
-  const { config, goHome, liveMetrics, loading, selectedId, servers } = useApp();
+  const { config, goHome, loading, selectedId, servers } = useApp();
   const locale = config.locale;
   const selected = servers.find((server) => server.id === selectedId) ?? null;
 
@@ -136,7 +136,6 @@ function DetailView() {
       <Suspense fallback={<div className="chart-loading">{ui(locale, "正在加载节点", "Loading server")}</div>}>
         <NodeDetails
           server={selected}
-          liveLatencyResults={liveMetrics[selected.id]?.latencyResults ?? []}
           threshold={config.offline_threshold_seconds}
           retentionDays={config.history_retention_days}
           locale={locale}
