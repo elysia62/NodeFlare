@@ -50,15 +50,6 @@ export function chartGapLimit(hours: number): number {
   return Math.max(5 * 60_000, (hours * 60 * 60_000) / 36);
 }
 
-/** Fixed axis window so a partially populated range keeps its true scale. */
-export function chartTimeRange(hours: number, now = Date.now()) {
-  const start = now - hours * 60 * 60_000;
-  return {
-    domain: [start, now] as [number, number],
-    ticks: Array.from({ length: 5 }, (_, index) => start + ((now - start) * index) / 4),
-  };
-}
-
 export function chartTimeLabel(timestamp: number, hours: number, locale: UiLocale): string {
   const date = new Date(timestamp);
   if (hours <= 1) return date.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });

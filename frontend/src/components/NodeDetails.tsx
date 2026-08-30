@@ -21,7 +21,7 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "../api";
-import { chartGapLimit, chartTimeLabel, chartTimeRange, insertTimelineGaps } from "../chart";
+import { chartGapLimit, chartTimeLabel, insertTimelineGaps } from "../chart";
 import { demoHistory, demoLatencyHistory, demoLatencyTasks } from "../demo";
 import { averageOf } from "../latency";
 import { displayGpuDevices, formatBytes, formatCpuName, formatSpeed, formatUptime, isOnline, number } from "../format";
@@ -126,7 +126,6 @@ function mergeLatencySamples(current: LatencySample[], incoming: LatencySample[]
 
 interface LatencyChartPoint {
   timestamp: number;
-  label: string;
   value: number | null;
 }
 
@@ -144,7 +143,7 @@ interface LoadChartPoint {
 function insertLatencyGaps(points: LatencyChartPoint[], hours: number): LatencyChartPoint[] {
   return insertTimelineGaps(
     points,
-    (timestamp) => ({ timestamp, label: "", value: null }),
+    (timestamp) => ({ timestamp, value: null }),
     { minGap: 10_000, maxGap: chartGapLimit(hours) },
   );
 }
@@ -279,13 +278,6 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
     () => insertLoadGaps(points, loadChartHours),
     [loadChartHours, points],
   );
-  // 有时间范围时钉住整段窗口，部分数据也保持真实比例；实时档用 dataMin/dataMax
-  // 贴合数据（与延迟图、Komari 原版一致）。points 进 deps 是为了在数据落位后重算
-  // domain，慢查询时末端不会被裁掉。
-  const loadTimeRange = useMemo(
-    () => (loadHours === 0 ? null : chartTimeRange(loadChartHours)),
-    [loadChartHours, loadHours, points],
-  );
   const latencySeries = useMemo(() => {
     return latencyTasks.map((task, index) => {
       const samples = latencyPoints.filter((point) => point.task_id === task.id);
@@ -294,7 +286,6 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
         .sort((left, right) => left.timestamp - right.timestamp)
         .map((sample) => ({
           timestamp: sample.timestamp * 1000,
-          label: chartTimeLabel(sample.timestamp * 1000, hours, locale),
           value: sample.latency_ms >= 0 ? sample.latency_ms : null,
         }));
       return {
@@ -306,7 +297,7 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
         points: insertLatencyGaps(rawPoints, hours),
       };
     });
-  }, [hours, latencyPoints, latencyTasks, locale]);
+  }, [hours, latencyPoints, latencyTasks]);
   const visibleLatencySeries = useMemo(
     () => latencySeries.filter((series) => !hiddenLatencyTaskIds.has(series.id)),
     [hiddenLatencyTaskIds, latencySeries],
@@ -321,7 +312,6 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
       .sort((left, right) => left - right)
       .map((timestamp) => ({ timestamp, label: chartTimeLabel(timestamp, hours, locale) }));
   }, [hours, locale, latencySeries]);
-  const latencyTimeRange = useMemo(() => chartTimeRange(latencyHours), [latencyHours, latencyPoints]);
   const last = data[data.length - 1];
   const pingEnabled = latencyTasks.length > 0;
   const toggleLatencyTask = (taskId: string) => {
@@ -379,16 +369,16 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
         {chartType === "load" && loadLoading ? <div className="chart-loading">{ui(locale, "正在读取历史数据", "Loading history")}</div> : chartType === "latency" && latencyLoading ? <div className="chart-loading">{ui(locale, "正在读取延迟数据", "Loading latency")}</div> : chartType === "load" && !data.length ? <div className="chart-loading">{ui(locale, "暂无历史数据", "No history")}</div> : chartType === "load" ? (
           <div className="detail-charts-grid">
             <ChartCard title="CPU" value={`${number(last.cpu).toFixed(1)}%`}>
-              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={loadTimeRange ? loadTimeRange.domain : ["dataMin", "dataMax"]} ticks={loadTimeRange?.ticks} allowDataOverflow={loadHours > 0} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis domain={[0, 100]} tick={{ fontSize: 10 }} width={36} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value) => [`${Number(value).toFixed(1)}%`, "CPU"]} /><Area type="monotone" dataKey="cpu" stroke="var(--danger-bar)" fill="var(--danger-bar)" fillOpacity={0.15} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
+              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis domain={[0, 100]} tick={{ fontSize: 10 }} width={36} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value) => [`${Number(value).toFixed(1)}%`, "CPU"]} /><Area type="monotone" dataKey="cpu" stroke="var(--danger-bar)" fill="var(--danger-bar)" fillOpacity={0.15} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
             </ChartCard>
             <ChartCard title={ui(locale, "内存", "Memory")} value={`${formatBytes(last.mem_used)} / ${formatBytes(last.mem_total)}`}>
-              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={loadTimeRange ? loadTimeRange.domain : ["dataMin", "dataMax"]} ticks={loadTimeRange?.ticks} allowDataOverflow={loadHours > 0} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis domain={[0, last.mem_total]} ticks={resourceTicks(last.mem_total)} tick={{ fontSize: 10 }} width={56} tickFormatter={(value) => formatBytes(Number(value), 0)} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value) => [formatBytes(Number(value)), "内存"]} /><Area type="monotone" dataKey="mem_used" stroke="var(--primary)" fill="var(--primary)" fillOpacity={0.15} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
+              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis domain={[0, last.mem_total]} ticks={resourceTicks(last.mem_total)} tick={{ fontSize: 10 }} width={56} tickFormatter={(value) => formatBytes(Number(value), 0)} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value) => [formatBytes(Number(value)), "内存"]} /><Area type="monotone" dataKey="mem_used" stroke="var(--primary)" fill="var(--primary)" fillOpacity={0.15} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
             </ChartCard>
             <ChartCard title={ui(locale, "硬盘", "Disk")} value={`${formatBytes(last.disk_used)} / ${formatBytes(last.disk_total)}`}>
-              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={loadTimeRange ? loadTimeRange.domain : ["dataMin", "dataMax"]} ticks={loadTimeRange?.ticks} allowDataOverflow={loadHours > 0} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis domain={[0, last.disk_total]} ticks={resourceTicks(last.disk_total)} tick={{ fontSize: 10 }} width={56} tickFormatter={(value) => formatBytes(Number(value), 0)} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value) => [formatBytes(Number(value)), "硬盘"]} /><Area type="monotone" dataKey="disk_used" stroke="var(--warning-bar)" fill="var(--warning-bar)" fillOpacity={0.15} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
+              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis domain={[0, last.disk_total]} ticks={resourceTicks(last.disk_total)} tick={{ fontSize: 10 }} width={56} tickFormatter={(value) => formatBytes(Number(value), 0)} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value) => [formatBytes(Number(value)), "硬盘"]} /><Area type="monotone" dataKey="disk_used" stroke="var(--warning-bar)" fill="var(--warning-bar)" fillOpacity={0.15} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
             </ChartCard>
             <ChartCard title={ui(locale, "网络", "Network")} value={`↑ ${formatSpeed(last.net_out)}  ↓ ${formatSpeed(last.net_in)}`}>
-              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={loadTimeRange ? loadTimeRange.domain : ["dataMin", "dataMax"]} ticks={loadTimeRange?.ticks} allowDataOverflow={loadHours > 0} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis tick={{ fontSize: 10 }} width={48} tickFormatter={(value) => formatBytes(Number(value), 0)} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value, name) => [formatSpeed(Number(value)), name === "net_out" ? "上行" : "下行"]} /><Area type="monotone" dataKey="net_out" stroke="var(--success-bar)" fill="var(--success-bar)" fillOpacity={0.12} strokeWidth={2} dot={false} isAnimationActive={false} /><Area type="monotone" dataKey="net_in" stroke="var(--info)" fill="var(--info)" fillOpacity={0.1} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
+              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis tick={{ fontSize: 10 }} width={48} tickFormatter={(value) => formatBytes(Number(value), 0)} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value, name) => [formatSpeed(Number(value)), name === "net_out" ? "上行" : "下行"]} /><Area type="monotone" dataKey="net_out" stroke="var(--success-bar)" fill="var(--success-bar)" fillOpacity={0.12} strokeWidth={2} dot={false} isAnimationActive={false} /><Area type="monotone" dataKey="net_in" stroke="var(--info)" fill="var(--info)" fillOpacity={0.1} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
             </ChartCard>
           </div>
         ) : (
@@ -416,9 +406,9 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
             <div className="latency-line-chart">
               {latencyData.length ? <>
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={latencyData} margin={{ top: 10, right: 12, left: 4, bottom: 2 }}>
+                  <LineChart data={latencyData}>
                     <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" />
-                    <XAxis dataKey="timestamp" type="number" domain={latencyTimeRange.domain} ticks={latencyTimeRange.ticks} allowDataOverflow tick={{ fontSize: 10 }} minTickGap={40} tickFormatter={(value) => chartTimeLabel(Number(value), latencyHours, locale)} />
+                    <XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tick={{ fontSize: 10 }} minTickGap={40} tickFormatter={(value) => chartTimeLabel(Number(value), latencyHours, locale)} />
                     <YAxis tick={{ fontSize: 10 }} width={48} unit="ms" />
                     <Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), latencyHours, locale)} formatter={(value, name) => [value == null ? "--" : `${Number(value).toFixed(1)} ms`, name]} />
                     {visibleLatencySeries.map((series) => <Line key={series.id} data={series.points} type="monotone" dataKey="value" name={series.name} stroke={series.color} strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />)}
