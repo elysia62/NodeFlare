@@ -40,9 +40,8 @@ export function parseByteSize(text: string): number | null {
   return factor === undefined ? null : Math.round(Number(match[1]) * factor);
 }
 
-/** 字节数 → "100 G" 风格短文本，编辑框失焦时回显；-1 是「不限」哨兵，原样回显。 */
+/** 字节数 → "100 G" 风格短文本，编辑框失焦时回显。0 表示不限，负数归零。 */
 export function formatByteSize(bytes: number): string {
-  if (bytes < 0) return "-1";
   const size = Math.max(0, Math.round(number(bytes)));
   if (size === 0) return "0";
   for (const [suffix, factor] of [["T", 1024 ** 4], ["G", 1024 ** 3], ["M", 1024 ** 2], ["K", 1024]] as const) {

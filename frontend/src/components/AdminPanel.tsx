@@ -128,11 +128,6 @@ const BILLING_CYCLES: Array<{ days: number; label: string }> = [
   { days: 0, label: "一次性" },
 ];
 
-// 流量限额输入："-1" 表示不限，其余按字节单位解析。
-function parseTrafficLimit(raw: string): number | null {
-  return raw.trim() === "-1" ? -1 : parseByteSize(raw);
-}
-
 // last_ip 来自 CF-Connecting-IP，是裸 IP；v6 带冒号，v4 是四段数字。
 function ipFamily(ip: string): "v4" | "v6" | null {
   const value = ip.trim();
@@ -314,14 +309,14 @@ export function AdminPanel({
   }
 
   // 带单位输入（如 100 G / 0.5 T）：解析不了的中间态留在框里，失焦回显最后一次有效值。
-  function sizeInputProps(text: string, setText: (value: string) => void, commit: (bytes: number) => void, current: number, parse: (raw: string) => number | null = parseByteSize) {
+  function sizeInputProps(text: string, setText: (value: string) => void, commit: (bytes: number) => void, current: number) {
     return {
       value: text,
       inputMode: "decimal" as const,
       onChange: (event: ChangeEvent<HTMLInputElement>) => {
         const raw = event.target.value;
         setText(raw);
-        const parsed = parse(raw);
+        const parsed = parseByteSize(raw);
         if (parsed !== null) commit(parsed);
       },
       onBlur: () => setText(formatByteSize(current)),
@@ -766,11 +761,11 @@ export function AdminPanel({
       {editing ? <div className="submodal-backdrop" role="presentation" onMouseDown={serverDialog.onBackdropMouseDown}><form ref={serverDialog.dialogRef} className="editor-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="server-editor-title" tabIndex={-1} onSubmit={saveServer}>
         <header><div><span className="eyebrow">节点配置</span><h3 id="server-editor-title">{editing === "new" ? "添加节点" : `编辑 · ${editing.name}`}</h3></div></header>
         <div className="form-grid"><label><span>名称</span><input autoFocus required value={form.name} onChange={(event) => updateForm("name", event.target.value)} /></label><label><span>地区代码</span><input maxLength={16} placeholder="CN / JP / DE" value={form.region} onChange={(event) => updateForm("region", event.target.value.toUpperCase())} /></label><label><span>分组</span><input value={form.group_name} onChange={(event) => updateForm("group_name", event.target.value)} /></label><label><span>标签</span><input placeholder="主力, 线路:BGP" value={form.tags} onChange={(event) => updateForm("tags", event.target.value)} /></label></div>
-        <div className="form-grid three"><label><span>流量限额（-1 不限）</span><input placeholder="如 100 G，不带单位按 GB" {...sizeInputProps(trafficLimitText, setTrafficLimitText, (bytes) => updateForm("traffic_limit", bytes), form.traffic_limit, parseTrafficLimit)} /></label><label><span>流量口径</span><select value={form.traffic_limit_type} onChange={(event) => updateForm("traffic_limit_type", event.target.value as ServerInput["traffic_limit_type"])}><option value="sum">上下行合计</option><option value="max">取较大值</option><option value="min">取较小值</option><option value="up">仅上行</option><option value="down">仅下行</option></select></label><label><span>流量重置日</span><input min="1" max="31" type="number" value={form.reset_day} onChange={(event) => updateForm("reset_day", Number(event.target.value))} /></label></div>
+        <div className="form-grid three"><label><span>流量限额（0 不限）</span><input placeholder="如 100 G，不带单位按 GB；0 不限" {...sizeInputProps(trafficLimitText, setTrafficLimitText, (bytes) => updateForm("traffic_limit", bytes), form.traffic_limit)} /></label><label><span>流量口径</span><select value={form.traffic_limit_type} onChange={(event) => updateForm("traffic_limit_type", event.target.value as ServerInput["traffic_limit_type"])}><option value="sum">上下行合计</option><option value="max">取较大值</option><option value="min">取较小值</option><option value="up">仅上行</option><option value="down">仅下行</option></select></label><label><span>流量重置日</span><input min="1" max="31" type="number" value={form.reset_day} onChange={(event) => updateForm("reset_day", Number(event.target.value))} /></label></div>
         <div className="form-grid three"><label><span>价格（0 隐藏，-1 免费）</span><input inputMode="decimal" value={priceText} onChange={(event) => updatePriceText(event.target.value)} onBlur={() => setPriceText(String(form.price))} /></label><label><span>币种</span><select value={form.currency} onChange={(event) => updateForm("currency", event.target.value)}>{ASSET_CURRENCIES.map((code) => <option key={code}>{code}</option>)}</select></label><label><span>计费周期</span><select value={String(form.billing_cycle)} onChange={(event) => updateForm("billing_cycle", Number(event.target.value))}>{BILLING_CYCLES.map((cycle) => <option key={cycle.days} value={cycle.days}>{cycle.label}</option>)}{BILLING_CYCLES.every((cycle) => cycle.days !== form.billing_cycle) ? <option value={form.billing_cycle}>{form.billing_cycle} 天</option> : null}</select></label></div>
         <div className="form-grid three"><label><span>到期日期</span><input type="date" value={formatDate(form.expires_at)} onChange={(event) => updateForm("expires_at", event.target.value ? Math.floor(new Date(`${event.target.value}T00:00:00Z`).getTime() / 1000) : null)} /></label><label><span>Agent 上报间隔（秒）</span><input min="15" max="3600" type="number" value={form.report_interval} onChange={(event) => updateForm("report_interval", Number(event.target.value))} /></label><label><span>指标采样间隔（秒）</span><input min="1" max="60" type="number" value={form.collect_interval} onChange={(event) => updateForm("collect_interval", Number(event.target.value))} /></label></div>
         <div className="form-grid"><label><span>统计网卡（逗号分隔，留空自动）</span><input value={form.network_interface} onChange={(event) => updateForm("network_interface", event.target.value)} placeholder="eth0,ens3" /></label><label><span>下行流量当前值</span><input placeholder="如 500 G" {...sizeInputProps(rxCurrentText, setRxCurrentText, setRxCurrentBytes, rxCurrentBytes)} /></label><label><span>上行流量当前值</span><input placeholder="如 500 G" {...sizeInputProps(txCurrentText, setTxCurrentText, setTxCurrentBytes, txCurrentBytes)} /></label><label><span>Agent 下载加速（可选）</span><input value={form.agent_mirror} onChange={(event) => updateForm("agent_mirror", event.target.value.trim())} placeholder="https://ghproxy.net" /></label></div>
-        <div className="settings-toggles editor-toggles"><Toggle label="自动续费" checked={form.auto_renewal} onChange={(value) => updateForm("auto_renewal", value)} /><Toggle label="Agent 自动更新" checked={form.auto_update} onChange={(value) => updateForm("auto_update", value)} /><Toggle label="隐藏节点" checked={form.hidden} onChange={(value) => updateForm("hidden", value)} /><Toggle label="关闭离线告警" checked={form.offline_notify_disabled} onChange={(value) => updateForm("offline_notify_disabled", value)} /></div>
+        <div className="settings-toggles editor-toggles"><Toggle label={form.billing_cycle <= 0 ? "自动续费（一次性不适用）" : "自动续费"} checked={form.auto_renewal} onChange={(value) => updateForm("auto_renewal", value)} /><Toggle label="Agent 自动更新" checked={form.auto_update} onChange={(value) => updateForm("auto_update", value)} /><Toggle label="隐藏节点" checked={form.hidden} onChange={(value) => updateForm("hidden", value)} /><Toggle label="关闭离线告警" checked={form.offline_notify_disabled} onChange={(value) => updateForm("offline_notify_disabled", value)} /></div>
         <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={15} />保存节点</button></div>
       </form></div> : null}
 

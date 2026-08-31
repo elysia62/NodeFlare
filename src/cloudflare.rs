@@ -59,8 +59,6 @@ pub struct UsagePeriod {
     pub durable_objects_hibernation_wakeups: i64,
     pub durable_objects_inbound_websocket_messages: i64,
     pub durable_objects_outbound_websocket_messages: i64,
-    pub durable_objects_raw_requests: i64,
-    pub durable_objects_requests_estimated: bool,
     pub durable_objects_request_billing_ratio: i64,
     pub durable_objects_duration: f64,
 }
@@ -186,7 +184,6 @@ struct DurableObjectsSummary {
     hibernation_wakeups: i64,
     inbound_websocket_messages: i64,
     outbound_websocket_messages: i64,
-    raw_requests: i64,
     billable_requests: i64,
     duration: f64,
 }
@@ -216,9 +213,13 @@ fn summarize_durable_objects(
     let mut summary = DurableObjectsSummary::default();
     for group in invocation_groups {
         let requests = group.sum.requests.max(0);
-        summary.raw_requests = summary.raw_requests.saturating_add(requests);
         if is_hibernation_invocation_type(&group.dimensions.invocation_type) {
             summary.hibernation_wakeups = summary.hibernation_wakeups.saturating_add(requests);
+            // Hibernating WebSocket messages are reported in the invocations
+            // dataset instead of periodic groups. Keep them in the total
+            // inbound count so the 20:1 billing ratio applies to both paths.
+            summary.inbound_websocket_messages =
+                summary.inbound_websocket_messages.saturating_add(requests);
         } else {
             summary.http_requests = summary.http_requests.saturating_add(requests);
         }
@@ -331,8 +332,6 @@ async fn query_period(token: &str, account_id: &str, date: &str) -> Result<Usage
         durable_objects_hibernation_wakeups: durable_objects.hibernation_wakeups,
         durable_objects_inbound_websocket_messages: durable_objects.inbound_websocket_messages,
         durable_objects_outbound_websocket_messages: durable_objects.outbound_websocket_messages,
-        durable_objects_raw_requests: durable_objects.raw_requests,
-        durable_objects_requests_estimated: true,
         durable_objects_request_billing_ratio: DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO,
         durable_objects_duration: durable_objects.duration,
     })
@@ -404,12 +403,28 @@ mod tests {
         );
         assert_eq!(summary.http_requests, 7);
         assert_eq!(summary.hibernation_wakeups, 3);
-        assert_eq!(summary.raw_requests, 10);
-        assert_eq!(summary.billable_requests, 8);
+        assert_eq!(summary.inbound_websocket_messages, 23);
+        assert_eq!(summary.billable_requests, 9);
         assert_eq!(summary.outbound_websocket_messages, 11);
         assert_eq!(summary.duration, 2.5);
         assert_eq!(ceil_div_nonnegative(0, 20), 0);
         assert_eq!(ceil_div_nonnegative(20, 20), 1);
         assert_eq!(ceil_div_nonnegative(21, 20), 2);
+    }
+
+    #[test]
+    fn bills_hibernating_websocket_messages_at_twenty_to_one() {
+        let summary = summarize_durable_objects(
+            vec![DurableObjectsInvocationGroup {
+                sum: DurableObjectsInvocationSum { requests: 21 },
+                dimensions: DurableObjectsInvocationDimensions {
+                    invocation_type: "webSocketMessage".to_string(),
+                },
+            }],
+            Vec::new(),
+        );
+        assert_eq!(summary.hibernation_wakeups, 21);
+        assert_eq!(summary.inbound_websocket_messages, 21);
+        assert_eq!(summary.billable_requests, 2);
     }
 }

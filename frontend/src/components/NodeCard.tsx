@@ -129,7 +129,9 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
 
       <div className="node-body">
         <div className="node-chips">
-          {config.show_uptime ? <span>{ui(locale, `在线 ${Math.floor(number(server.uptime) / 86400)} 天`, `Online ${Math.floor(number(server.uptime) / 86400)} days`)}</span> : null}
+          {/* 离线时不显示：uptime 是最后一次上报的存量值，遮罩只有 20% 底色且
+              data-blur=off 时不模糊，「在线 N 天」会透过遮罩和上面的「离线」打脸。 */}
+          {config.show_uptime && online ? <span>{ui(locale, `在线 ${Math.floor(number(server.uptime) / 86400)} 天`, `Online ${Math.floor(number(server.uptime) / 86400)} days`)}</span> : null}
           {config.show_price && price ? <span title={price}>{price}</span> : null}
         </div>
 

@@ -313,8 +313,6 @@ export interface DatabaseStats {
   server_count: number;
   online_count: number;
   history_rows: number;
-  oldest_history: number | null;
-  newest_history: number | null;
 }
 
 interface CloudflareUsagePeriod {
@@ -326,8 +324,6 @@ interface CloudflareUsagePeriod {
   durable_objects_hibernation_wakeups: number;
   durable_objects_inbound_websocket_messages: number;
   durable_objects_outbound_websocket_messages: number;
-  durable_objects_raw_requests: number;
-  durable_objects_requests_estimated: boolean;
   durable_objects_request_billing_ratio: number;
   durable_objects_duration: number;
 }

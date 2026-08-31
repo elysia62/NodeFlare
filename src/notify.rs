@@ -603,6 +603,11 @@ pub async fn renew_servers(db_conn: &D1Database) -> Result<()> {
 }
 
 fn renewed_expiry(expires_at: i64, billing_cycle_days: i64, current_time: i64) -> Option<i64> {
+    // billing_cycle = 0 是「一次性」，没有周期可续。不拦的话下面的 clamp(1, ..)
+    // 会把它当成 1 天，每跑一次 cron 就把到期日推一天，节点永远停在「剩 1 天」。
+    if billing_cycle_days <= 0 {
+        return None;
+    }
     let renew_before = i128::from(current_time) + 86_400;
     let expires_at = i128::from(expires_at);
     if expires_at > renew_before {
@@ -873,5 +878,17 @@ mod tests {
         let day = 86_400;
         assert_eq!(renewed_expiry(80 * day, 30, 100 * day), Some(110 * day));
         assert_eq!(renewed_expiry(102 * day, 30, 100 * day), None);
+    }
+
+    #[test]
+    fn one_time_billing_cycle_never_renews() {
+        // 一次性（billing_cycle = 0）就算把自动续费开着也不该续：否则 clamp(1, ..)
+        // 把周期当成 1 天，每跑一次 cron 推一天，节点永远停在「剩 1 天」。
+        let day = 86_400;
+        assert_eq!(renewed_expiry(80 * day, 0, 100 * day), None);
+        assert_eq!(renewed_expiry(102 * day, 0, 101 * day), None);
+        assert_eq!(renewed_expiry(80 * day, -5, 100 * day), None);
+        // 正常周期不受影响。
+        assert_eq!(renewed_expiry(80 * day, 1, 100 * day), Some(102 * day));
     }
 }

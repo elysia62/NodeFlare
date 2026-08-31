@@ -228,6 +228,17 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
     return () => { active = false; };
   }, [server.id, loadHours, demo, locale]);
 
+  // 「实时」档要跟着上报往前走，否则挂载之后这张图就冻住了。依赖只取
+  // `server.timestamp`：`server` 每次渲染都是新对象，挂它会让 effect 空转。
+  // 上面那个 fetch 落地时已经带了一个快照，这里只负责后续追加；
+  // `appendRealtimePoint` 自带去重、按 1 小时窗裁剪和 720 点封顶。
+  const liveTimestamp = server.timestamp;
+  useEffect(() => {
+    if (demo || loadHours !== 0) return;
+    const point = historyPointFromServer(latestServerRef.current);
+    if (point) setPoints((current) => appendRealtimePoint(current, point));
+  }, [demo, loadHours, liveTimestamp]);
+
   useEffect(() => {
     setLatencyLoading(true);
     setLatencyError("");

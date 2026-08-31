@@ -676,8 +676,8 @@ pub(crate) fn validate_server(input: &ServerInput) -> Option<&'static str> {
     if input.tags.chars().count() > 240 {
         return Some("标签字段过长");
     }
-    if input.traffic_limit < -1 {
-        return Some("流量限额不能小于 -1（-1 表示不限）");
+    if input.traffic_limit < 0 {
+        return Some("流量限额不能为负数");
     }
     if !matches!(
         input.traffic_limit_type.as_str(),

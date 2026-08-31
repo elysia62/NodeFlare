@@ -420,8 +420,6 @@ pub struct DatabaseStats {
     pub server_count: i64,
     pub online_count: i64,
     pub history_rows: i64,
-    pub oldest_history: Option<i64>,
-    pub newest_history: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1781,28 +1779,19 @@ pub async fn database_stats(db: &D1Database, offline_threshold: i64) -> Result<D
     db.prepare(
         r#"SELECT
           (SELECT COUNT(*) FROM servers) AS server_count,
+          -- 在线判定读 server_latest_state：它和 metric_history 在同一个 batch 里
+          -- 写同一个 latest_timestamp，且只随 servers 的外键级联删除——轮换 DROP
+          -- 掉分钟表不影响它，所以它是各来源里的最大值，主键又正好是 server_id。
+          -- 原来那版按服务器逐行 MAX(latest_timestamp) over (分钟表 UNION 上一代)，
+          -- 每台一次全表扫；这版是主键点查。
           (SELECT COUNT(*) FROM servers s WHERE COALESCE(
-             (SELECT MAX(latest_timestamp) FROM (
-                SELECT server_id, latest_timestamp FROM metric_history UNION ALL
-                SELECT server_id, latest_timestamp FROM metric_history_old
-              ) h WHERE h.server_id = s.id),
-             (SELECT latest_timestamp FROM metric_history_hourly h
-              WHERE h.server_id = s.id ORDER BY timestamp DESC LIMIT 1),
+             (SELECT l.latest_timestamp FROM server_latest_state l
+              WHERE l.server_id = s.id),
              0
            ) >= ?1) AS online_count,
           ((SELECT COUNT(*) FROM metric_history) +
            (SELECT COUNT(*) FROM metric_history_old) +
-           (SELECT COUNT(*) FROM metric_history_hourly)) AS history_rows,
-          (SELECT MIN(timestamp) FROM (
-             SELECT timestamp FROM metric_history UNION ALL
-             SELECT timestamp FROM metric_history_old UNION ALL
-             SELECT timestamp FROM metric_history_hourly
-           )) AS oldest_history,
-          (SELECT MAX(timestamp) FROM (
-             SELECT timestamp FROM metric_history UNION ALL
-             SELECT timestamp FROM metric_history_old UNION ALL
-             SELECT timestamp FROM metric_history_hourly
-           )) AS newest_history"#,
+           (SELECT COUNT(*) FROM metric_history_hourly)) AS history_rows"#,
     )
     .bind(&[number(cutoff)])?
     .first(None)

@@ -15,7 +15,6 @@ describe("parseByteSize", () => {
     expect(parseByteSize("abc")).toBeNull();
     expect(parseByteSize("")).toBeNull();
     expect(parseByteSize("-5 G")).toBeNull();
-    expect(parseByteSize("-1")).toBeNull();
   });
 });
 
@@ -26,8 +25,10 @@ describe("formatByteSize", () => {
     }
   });
 
-  test("passes the unlimited sentinel through unchanged", () => {
-    expect(formatByteSize(-1)).toBe("-1");
+  test("normalises negatives to zero", () => {
+    // 0 就是「不限」，没有单独的负数哨兵。
+    expect(formatByteSize(0)).toBe("0");
+    expect(formatByteSize(-1)).toBe("0");
   });
 });
 
