@@ -113,7 +113,10 @@ function waitForJsonMessage(socket, expected, predicate) {
       cleanup();
       resolve(message);
     };
-    const onClose = () => fail(new Error(`WebSocket closed before receiving ${expected}`));
+    const onClose = (code, reason) => {
+      const detail = reason.length ? `: ${reason.toString()}` : "";
+      fail(new Error(`WebSocket closed with code ${code}${detail} before receiving ${expected}`));
+    };
     const onError = (error) => fail(error);
     const timer = setTimeout(
       () => fail(new Error(`WebSocket did not receive ${expected}`)),
@@ -239,6 +242,8 @@ try {
     gpu_usage: 32.5,
     gpu_model: "NVIDIA T4",
     agent_version: "smoke",
+    ip_v4: "203.0.113.7",
+    ip_v6: "2001:db8::1",
     disk_read_bps: 4194304,
     disk_write_bps: 2097152,
     disk_read_iops: 120,
@@ -318,10 +323,9 @@ try {
     throw new Error(`Invalid Agent metric ACK: ${JSON.stringify(ack)}`);
   }
 
-  // 身份字段不该出现在发往浏览器的样本里（Worker 侧剥离），但必须仍能从
-  // bootstrap 拿到 —— 前端靠 { ...server, ...live.metrics } 的覆盖顺序兜底。
-  // fixture 里 gpu_model="NVIDIA T4"、agent_version="smoke" 都是非空的。
-  const omitted = [
+  // 稳定硬件身份不随实时样本重复发送，而由 bootstrap 提供。公网 IP 同样不进入
+  // 实时样本，但属于管理数据，只能从鉴权后的管理接口读取。
+  const publicIdentityFields = [
     "cpu_model",
     "os",
     "kernel",
@@ -330,8 +334,13 @@ try {
     "gpu_model",
     "agent_version",
   ];
+  const browserOmittedFields = [
+    ...publicIdentityFields,
+    "ip_v4",
+    "ip_v6",
+  ];
   for (const entry of update.updates.flatMap((u) => u.samples ?? [])) {
-    const leaked = omitted.filter((field) => entry.data?.[field] !== undefined);
+    const leaked = browserOmittedFields.filter((field) => entry.data?.[field] !== undefined);
     if (leaked.length) {
       throw new Error(`Live sample leaked identity fields: ${leaked.join(", ")}`);
     }
@@ -344,9 +353,28 @@ try {
   if (!persisted) {
     throw new Error(`Bootstrap missing server ${serverId}`);
   }
-  const missing = omitted.filter((field) => !persisted[field]);
+  const missing = publicIdentityFields.filter((field) => !persisted[field]);
   if (missing.length) {
     throw new Error(`Bootstrap missing identity fields: ${missing.join(", ")}`);
+  }
+  const publicIpLeak = ["ip_v4", "ip_v6"].filter((field) => persisted[field] !== undefined);
+  if (publicIpLeak.length) {
+    throw new Error(`Bootstrap leaked Agent public IP fields: ${publicIpLeak.join(", ")}`);
+  }
+
+  const adminServersResponse = await fetch(new URL("/api/admin/servers", baseUrl), {
+    headers: { Authorization: `Bearer ${adminToken}` },
+  });
+  if (!adminServersResponse.ok) {
+    throw new Error(`Admin servers returned HTTP ${adminServersResponse.status}`);
+  }
+  const adminServers = await adminServersResponse.json();
+  const adminPersisted = adminServers.servers?.find((server) => server.id === serverId);
+  if (
+    adminPersisted?.ip_v4 !== baseSample.ip_v4 ||
+    adminPersisted?.ip_v6 !== baseSample.ip_v6
+  ) {
+    throw new Error(`Admin servers returned invalid public IP fields: ${JSON.stringify(adminPersisted)}`);
   }
   }
 } finally {
