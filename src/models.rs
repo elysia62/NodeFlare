@@ -215,10 +215,8 @@ pub struct AgentReport {
     pub gpu_usage: f64,
     pub gpu_model: String,
     pub agent_version: String,
-    /// 双栈公网地址，agent 双栈探测的结果；空串表示该协议族不可用或未上报。
-    #[serde(default)]
+    /// 双栈公网地址，agent 双栈探测的结果；空串表示当前不可用或探测尚未完成。
     pub ip_v4: String,
-    #[serde(default)]
     pub ip_v6: String,
     pub disk_read_bps: f64,
     pub disk_write_bps: f64,

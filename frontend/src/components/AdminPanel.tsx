@@ -128,22 +128,10 @@ const BILLING_CYCLES: Array<{ days: number; label: string }> = [
   { days: 0, label: "一次性" },
 ];
 
-// last_ip 来自 CF-Connecting-IP，是裸 IP；v6 带冒号，v4 是四段数字。
-function ipFamily(ip: string): "v4" | "v6" | null {
-  const value = ip.trim();
-  if (!value) return null;
-  if (value.includes(":")) return "v6";
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) ? "v4" : null;
-}
-
 function ServerIpMeta({ server, agentVersion, onCopy }: { server: AdminServer; agentVersion: string | null; onCopy: (ip: string) => void }) {
-  // 双栈探测上报的地址优先；旧版 agent 还没上报时回落到连接出口地址（last_ip）。
-  const family = ipFamily(server.last_ip);
-  const v4 = server.ip_v4 || (family === "v4" ? server.last_ip : "");
-  const v6 = server.ip_v6 || (family === "v6" ? server.last_ip : "");
   const entries = [
-    { family: "v4" as const, ip: v4 },
-    { family: "v6" as const, ip: v6 },
+    { family: "v4" as const, ip: server.ip_v4 || "" },
+    { family: "v6" as const, ip: server.ip_v6 || "" },
   ].filter((entry) => entry.ip);
   return (
     <div className="server-name-meta">
@@ -153,7 +141,7 @@ function ServerIpMeta({ server, agentVersion, onCopy }: { server: AdminServer; a
           <button type="button" className="ip-value" title={`点击复制：${entry.ip}`} onClick={() => onCopy(entry.ip)}>{entry.ip}</button>
         </span>
       ))}
-      {!entries.length ? <span className="meta-item">{server.last_ip || "尚未上报 IP"}</span> : null}
+      {!entries.length ? <span className="meta-item">尚未探测到公网 IP</span> : null}
       <span className="meta-dot">·</span>
       <span className="meta-item">{agentVersion ? `Agent v${agentVersion}` : "Agent 未上报版本"}</span>
     </div>
@@ -180,13 +168,11 @@ export function AdminPanel({
   config,
   dark,
   onToggleTheme,
-  onClose,
   onChanged,
 }: {
   config: Config;
   dark: boolean;
   onToggleTheme: () => void;
-  onClose: () => void;
   onChanged: () => void;
 }) {
   const [authenticated, setAuthenticated] = useState(!!getToken());
@@ -603,7 +589,6 @@ export function AdminPanel({
       {authenticated ? (error ? <div className="admin-toast error" role="alert" aria-live="assertive"><CircleAlert aria-hidden="true" /><span>{error}</span></div>
         : notice ? <div className="admin-toast" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{notice}</span></div> : null) : null}
       {!authenticated ? <div className="admin-login-stage">
-        <button className="admin-back" type="button" onClick={onClose}><ArrowLeft size={15} />返回</button>
         <button className="admin-login-theme" type="button" onClick={onToggleTheme} title={dark ? "切换浅色主题" : "切换深色主题"}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
         <form className="login-form glass-panel" onSubmit={login}>
           <SiteLogo src={siteLogoUrl} alt="" width="48" height="48" />
@@ -622,8 +607,8 @@ export function AdminPanel({
           </div>
           <div className="admin-topbar-actions">
             <button type="button" onClick={onToggleTheme} title={dark ? "切换浅色主题" : "切换深色主题"} aria-label={dark ? "切换浅色主题" : "切换深色主题"}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
-            <button type="button" onClick={onClose} title="主页" aria-label="主页"><ArrowLeft size={15} />主页</button>
-            <button type="button" onClick={() => void logout()} title="退出" aria-label="退出"><LogOut size={15} />退出</button>
+            <a className="admin-home-link" href="/" target="_blank" rel="noopener noreferrer" title="主页" aria-label="主页"><ArrowLeft size={15} /></a>
+            <button type="button" onClick={() => void logout()} title="退出" aria-label="退出"><LogOut size={15} /></button>
           </div>
         </header>
 

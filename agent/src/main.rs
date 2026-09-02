@@ -63,6 +63,7 @@ const LIVE_REPORT_DIVISOR: u64 = 15;
 const BASIC_INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SLOW_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const PUBLIC_IP_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const PUBLIC_IP_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 const PUBLIC_IP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PUBLIC_IP_WAIT_BUDGET: Duration = Duration::from_secs(8);
 const PUBLIC_IP_V4_URL: &str = "https://ipv4.icanhazip.com/";
@@ -241,12 +242,31 @@ impl ClockCalibration {
 type SharedClock = Arc<Mutex<ClockCalibration>>;
 
 /// 双栈公网地址探测：分别请求按协议族锁死的 icanhazip 端点（Cloudflare 运营，
-/// 纯文本返回调用方出口 IP），记录最近一次成功的结果。主连接只用一个协议族，
-/// 这里补齐另一个；探测失败保留旧值，从未成功则为空。
+/// 纯文本返回调用方出口 IP）。短暂失败保留最近结果，持续失败则清空过期地址。
+#[derive(Default)]
+struct PublicIpValue {
+    address: Option<IpAddr>,
+    last_success: Option<Instant>,
+}
+
+impl PublicIpValue {
+    fn observe(&mut self, address: Option<IpAddr>, now: Instant) {
+        if let Some(address) = address {
+            self.address = Some(address);
+            self.last_success = Some(now);
+        } else if self
+            .last_success
+            .is_none_or(|at| now.saturating_duration_since(at) >= PUBLIC_IP_STALE_AFTER)
+        {
+            self.address = None;
+        }
+    }
+}
+
 #[derive(Default)]
 struct PublicIps {
-    v4: Option<IpAddr>,
-    v6: Option<IpAddr>,
+    v4: PublicIpValue,
+    v6: PublicIpValue,
 }
 
 #[derive(Clone, Default)]
@@ -273,23 +293,30 @@ impl PublicIpProbe {
         thread::spawn(move || {
             let v4 = probe_public_ip(PUBLIC_IP_V4_URL, false);
             let v6 = probe_public_ip(PUBLIC_IP_V6_URL, true);
+            let observed_at = Instant::now();
             let mut state = state.lock().unwrap();
-            if let Some(ip) = v4 {
-                state.v4 = Some(ip);
-            }
-            if let Some(ip) = v6 {
-                state.v6 = Some(ip);
-            }
+            state.v4.observe(v4, observed_at);
+            state.v6.observe(v6, observed_at);
             probing.store(false, Ordering::SeqCst);
         });
     }
 
     fn v4(&self) -> Option<String> {
-        self.state.lock().unwrap().v4.map(|ip| ip.to_string())
+        self.state
+            .lock()
+            .unwrap()
+            .v4
+            .address
+            .map(|ip| ip.to_string())
     }
 
     fn v6(&self) -> Option<String> {
-        self.state.lock().unwrap().v6.map(|ip| ip.to_string())
+        self.state
+            .lock()
+            .unwrap()
+            .v6
+            .address
+            .map(|ip| ip.to_string())
     }
 
     /// 一次性模式没有后续采样，等首轮探测落地（或预算耗尽）再出报告。
@@ -306,7 +333,7 @@ fn probe_public_ip(url: &str, ipv6: bool) -> Option<IpAddr> {
         .timeout_global(Some(PUBLIC_IP_PROBE_TIMEOUT))
         .build()
         .into();
-    let mut response = probe_agent
+    let response = probe_agent
         .get(url)
         .header("User-Agent", format!("nodeflare-agent/{VERSION}"))
         .call()
@@ -484,9 +511,7 @@ struct Report {
     gpu_usage: f64,
     gpu_model: String,
     agent_version: String,
-    #[serde(default)]
     ip_v4: String,
-    #[serde(default)]
     ip_v6: String,
     disk_read_bps: f64,
     disk_write_bps: f64,
@@ -2735,12 +2760,12 @@ mod tests {
         ack_d1_interval, ack_wss_interval, advance_deadline, clock_offset_from_http_date,
         corrected_timestamp, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
         live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
-        parse_pciconf_gpu_names, parse_probe_target, parse_public_ip, parse_system_profiler_gpu_names,
-        ping_latencies, ping_latency, prune_report_samples, release_asset_sha256,
-        sanitize_latency_tasks, update_check_jitter, valid_endpoint, version_triplet, CliOptions,
-        ClockCalibration, GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, Report,
-        CLOCK_CALIBRATION_MAX_AGE, MAX_LATENCY_TASKS, MAX_PENDING_LATENCY_RESULTS,
-        UPDATE_CHECK_JITTER_MAX_SECONDS,
+        parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
+        parse_system_profiler_gpu_names, ping_latencies, ping_latency, prune_report_samples,
+        release_asset_sha256, sanitize_latency_tasks, update_check_jitter, valid_endpoint,
+        version_triplet, CliOptions, ClockCalibration, GithubReleaseAsset, LatencyResult,
+        LatencyTask, LiveAck, PublicIpValue, Report, CLOCK_CALIBRATION_MAX_AGE, MAX_LATENCY_TASKS,
+        MAX_PENDING_LATENCY_RESULTS, PUBLIC_IP_STALE_AFTER, UPDATE_CHECK_JITTER_MAX_SECONDS,
     };
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
@@ -2759,6 +2784,23 @@ mod tests {
         assert_eq!(parse_public_ip("203.0.113.7", true), None);
         assert_eq!(parse_public_ip("not an ip", false), None);
         assert_eq!(parse_public_ip("", false), None);
+    }
+
+    #[test]
+    fn expires_public_ip_after_sustained_probe_failures() {
+        let started_at = Instant::now();
+        let address = "203.0.113.7".parse().unwrap();
+        let mut value = PublicIpValue::default();
+
+        value.observe(Some(address), started_at);
+        value.observe(
+            None,
+            started_at + PUBLIC_IP_STALE_AFTER - Duration::from_secs(1),
+        );
+        assert_eq!(value.address, Some(address));
+
+        value.observe(None, started_at + PUBLIC_IP_STALE_AFTER);
+        assert_eq!(value.address, None);
     }
 
     #[test]

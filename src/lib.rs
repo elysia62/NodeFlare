@@ -12,7 +12,7 @@ mod theme;
 mod turnstile;
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
@@ -812,10 +812,12 @@ pub(crate) fn validate_report(report: &AgentReport) -> Option<&'static str> {
     if report.agent_version.chars().count() > 80 {
         return Some("Agent 版本字段过长");
     }
-    for value in [report.ip_v4.as_str(), report.ip_v6.as_str()] {
-        if value.chars().count() > 45 || (!value.is_empty() && value.parse::<IpAddr>().is_err()) {
-            return Some("公网地址字段无效");
-        }
+    if report.ip_v4.chars().count() > 15
+        || (!report.ip_v4.is_empty() && report.ip_v4.parse::<Ipv4Addr>().is_err())
+        || report.ip_v6.chars().count() > 45
+        || (!report.ip_v6.is_empty() && report.ip_v6.parse::<Ipv6Addr>().is_err())
+    {
+        return Some("公网地址字段无效");
     }
     if report.disks.len() > 64
         || report.gpus.len() > 32
@@ -1317,7 +1319,9 @@ mod tests {
         valid_password_derived, valid_ping_target, valid_public_asset_url, validate_latency_task,
         validate_report, validate_server,
     };
-    use crate::{db::SECRET_MASK, models::AgentReport, models::LatencyTaskInput, models::ServerInput};
+    use crate::{
+        db::SECRET_MASK, models::AgentReport, models::LatencyTaskInput, models::ServerInput,
+    };
     use worker::{Method, Url};
 
     #[test]
@@ -1327,12 +1331,25 @@ mod tests {
         report.ip_v4 = "203.0.113.7".into();
         report.ip_v6 = "2001:db8::1".into();
         assert_eq!(validate_report(&report), None);
-        // 非空字段必须是合法 IP，空串表示该协议族不可用、放行。
+        report.ip_v4 = "2001:db8::1".into();
+        assert_eq!(validate_report(&report), Some("公网地址字段无效"));
+        report.ip_v4 = "203.0.113.7".into();
+        report.ip_v6 = "203.0.113.7".into();
+        assert_eq!(validate_report(&report), Some("公网地址字段无效"));
         report.ip_v4 = "not-an-ip".into();
+        report.ip_v6.clear();
         assert_eq!(validate_report(&report), Some("公网地址字段无效"));
-        report.ip_v4 = String::new();
-        report.ip_v6 = "2001:db8::1 extra".into();
-        assert_eq!(validate_report(&report), Some("公网地址字段无效"));
+        report.ip_v4.clear();
+        assert_eq!(validate_report(&report), None);
+    }
+
+    #[test]
+    fn requires_public_ip_fields_in_agent_reports() {
+        for field in ["ip_v4", "ip_v6"] {
+            let mut report = serde_json::to_value(AgentReport::default()).unwrap();
+            report.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<AgentReport>(report).is_err());
+        }
     }
 
     #[test]

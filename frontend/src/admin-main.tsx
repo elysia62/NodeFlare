@@ -60,7 +60,7 @@ function AdminApp() {
     const next = dark ? "light" : "dark";
     localStorage.setItem(THEME_KEY, next);
     setAppearance(next);
-  }} onClose={() => window.location.assign("/")} onChanged={() => void loadConfig()} />;
+  }} onChanged={() => void loadConfig()} />;
 }
 
 createRoot(document.getElementById("root")!).render(<StrictMode><AdminApp /></StrictMode>);
