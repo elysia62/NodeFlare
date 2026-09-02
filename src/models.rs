@@ -215,6 +215,11 @@ pub struct AgentReport {
     pub gpu_usage: f64,
     pub gpu_model: String,
     pub agent_version: String,
+    /// 双栈公网地址，agent 双栈探测的结果；空串表示该协议族不可用或未上报。
+    #[serde(default)]
+    pub ip_v4: String,
+    #[serde(default)]
+    pub ip_v6: String,
     pub disk_read_bps: f64,
     pub disk_write_bps: f64,
     pub disk_read_iops: f64,
@@ -244,6 +249,8 @@ pub struct ServerView {
     #[serde(serialize_with = "serialize_sqlite_bool")]
     pub auto_renewal: i64,
     pub last_ip: String,
+    pub ip_v4: Option<String>,
+    pub ip_v6: Option<String>,
     pub network_interface: String,
     pub reset_day: i64,
     pub report_interval: i64,

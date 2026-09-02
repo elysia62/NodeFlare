@@ -136,18 +136,24 @@ function ipFamily(ip: string): "v4" | "v6" | null {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) ? "v4" : null;
 }
 
-function ServerIpMeta({ ip, agentVersion, onCopy }: { ip: string; agentVersion: string | null; onCopy: (ip: string) => void }) {
-  const family = ipFamily(ip);
+function ServerIpMeta({ server, agentVersion, onCopy }: { server: AdminServer; agentVersion: string | null; onCopy: (ip: string) => void }) {
+  // 双栈探测上报的地址优先；旧版 agent 还没上报时回落到连接出口地址（last_ip）。
+  const family = ipFamily(server.last_ip);
+  const v4 = server.ip_v4 || (family === "v4" ? server.last_ip : "");
+  const v6 = server.ip_v6 || (family === "v6" ? server.last_ip : "");
+  const entries = [
+    { family: "v4" as const, ip: v4 },
+    { family: "v6" as const, ip: v6 },
+  ].filter((entry) => entry.ip);
   return (
     <div className="server-name-meta">
-      {family ? (
-        <>
-          <span className={`ip-badge ${family}`}>{family === "v6" ? "IPv6" : "IPv4"}</span>
-          <button type="button" className="ip-value" title={`点击复制：${ip}`} onClick={() => onCopy(ip)}>{ip}</button>
-        </>
-      ) : (
-        <span className="meta-item">{ip || "尚未上报 IP"}</span>
-      )}
+      {entries.map((entry) => (
+        <span className="server-ip-entry" key={entry.family}>
+          <span className={`ip-badge ${entry.family}`}>{entry.family === "v6" ? "IPv6" : "IPv4"}</span>
+          <button type="button" className="ip-value" title={`点击复制：${entry.ip}`} onClick={() => onCopy(entry.ip)}>{entry.ip}</button>
+        </span>
+      ))}
+      {!entries.length ? <span className="meta-item">{server.last_ip || "尚未上报 IP"}</span> : null}
       <span className="meta-dot">·</span>
       <span className="meta-item">{agentVersion ? `Agent v${agentVersion}` : "Agent 未上报版本"}</span>
     </div>
@@ -653,7 +659,7 @@ export function AdminPanel({
                         <button type="button" className="drag-handle" draggable onDragStart={(event) => startDrag(event, server.id)} onDragEnd={() => setDraggingId("")} title={`拖动排序：${server.name}`}><GripVertical size={15} /></button>
                         <Checkbox checked={selectedIds.includes(server.id)} onChange={() => toggleSelected(server.id)} ariaLabel={`选择 ${server.name}`} />
                         <span className={`status-dot ${settings && isOnline(server, settings.offline_threshold_seconds) ? "online" : ""}`} />
-                        <div className="server-name"><div className="server-name-main"><Flag region={server.region} size={17} /><strong>{server.name}</strong></div><ServerIpMeta ip={server.last_ip} agentVersion={server.agent_version} onCopy={(value) => void copyServerIp(value)} /></div>
+                        <div className="server-name"><div className="server-name-main"><Flag region={server.region} size={17} /><strong>{server.name}</strong></div><ServerIpMeta server={server} agentVersion={server.agent_version} onCopy={(value) => void copyServerIp(value)} /></div>
                         <div className="row-actions"><button className="icon-btn" disabled={index === 0} onClick={() => void move(index, -1)} title="上移"><ChevronUp size={15} /></button><button className="icon-btn" disabled={index === servers.length - 1} onClick={() => void move(index, 1)} title="下移"><ChevronDown size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => void showInstallCommand(server)} title="显示安装命令"><Download size={15} /></button><button className="icon-btn" onClick={() => openEditor(server)} title="编辑节点"><Pencil size={15} /></button><button className="icon-btn danger" onClick={() => void remove(server)} title="删除节点"><Trash2 size={15} /></button></div>
                       </div>
                     ))}

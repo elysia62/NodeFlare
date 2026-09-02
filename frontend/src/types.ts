@@ -206,6 +206,8 @@ export interface Server extends ServerSummary {
 export interface AdminServer extends ServerSummary {
   hidden: boolean;
   last_ip: string;
+  ip_v4: string | null;
+  ip_v6: string | null;
   network_interface: string;
   report_interval: number;
   collect_interval: number;

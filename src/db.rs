@@ -115,6 +115,8 @@ SELECT
   CAST(json_extract(m.state, '$.report.gpu_usage') AS REAL) AS gpu_usage,
   json_extract(m.state, '$.report.gpu_model') AS gpu_model,
   json_extract(m.state, '$.report.agent_version') AS agent_version,
+  json_extract(m.state, '$.report.ip_v4') AS ip_v4,
+  json_extract(m.state, '$.report.ip_v6') AS ip_v6,
   CAST(json_extract(m.state, '$.report.disk_read_bps') AS REAL) AS disk_read_bps,
   CAST(json_extract(m.state, '$.report.disk_write_bps') AS REAL) AS disk_write_bps,
   CAST(json_extract(m.state, '$.report.disk_read_iops') AS REAL) AS disk_read_iops,

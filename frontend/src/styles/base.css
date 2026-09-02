@@ -25,10 +25,10 @@
   --chart-grid: rgb(83 104 116 / 0.15);
   --shadow: 0 10px 32px rgb(31 48 58 / 0.09), inset 0 1px 0 rgb(255 255 255 / 0.58);
   --node-offline-bg: rgb(255 255 255 / 0.2);
-  /* Card geometry lives here so the grid, skeletons and the latency panels
-     cannot drift apart and make rows jump as data arrives. */
-  --node-card-min-height: 336px;
-  --node-card-carrier-min-height: 416px;
+  /* Card geometry lives here so the grid and the latency panels cannot drift
+     apart and make rows jump as data arrives. */
+  --node-card-min-height: 320px;
+  --node-card-carrier-min-height: 400px;
   --quality-panel-height: 44px;
   --carrier-panel-height: 124px;
   color: var(--foreground);

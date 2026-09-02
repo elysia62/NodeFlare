@@ -12,7 +12,7 @@ mod theme;
 mod turnstile;
 
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
@@ -812,6 +812,11 @@ pub(crate) fn validate_report(report: &AgentReport) -> Option<&'static str> {
     if report.agent_version.chars().count() > 80 {
         return Some("Agent 版本字段过长");
     }
+    for value in [report.ip_v4.as_str(), report.ip_v6.as_str()] {
+        if value.chars().count() > 45 || (!value.is_empty() && value.parse::<IpAddr>().is_err()) {
+            return Some("公网地址字段无效");
+        }
+    }
     if report.disks.len() > 64
         || report.gpus.len() > 32
         || report.disks.iter().any(|disk| {
@@ -1310,10 +1315,25 @@ mod tests {
         rewrite_remote_theme_index, same_origin, submitted_secret, valid_agent_mirror,
         valid_background_urls, valid_cloudflare_account_id, valid_cloudflare_api_token,
         valid_password_derived, valid_ping_target, valid_public_asset_url, validate_latency_task,
-        validate_server,
+        validate_report, validate_server,
     };
-    use crate::{db::SECRET_MASK, models::LatencyTaskInput, models::ServerInput};
+    use crate::{db::SECRET_MASK, models::AgentReport, models::LatencyTaskInput, models::ServerInput};
     use worker::{Method, Url};
+
+    #[test]
+    fn validates_report_public_ips() {
+        let mut report = AgentReport::default();
+        assert_eq!(validate_report(&report), None);
+        report.ip_v4 = "203.0.113.7".into();
+        report.ip_v6 = "2001:db8::1".into();
+        assert_eq!(validate_report(&report), None);
+        // 非空字段必须是合法 IP，空串表示该协议族不可用、放行。
+        report.ip_v4 = "not-an-ip".into();
+        assert_eq!(validate_report(&report), Some("公网地址字段无效"));
+        report.ip_v4 = String::new();
+        report.ip_v6 = "2001:db8::1 extra".into();
+        assert_eq!(validate_report(&report), Some("公网地址字段无效"));
+    }
 
     #[test]
     fn assigns_rate_limits_by_route() {

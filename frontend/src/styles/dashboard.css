@@ -59,11 +59,11 @@
 .os-icon, .os-icon-fallback { width: 16px; height: 16px; flex: 0 0 auto; object-fit: contain; }
 .os-icon-fallback { color: var(--muted-foreground); }
 .region-flag { display: inline-flex; min-width: 18px; flex: 0 0 auto; align-items: center; justify-content: center; line-height: 1; }
-.node-body { position: relative; display: flex; min-height: 0; flex: 1; flex-direction: column; justify-content: space-between; gap: 14px; padding: 0 16px 16px; }
+.node-body { position: relative; display: flex; min-height: 0; flex: 1; flex-direction: column; justify-content: space-between; gap: 8px; padding: 0 16px 16px; }
 .node-chips { display: flex; height: 19px; flex: 0 0 auto; align-items: center; gap: 6px; overflow: hidden; margin-top: -4px; }
 .node-chips span { min-width: 0; overflow: hidden; border-radius: 999px; padding: 2px 8px; color: var(--muted-foreground); background: color-mix(in srgb, var(--muted) 82%, transparent); font-size: 12px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .node-chips span + span { margin-left: auto; text-align: right; }
-.metric-grid { display: grid; gap: 12px 16px; grid-template-columns: 1fr 1fr; }
+.metric-grid { display: grid; gap: 10px 16px; grid-template-columns: 1fr 1fr; }
 .metric { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
 .metric.muted { opacity: .55; }
 .metric > div { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }

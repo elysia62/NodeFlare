@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -62,6 +62,11 @@ const LIVE_HINT_READ_TIMEOUT: Duration = Duration::from_millis(10);
 const LIVE_REPORT_DIVISOR: u64 = 15;
 const BASIC_INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SLOW_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const PUBLIC_IP_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const PUBLIC_IP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PUBLIC_IP_WAIT_BUDGET: Duration = Duration::from_secs(8);
+const PUBLIC_IP_V4_URL: &str = "https://ipv4.icanhazip.com/";
+const PUBLIC_IP_V6_URL: &str = "https://ipv6.icanhazip.com/";
 const RUNTIME_STATS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CLOCK_CALIBRATION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOCK_CALIBRATION_MIN_CHANGE_MS: i64 = 20_000;
@@ -235,6 +240,96 @@ impl ClockCalibration {
 
 type SharedClock = Arc<Mutex<ClockCalibration>>;
 
+/// 双栈公网地址探测：分别请求按协议族锁死的 icanhazip 端点（Cloudflare 运营，
+/// 纯文本返回调用方出口 IP），记录最近一次成功的结果。主连接只用一个协议族，
+/// 这里补齐另一个；探测失败保留旧值，从未成功则为空。
+#[derive(Default)]
+struct PublicIps {
+    v4: Option<IpAddr>,
+    v6: Option<IpAddr>,
+}
+
+#[derive(Clone, Default)]
+struct PublicIpProbe {
+    state: Arc<Mutex<PublicIps>>,
+    probing: Arc<AtomicBool>,
+    last_attempt: Arc<Mutex<Option<Instant>>>,
+}
+
+impl PublicIpProbe {
+    /// 距上次尝试超过刷新间隔且没有探测在进行时，后台起一轮探测（不阻塞采样）。
+    fn refresh(&self) {
+        let due = self
+            .last_attempt
+            .lock()
+            .unwrap()
+            .is_none_or(|at| at.elapsed() >= PUBLIC_IP_REFRESH_INTERVAL);
+        if !due || self.probing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        *self.last_attempt.lock().unwrap() = Some(Instant::now());
+        let state = Arc::clone(&self.state);
+        let probing = Arc::clone(&self.probing);
+        thread::spawn(move || {
+            let v4 = probe_public_ip(PUBLIC_IP_V4_URL, false);
+            let v6 = probe_public_ip(PUBLIC_IP_V6_URL, true);
+            let mut state = state.lock().unwrap();
+            if let Some(ip) = v4 {
+                state.v4 = Some(ip);
+            }
+            if let Some(ip) = v6 {
+                state.v6 = Some(ip);
+            }
+            probing.store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn v4(&self) -> Option<String> {
+        self.state.lock().unwrap().v4.map(|ip| ip.to_string())
+    }
+
+    fn v6(&self) -> Option<String> {
+        self.state.lock().unwrap().v6.map(|ip| ip.to_string())
+    }
+
+    /// 一次性模式没有后续采样，等首轮探测落地（或预算耗尽）再出报告。
+    fn wait_initial(&self) {
+        let deadline = Instant::now() + PUBLIC_IP_WAIT_BUDGET;
+        while self.probing.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(150));
+        }
+    }
+}
+
+fn probe_public_ip(url: &str, ipv6: bool) -> Option<IpAddr> {
+    let probe_agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(PUBLIC_IP_PROBE_TIMEOUT))
+        .build()
+        .into();
+    let mut response = probe_agent
+        .get(url)
+        .header("User-Agent", format!("nodeflare-agent/{VERSION}"))
+        .call()
+        .ok()?;
+    let mut body = String::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(128)
+        .read_to_string(&mut body)
+        .ok()?;
+    parse_public_ip(&body, ipv6)
+}
+
+/// 端点返回的协议族必须与请求的锁族一致，防止代理或劫持回一个错族地址。
+fn parse_public_ip(text: &str, ipv6: bool) -> Option<IpAddr> {
+    let ip: IpAddr = text.trim().parse().ok()?;
+    match (ipv6, ip) {
+        (true, IpAddr::V6(_)) | (false, IpAddr::V4(_)) => Some(ip),
+        _ => None,
+    }
+}
+
 struct LiveSender {
     pending: Arc<(Mutex<VecDeque<Report>>, Condvar)>,
     send_interval: Arc<Mutex<Duration>>,
@@ -389,6 +484,10 @@ struct Report {
     gpu_usage: f64,
     gpu_model: String,
     agent_version: String,
+    #[serde(default)]
+    ip_v4: String,
+    #[serde(default)]
+    ip_v6: String,
     disk_read_bps: f64,
     disk_write_bps: f64,
     disk_read_iops: f64,
@@ -1193,6 +1292,7 @@ struct Collector {
     basic_at: Instant,
     slow: SlowMetrics,
     slow_at: Instant,
+    public_ip: PublicIpProbe,
 }
 
 #[cfg(target_os = "linux")]
@@ -1207,6 +1307,7 @@ impl Collector {
             basic_at: Instant::now(),
             slow: SlowMetrics::default(),
             slow_at: Instant::now(),
+            public_ip: PublicIpProbe::default(),
         };
         collector.refresh_basic();
         collector.refresh_slow();
@@ -1295,6 +1396,7 @@ impl Collector {
         if self.slow_at.elapsed() >= SLOW_METRICS_REFRESH_INTERVAL {
             self.refresh_slow();
         }
+        self.public_ip.refresh();
 
         let mem = text("/proc/meminfo");
         let mem_total = mem_value(&mem, "MemTotal:");
@@ -1355,6 +1457,8 @@ impl Collector {
             gpu_usage: self.basic.gpu_usage,
             gpu_model: self.basic.gpu_model.clone(),
             agent_version: VERSION.to_string(),
+            ip_v4: self.public_ip.v4().unwrap_or_default(),
+            ip_v6: self.public_ip.v6().unwrap_or_default(),
             disk_read_bps: per_second(
                 io_now
                     .read_sectors
@@ -1399,6 +1503,7 @@ struct Collector {
     basic_at: Instant,
     slow: SlowMetrics,
     slow_at: Instant,
+    public_ip: PublicIpProbe,
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
@@ -1413,6 +1518,7 @@ impl Collector {
             basic_at: Instant::now(),
             slow: SlowMetrics::default(),
             slow_at: Instant::now(),
+            public_ip: PublicIpProbe::default(),
         };
         collector.refresh_basic();
         collector.refresh_slow();
@@ -1505,6 +1611,7 @@ impl Collector {
         if self.slow_at.elapsed() >= SLOW_METRICS_REFRESH_INTERVAL {
             self.refresh_slow();
         }
+        self.public_ip.refresh();
 
         let disk_metrics = self.slow.disks.clone();
         let tcp_connections = self.slow.tcp_connections;
@@ -1553,6 +1660,8 @@ impl Collector {
             gpu_usage: self.basic.gpu_usage,
             gpu_model: self.basic.gpu_model.clone(),
             agent_version: VERSION.to_string(),
+            ip_v4: self.public_ip.v4().unwrap_or_default(),
+            ip_v6: self.public_ip.v6().unwrap_or_default(),
             disk_read_bps: 0.0,
             disk_write_bps: 0.0,
             disk_read_iops: 0.0,
@@ -2394,6 +2503,10 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         .build()
         .into();
     let mut collector = Collector::new(&config);
+    collector.public_ip.refresh();
+    if once || print_only {
+        collector.public_ip.wait_initial();
+    }
     let mut next_collect = Instant::now() + Duration::from_secs(config.collect_interval);
     let mut next_latency: HashMap<String, Instant> = HashMap::new();
     let stats = Arc::new(runtime_stats::RuntimeStats::default());
@@ -2622,7 +2735,7 @@ mod tests {
         ack_d1_interval, ack_wss_interval, advance_deadline, clock_offset_from_http_date,
         corrected_timestamp, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
         live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
-        parse_pciconf_gpu_names, parse_probe_target, parse_system_profiler_gpu_names,
+        parse_pciconf_gpu_names, parse_probe_target, parse_public_ip, parse_system_profiler_gpu_names,
         ping_latencies, ping_latency, prune_report_samples, release_asset_sha256,
         sanitize_latency_tasks, update_check_jitter, valid_endpoint, version_triplet, CliOptions,
         ClockCalibration, GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, Report,
@@ -2634,6 +2747,19 @@ mod tests {
     use super::connection_counts_from_netstat;
     #[cfg(target_os = "linux")]
     use super::disk_device;
+
+    #[test]
+    fn parses_family_matched_public_ips() {
+        let v4: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(parse_public_ip("203.0.113.7\n", false), Some(v4));
+        assert_eq!(parse_public_ip("2001:db8::1", true), Some(v6));
+        // 协议族不匹配或无法解析时一律视为探测失败。
+        assert_eq!(parse_public_ip("2001:db8::1", false), None);
+        assert_eq!(parse_public_ip("203.0.113.7", true), None);
+        assert_eq!(parse_public_ip("not an ip", false), None);
+        assert_eq!(parse_public_ip("", false), None);
+    }
 
     #[test]
     fn parses_platform_gpu_names() {

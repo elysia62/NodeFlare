@@ -41,7 +41,7 @@ const DASHBOARD_HUB_NAME: &str = "dashboard";
 /// 代价：agent 升级后这些值要等下一次 bootstrap 轮询才刷新。
 /// 只影响展示，不影响任何判定 —— 告警和持久化读的是 `AgentReport` 本身，
 /// 剥离只发生在发往浏览器的副本上。
-const BROWSER_OMITTED_REPORT_FIELDS: [&str; 7] = [
+const BROWSER_OMITTED_REPORT_FIELDS: [&str; 9] = [
     "cpu_model",
     "os",
     "kernel",
@@ -49,6 +49,8 @@ const BROWSER_OMITTED_REPORT_FIELDS: [&str; 7] = [
     "virtualization",
     "gpu_model",
     "agent_version",
+    "ip_v4",
+    "ip_v6",
 ];
 
 fn server_hub_name(server_id: &str) -> String {
@@ -1747,6 +1749,8 @@ mod tests {
             gpu_usage: 0.0,
             gpu_model: String::new(),
             agent_version: "test".to_string(),
+            ip_v4: "203.0.113.7".to_string(),
+            ip_v6: String::new(),
             disk_read_bps: 0.0,
             disk_write_bps: 0.0,
             disk_read_iops: 0.0,
