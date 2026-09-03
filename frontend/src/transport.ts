@@ -28,9 +28,9 @@ function endpoint(serverId: string | null): URL {
 
 /**
  * WSS-only live feed. Returns a disposer; the caller owns when the connection
- * starts and stops. Reconnects on close, and asks the Worker to wake online
+ * starts and stops. Reconnects on close, and asks the server to wake online
  * Agents in one batch when the overview connection opens. The socket is
- * dropped while the tab is hidden and re-established on return, so the Worker
+ * dropped while the tab is hidden and re-established on return, so the server
  * only forwards live samples for pages somebody is actually watching; the
  * reconnect also re-arms the overview wake.
  */

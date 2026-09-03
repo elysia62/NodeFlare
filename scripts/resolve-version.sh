@@ -12,17 +12,6 @@ if [ -z "$raw" ]; then
   raw=$(git -C "$root_dir" describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
 fi
 if [ -z "$raw" ]; then
-  remote_version=$(
-    git -C "$root_dir" ls-remote --tags --refs origin \
-      'refs/tags/v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null |
-      awk '{ sub(/^refs\/tags\//, "", $2); print $2 }' |
-      grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
-      sort -V |
-      tail -n 1
-  ) || remote_version=
-  raw=$remote_version
-fi
-if [ -z "$raw" ]; then
   raw=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)",*$/\1/p' "$root_dir/package.json" | sed -n '1p')
 fi
 

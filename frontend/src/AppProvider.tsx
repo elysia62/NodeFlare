@@ -50,7 +50,7 @@ export interface AppState {
   openServer: (server: Server) => void;
   goHome: () => void;
   reload: () => Promise<void>;
-  login: (username: string, password: string, turnstileToken: string) => Promise<void>;
+  login: (username: string, password: string, turnstileToken: string, totpCode: string) => Promise<void>;
   verify: (token: string) => Promise<void>;
 }
 
@@ -87,6 +87,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const liveConnectedRef = useRef(false);
   const playbackRef = useRef<PlaybackBuffer>(new Map());
   const serversRef = useRef<Server[]>([]);
+  const themeSwitchFrame = useRef<number | null>(null);
 
   const dark = appearance ? appearance === "dark" : config.default_theme === "system" ? systemDark : config.default_theme === "dark";
   const background = resolveBackground(config.background_url, dark);
@@ -132,9 +133,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const login = useCallback(async (username: string, password: string, turnstileToken: string) => {
+  const login = useCallback(async (username: string, password: string, turnstileToken: string, totpCode: string) => {
     const derived = await derivePassword(password, config.password_client_salt);
-    const result = await api.login(username.trim(), password, derived, turnstileToken);
+    const result = await api.login(username.trim(), password, derived, turnstileToken, totpCode);
     setToken(result.token);
     setAccess("ok");
     await reload();
@@ -259,6 +260,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setAppearance((current) => {
       const resolved = current ?? (dark ? "dark" : "light");
       const next = resolved === "dark" ? "light" : "dark";
+
+      // Komari 优化：标记主题切换中，避免过渡动画闪烁
+      const root = document.documentElement;
+      root.dataset.themeSwitching = "true";
+      root.classList.toggle("dark", next === "dark");
+      root.style.colorScheme = next;
+
+      // 双帧延迟后移除标记
+      if (themeSwitchFrame.current !== null) {
+        cancelAnimationFrame(themeSwitchFrame.current);
+      }
+      themeSwitchFrame.current = requestAnimationFrame(() => {
+        themeSwitchFrame.current = requestAnimationFrame(() => {
+          delete root.dataset.themeSwitching;
+          themeSwitchFrame.current = null;
+        });
+      });
+
       localStorage.setItem("nodeflare-theme", next);
       return next;
     });
@@ -286,6 +305,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     login,
     verify,
   }), [access, background, blur, carrierLatency, config, configReady, dark, error, exchangeRates, goHome, liveMetrics, liveServers, loading, login, openServer, reload, selectedId, toggleTheme, verify]);
+
+  // 组件卸载时清理动画帧
+  useEffect(() => {
+    return () => {
+      if (themeSwitchFrame.current !== null) {
+        cancelAnimationFrame(themeSwitchFrame.current);
+      }
+    };
+  }, []);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

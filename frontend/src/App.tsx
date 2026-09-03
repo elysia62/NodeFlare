@@ -5,6 +5,7 @@ import { NodeCard } from "./components/NodeCard";
 import { SiteLogo } from "./components/SiteLogo";
 import { StatsBar } from "./components/StatsBar";
 import { TurnstileWidget } from "./components/TurnstileWidget";
+import { ApiError } from "./api";
 import { ui } from "./locale";
 
 const NodeDetails = lazy(() => import("./components/NodeDetails").then((module) => ({ default: module.NodeDetails })));
@@ -15,6 +16,8 @@ function LoginGate() {
   const [password, setPassword] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
   const [turnstileReset, setTurnstileReset] = useState(0);
+  const [totpCode, setTotpCode] = useState("");
+  const [totpRequired, setTotpRequired] = useState(false);
   const [busy, setBusy] = useState(false);
   const locale = config.locale;
 
@@ -24,10 +27,13 @@ function LoginGate() {
     setBusy(true);
     setError("");
     try {
-      await login(username, password, turnstileToken);
+      await login(username, password, turnstileToken, totpCode);
       setPassword("");
       setTurnstileToken("");
+      setTotpCode("");
+      setTotpRequired(false);
     } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 428) setTotpRequired(true);
       setError(reason instanceof Error ? reason.message : ui(locale, "登录失败", "Unable to sign in"));
       setTurnstileToken("");
       setTurnstileReset((value) => value + 1);
@@ -46,6 +52,7 @@ function LoginGate() {
       <form className="dashboard-login-form" onSubmit={(event) => void submit(event)}>
         <label><span>{ui(locale, "用户名", "Username")}</span><input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
         <label><span>{ui(locale, "密码", "Password")}</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+        {totpRequired ? <label><span>{ui(locale, "两步验证码", "Two-factor code")}</span><input autoFocus inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} required /></label> : null}
         {config.turnstile_login_enabled ? <div className="dashboard-login-turnstile"><TurnstileWidget siteKey={config.turnstile_site_key} action="admin-login" theme={dark ? "dark" : "light"} resetKey={turnstileReset} onVerify={setTurnstileToken} onError={setError} /></div> : null}
         {error ? <p className="form-error">{error}</p> : null}
         <button className="primary-btn dashboard-login-submit" disabled={busy || (config.turnstile_login_enabled && !turnstileToken)} type="submit"><KeyRound size={16} />{busy ? ui(locale, "登录中", "Signing in") : ui(locale, "登录", "Sign in")}</button>

@@ -1,106 +1,146 @@
 # NodeFlare
 
-基于 Rust、WebAssembly 和 Cloudflare Workers 的服务器监控，支持 Linux、Windows、macOS 和 FreeBSD Agent。
+NodeFlare 是一个自部署的服务器监控面板。服务端使用 Rust/Axum，通过 WebSocket 接收 Agent 指标并实时推送到浏览器，数据库可选 SQLite 或 PostgreSQL。
 
-## 界面预览
+当前版本不依赖 Cloudflare Workers、D1 或 Durable Objects。Cloudflare Turnstile 仅作为可选的人机验证功能。
 
-![仪表盘](docs/dashboard-light.png)
+## 快速开始
 
-![主题商店](docs/theme-store-light.png)
+需要稳定版 Rust、Bun 1.4+，以及常见的 C/C++ 构建工具。
 
-## 能力
-
-- 采集 CPU、GPU、负载、内存、磁盘、网络、连接数、进程和系统信息
-- TCP/ICMP 延迟检测，可按节点分配测试点和周期
-- NodeFlare Glass 风格总览、节点卡片、搜索/分组筛选、响应式深浅主题
-- 节点详情与历史图表，支持实时、1/4/24/168/720 小时范围
-- WebSocket 实时刷新与 Agent WSS 上报
-- 计费、到期、流量和多币种资产统计，Worker 每日更新汇率
-- 用户名密码登录、Cloudflare Turnstile 和节点隐藏
-- 节点管理、批量删除、拖拽排序和 Agent 在线配置
-- Telegram 通知、失败重试、资源/流量/离线/到期提醒和数据维护
-- 内置 NodeFlare Glass 主题，并提供远程主题商店
-- 远程主题支持 GitHub 仓库地址（默认 `main` 分支，也可用 `tree` 指定分支或子目录），Worker 代理 `index.html` 与 `assets/`
-- Rust Agent 支持 Linux x64/ARM64、Windows x64、macOS ARM64 和 FreeBSD x64（13 及以上），可按节点自动更新
-
-## 部署到 Cloudflare
-
-1. Fork 本仓库并打开 [Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages/create)，选择 **Import a repository** 后连接仓库。
-2. 在构建设置中将 **Build command（构建命令）清空**。Cloudflare 可能自动识别为 `bun run build`，需要手动删除；如果控制台不允许留空，可填写 `true`。
-3. 将 **Deploy command（部署命令）** 修改为 `bun run deploy`。该命令会按需构建前端和 Worker、应用 D1 迁移并完成部署，无需单独执行构建命令；同时配置 `bun run build` 会导致前端重复构建。
-4. 在 **高级设置** 中填写下表变量后部署。
-
-| 变量 | 必填/可选 | 说明 |
-| --- | ---: | --- |
-| `ADMIN_USERNAME` | 必填 | 管理员登录用户名 |
-| `ADMIN_PASSWORD` | 必填 | 初始管理员密码，勾选“加密”；后台保存密码哈希后可删除该变量 |
-| `SITE_NAME` | 可选 | 站点名称，未设置时使用 `NodeFlare` |
-| `TURNSTILE_SITE_KEY` | 可选 | Turnstile Site Key，无需加密；也可在后台设置 |
-| `TURNSTILE_SECRET_KEY` | 可选 | Turnstile Secret Key，勾选“加密”；也可在后台设置 |
-| `OFFLINE_THRESHOLD_SECONDS` | 可选 | 离线判定秒数，未设置时使用 180，范围 30-3600 |
-| `HISTORY_RETENTION_DAYS` | 可选 | 历史保留天数，未设置时使用 30，范围 1-30 |
-| `CF_USAGE_ACCOUNT_ID` | 可选 | Cloudflare 用量查询的账户 ID，不设置则不启用用量查询 |
-| `CF_USAGE_API_TOKEN` | 可选 | 用量查询 Token，勾选“加密”；需要 Account Analytics: Read，并授权对应账户 |
-
-## Agent 卸载
-
-Linux：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh | sudo sh -s -- --uninstall
+```bash
+cp backend/config.example.toml backend/config.toml
+$EDITOR backend/config.toml
+./start.sh
 ```
 
-FreeBSD：
+必须先替换示例中的 `admin_password` 占位值，否则服务会拒绝启动。`start.sh` 会安装尚未安装的前端依赖、构建公开页和管理页、编译后端，然后监听配置的地址。
 
-```sh
-fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-freebsd.sh | sudo sh -s -- --uninstall
+默认可从 `http://127.0.0.1:8080` 访问公开面板，管理页位于 `/admin`。首次登录后可在“登录与安全”中启用 TOTP 两步验证。
+
+## 配置
+
+配置项是扁平 TOML 字段，路径均相对于配置文件所在目录解析。完整模板见 [`backend/config.example.toml`](backend/config.example.toml)。
+
+SQLite 示例：
+
+```toml
+database_url = "sqlite://nodeflare.db"
+bind_addr = "127.0.0.1:8080"
+admin_username = "admin"
+admin_password = "replace-with-a-long-random-password"
 ```
 
-## API
+PostgreSQL 示例：
 
-| 方法 | 路径 | 用途 |
-| --- | --- | --- |
-| `GET` | `/api/bootstrap` | 前台配置、节点、汇率和访问状态 |
-| `GET` | `/api/config` | 公开站点配置 |
-| `GET` | `/api/exchange-rates` | D1 中的 CNY 基准汇率快照 |
-| `GET` | `/api/servers` | 公开节点和最新指标 |
-| `GET` | `/api/history/:id?hours=24` | 节点历史 |
-| `GET` | `/api/latency/:id?hours=24` | 节点延迟任务历史 |
-| `GET` | `/api/ws` | 实时 WebSocket |
-| `GET` | `/api/agent/ws` | Agent 配置同步与指标上报 WebSocket，节点 Bearer Token |
-| `POST` | `/api/live/wake` | 总览页连上实时通道后批量唤醒可见节点的实时推送 |
-| `POST` | `/api/admin/login` | 管理登录 |
-| `POST` | `/api/admin/logout` | 退出登录（清除会话 Cookie） |
-| `GET/POST` | `/api/admin/servers` | 管理节点 |
-| `GET` | `/api/admin/servers/:id/token` | 读取节点 Agent Token |
-| `GET/POST` | `/api/admin/latency-tasks` | 查询或创建延迟任务 |
-| `PATCH/DELETE` | `/api/admin/latency-tasks/:id` | 编辑或删除延迟任务 |
-| `GET/POST` | `/api/admin/alert-rules` | 查询或创建资源告警规则 |
-| `PATCH/DELETE` | `/api/admin/alert-rules/:id` | 编辑或删除资源告警规则 |
-| `GET/PUT` | `/api/admin/telegram` | 读写 Telegram 通知配置 |
-| `POST` | `/api/admin/telegram/test` | 发送 Telegram 测试消息 |
-| `PATCH/DELETE` | `/api/admin/servers/:id` | 编辑或删除节点 |
-| `PATCH` | `/api/admin/servers/order` | 更新全部节点顺序 |
-| `DELETE` | `/api/admin/servers` | 批量删除节点 |
-| `GET/PATCH` | `/api/admin/settings` | 读写站点与展示设置 |
-| `GET/POST` | `/api/admin/themes` | 查询或添加主题 |
-| `POST` | `/api/admin/themes/:id/activate` | 启用主题 |
-| `POST` | `/api/admin/themes/:id/preview` | 创建短时主题预览链接 |
-| `DELETE` | `/api/admin/themes/:id` | 删除主题 |
-| `GET` | `/api/admin/theme-settings` | 读取当前前端提供的主题设置描述 |
-| `POST` | `/api/turnstile/verify` | 校验全站 Turnstile 令牌 |
-| `GET` | `/api/admin/database` | 查询 D1 节点、历史和数据库统计 |
-| `GET` | `/api/admin/cloudflare-usage` | 查询 UTC 今日/昨日的 D1、Workers 与 Durable Objects 用量 |
-| `POST` | `/api/admin/exchange-rates/refresh` | 立即拉取并更新 D1 汇率快照 |
-| `DELETE` | `/api/admin/history` | 清理历史指标 |
+```toml
+database_url = "postgres://nodeflare:password@127.0.0.1/nodeflare"
+bind_addr = "127.0.0.1:8080"
+admin_username = "admin"
+admin_password = "replace-with-a-long-random-password"
+```
 
-## 主题
+两种数据库都会在启动时自动执行对应迁移。修改 `database_url` 只会初始化新数据库，不会自动搬运另一数据库中的现有数据。
 
-GitHub 仓库地址对应的仓库需提供 `index.html` 和 `assets/`（默认 `main` 分支，可用 `tree` 地址指定分支或子目录），并使用 NodeFlare 公开 API 读取数据。可选的 `theme.json` 可声明后台显示的主题设置项。启用第三方主题前请确认来源可信。
+Turnstile 默认关闭。需要时同时填写 `turnstile_site_key` 和 `turnstile_secret_key`，再从管理页开启公开面板或管理员登录保护；两项留空即可完全禁用。
 
-## 鸣谢
+## 部署 Agent
 
-感谢 [CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor) 项目提供的思路。
+在管理页创建节点后，复制对应平台的安装命令。Agent 的服务地址应是浏览器能够访问的 NodeFlare HTTPS 地址，例如：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh \
+  | sudo sh -s -- -e 'https://monitor.example.com' -t 'your-agent-token'
+```
+
+Agent 通过 `/api/agent/ws` 建立 WebSocket 连接。除 localhost 调试外，安装脚本要求 HTTPS。
+
+## 开发与构建
+
+```bash
+# 构建静态前端并启动 debug 后端
+./dev.sh
+
+# 单独运行 Vite；API 和 WebSocket 会代理到 127.0.0.1:8080
+bun run dev:frontend
+
+# 构建公开页、管理页和 release 后端
+bun run build
+
+# 构建 Agent
+bun run build:agent
+```
+
+运行测试：
+
+```bash
+cargo test --locked --manifest-path backend/Cargo.toml
+cargo test --locked --manifest-path agent/Cargo.toml
+bun test --cwd frontend
+```
+
+烟雾测试需要一个已经运行的 NodeFlare 实例，以及 `curl`、`jq`、Bun 和 Node.js：
+
+```bash
+MONITOR_BASE_URL=http://127.0.0.1:8080 \
+MONITOR_ADMIN_USERNAME=admin \
+MONITOR_ADMIN_PASSWORD='your-password' \
+sh scripts/smoke-test.sh
+```
+
+## HTTPS 与反向代理
+
+生产环境建议让 NodeFlare 只监听回环地址，由 Nginx、Caddy 或同类反向代理终止 TLS。反向代理必须保留 Host、协议和 WebSocket Upgrade 头。Nginx 示例：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+server {
+    listen 443 ssl;
+    server_name monitor.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+```
+
+`X-Forwarded-Proto: https` 也用于给管理员会话 Cookie 添加 `Secure`。NodeFlare 自身会为 API 和静态资源添加 CSP、禁止 iframe、MIME 嗅探限制等安全响应头。
+
+## 备份
+
+SQLite 默认文件是 `backend/nodeflare.db`。可在服务运行时使用 SQLite 的一致性备份命令：
+
+```bash
+sqlite3 backend/nodeflare.db ".backup '/var/backups/nodeflare.db'"
+```
+
+PostgreSQL 使用标准工具：
+
+```bash
+pg_dump --format=custom --file=/var/backups/nodeflare.dump \
+  'postgres://nodeflare:password@127.0.0.1/nodeflare'
+```
+
+恢复前请停止 NodeFlare，并先在独立环境验证备份。配置文件包含管理员初始凭据和可选的 Turnstile 密钥，也应通过权限受控的方式单独备份。
+
+## 架构
+
+- 后端：Rust、Axum、SQLx
+- 数据库：SQLite 或 PostgreSQL
+- 前端：React、TypeScript、Vite
+- 实时通信：浏览器 `/api/ws`，Agent `/api/agent/ws`
+- 认证：数据库中的不透明会话令牌，可选 TOTP 两步验证
 
 ## License
 

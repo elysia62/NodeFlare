@@ -55,7 +55,7 @@ const LIVE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const LIVE_QUEUE_CAPACITY: usize = 720;
 const MAX_PENDING_SPOOL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PENDING_SPOOL_LINE_BYTES: usize = 1024 * 1024;
-// D1 persistence can take a few hundred milliseconds; allow the ACK to arrive
+// Database persistence can take a few hundred milliseconds; allow the ACK to arrive
 // before continuing with the configured live interval.
 const LIVE_ACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const LIVE_HINT_READ_TIMEOUT: Duration = Duration::from_millis(10);
@@ -93,9 +93,9 @@ struct CliOptions {
     /// NodeFlare endpoint
     #[arg(short = 'e', value_name = "URL")]
     endpoint: String,
-    /// Path to a file containing the Agent token
-    #[arg(long, value_name = "PATH")]
-    token_file: PathBuf,
+    /// Agent token
+    #[arg(short = 't', value_name = "TOKEN")]
+    token: String,
     /// Initial report interval in seconds (15-3600)
     #[arg(short = 'i', value_name = "SECONDS", default_value_t = 60)]
     interval: u64,
@@ -1705,18 +1705,7 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
     if !(15..=3600).contains(&interval) {
         return Err("interval must be between 15 and 3600 seconds".into());
     }
-    let mut token_file = fs::File::open(&options.token_file)?;
-    let metadata = token_file.metadata()?;
-    if !metadata.is_file() || metadata.len() > 513 {
-        return Err("token file is invalid".into());
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o077 != 0 {
-        return Err("token file must not be accessible by group or other users".into());
-    }
-    let mut token = String::new();
-    token_file.read_to_string(&mut token)?;
-    let token = token.trim().to_string();
+    let token = options.token.clone();
     let endpoint = options.endpoint.clone();
     if token.is_empty() || token.len() > 512 || token.chars().any(char::is_whitespace) {
         return Err("token is invalid".into());
@@ -1796,7 +1785,7 @@ struct LiveAck {
     #[serde(rename = "persistedThroughTs")]
     persisted_through_ts: i64,
     #[serde(rename = "nextD1WriteAfterMs")]
-    next_d1_write_after_ms: u64,
+    next_persist_after_ms: u64,
     #[serde(rename = "nextWssReportAfterMs")]
     next_wss_report_after_ms: u64,
     #[serde(rename = "realtimeHint")]
@@ -1812,19 +1801,105 @@ struct LiveConfigMessage {
     config: RemoteConfig,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteTaskMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    task_id: String,
+    command: String,
+    script: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskResultMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    task_id: String,
+    status: String,
+    result: String,
+    exit_code: Option<i64>,
+}
+
+fn execute_remote_task(task: &RemoteTaskMessage) -> TaskResultMessage {
+    let task_id = task.task_id.clone();
+
+    // 优先执行 script，否则执行 command
+    let (shell, args) = if !task.script.is_empty() {
+        #[cfg(unix)]
+        {
+            ("sh", vec!["-c", task.script.as_str()])
+        }
+        #[cfg(target_os = "windows")]
+        {
+            ("cmd.exe", vec!["/C", task.script.as_str()])
+        }
+    } else if !task.command.is_empty() {
+        #[cfg(unix)]
+        {
+            ("sh", vec!["-c", task.command.as_str()])
+        }
+        #[cfg(target_os = "windows")]
+        {
+            ("cmd.exe", vec!["/C", task.command.as_str()])
+        }
+    } else {
+        return TaskResultMessage {
+            message_type: "task_result".to_string(),
+            task_id,
+            status: "failed".to_string(),
+            result: "No command or script provided".to_string(),
+            exit_code: Some(-1),
+        };
+    };
+
+    match Command::new(shell).args(&args).output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = if stderr.is_empty() {
+                stdout.to_string()
+            } else {
+                format!("{}\n{}", stdout.trim(), stderr.trim())
+            };
+
+            TaskResultMessage {
+                message_type: "task_result".to_string(),
+                task_id,
+                status: if output.status.success() {
+                    "success"
+                } else {
+                    "failed"
+                }
+                .to_string(),
+                result: combined.trim().to_string(),
+                exit_code: output.status.code().map(|c| c as i64),
+            }
+        }
+        Err(error) => TaskResultMessage {
+            message_type: "task_result".to_string(),
+            task_id,
+            status: "failed".to_string(),
+            result: format!("Execution error: {}", error),
+            exit_code: Some(-1),
+        },
+    }
+}
+
 fn ack_wss_interval(ack: &LiveAck) -> Duration {
     Duration::from_millis(ack.next_wss_report_after_ms)
         .clamp(Duration::from_secs(1), Duration::from_secs(3600))
 }
 
 fn ack_d1_interval(ack: &LiveAck) -> Duration {
-    Duration::from_millis(ack.next_d1_write_after_ms)
+    Duration::from_millis(ack.next_persist_after_ms)
         .clamp(Duration::from_secs(1), Duration::from_secs(3600))
 }
 
 enum LiveRead {
     Ack(LiveAck),
     Config(RemoteConfig),
+    RemoteTask(RemoteTaskMessage),
     Closed,
     Pending,
 }
@@ -1853,6 +1928,15 @@ fn read_live_ack(socket: &mut LiveSocket) -> Result<LiveRead> {
                         return Ok(LiveRead::Pending);
                     }
                     Ok(LiveRead::Config(message.config))
+                }
+                Some("remote_task") => {
+                    let Ok(task) = serde_json::from_value::<RemoteTaskMessage>(value) else {
+                        return Ok(LiveRead::Pending);
+                    };
+                    if task.message_type != "remote_task" || task.task_id.is_empty() {
+                        return Ok(LiveRead::Pending);
+                    }
+                    Ok(LiveRead::RemoteTask(task))
                 }
                 _ => Ok(LiveRead::Pending),
             }
@@ -1890,6 +1974,13 @@ fn wait_for_live_ack(
             LiveRead::Config(config) => {
                 if let Ok(mut target) = remote_config.lock() {
                     *target = Some(config);
+                }
+            }
+            LiveRead::RemoteTask(task) => {
+                // 执行任务并发送结果
+                let result = execute_remote_task(&task);
+                if let Ok(payload) = serde_json::to_string(&result) {
+                    let _ = socket.send(Message::Text(payload.into()));
                 }
             }
             LiveRead::Closed => return Ok(LiveRead::Closed),
@@ -2041,6 +2132,12 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                                 *target = Some(config);
                             }
                         }
+                        Ok(LiveRead::RemoteTask(task)) => {
+                            let result = execute_remote_task(&task);
+                            if let Ok(payload) = serde_json::to_string(&result) {
+                                let _ = connected.send(Message::Text(payload.into()));
+                            }
+                        }
                         Ok(LiveRead::Pending) => {}
                         Err(error) => {
                             eprintln!("live hint read failed: {error}");
@@ -2114,6 +2211,9 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                         *target = Some(config);
                     }
                     drop_socket = true;
+                }
+                Ok(LiveRead::RemoteTask(_task)) => {
+                    // 在 wait_for_live_ack 中已处理，这里不应该出现
                 }
                 Ok(LiveRead::Pending) => {
                     eprintln!("live ACK timed out");
@@ -2228,15 +2328,12 @@ fn prune_report_samples(samples: &mut Vec<Report>, now: i64) {
     }
 }
 
-fn pending_spool_path(token_file: &Path) -> PathBuf {
-    let name = token_file
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("nodeflare-token");
-    token_file
+fn pending_spool_path() -> Result<PathBuf> {
+    let executable = env::current_exe()?;
+    let directory = executable
         .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(".{name}.pending.jsonl"))
+        .ok_or("agent executable path has no parent directory")?;
+    Ok(directory.join("pending.jsonl"))
 }
 
 fn load_pending_spool(path: &Path) -> Result<Vec<Report>> {
@@ -2537,7 +2634,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
     let stats = Arc::new(runtime_stats::RuntimeStats::default());
     let mut latency_executor = LatencyExecutor::new(Arc::clone(&stats))?;
     let mut pending_results = Vec::new();
-    let spool_path = pending_spool_path(&options.token_file);
+    let spool_path = pending_spool_path()?;
     let mut pending_samples = load_pending_spool(&spool_path).unwrap_or_else(|error| {
         eprintln!("pending report spool ignored: {error}");
         Vec::new()
@@ -2753,7 +2850,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use super::{
@@ -2987,34 +3083,27 @@ mod tests {
             "nodeflare",
             "-e",
             "https://monitor.example.com",
-            "--token-file",
-            "/run/nodeflare/token",
+            "-t",
+            "agent-token",
             "-i",
             "60",
             "--once",
         ])
         .unwrap();
         assert_eq!(parsed.endpoint, "https://monitor.example.com");
-        assert_eq!(parsed.token_file, PathBuf::from("/run/nodeflare/token"));
+        assert_eq!(parsed.token, "agent-token");
         assert_eq!(parsed.interval, 60);
         assert!(parsed.once);
-        assert!(CliOptions::try_parse_from(["nodeflare", "--token-file"]).is_err());
-        assert!(CliOptions::try_parse_from([
-            "nodeflare",
-            "--token-file",
-            "first",
-            "--token-file",
-            "second"
-        ])
-        .is_err());
+        assert!(CliOptions::try_parse_from(["nodeflare", "-t"]).is_err());
+        assert!(CliOptions::try_parse_from(["nodeflare", "-t", "first", "-t", "second"]).is_err());
         assert!(CliOptions::try_parse_from([
             "nodeflare",
             "-e",
             "https://monitor.example.com",
+            "-t",
+            "agent-token",
             "--token-file",
             "/run/nodeflare/token",
-            "-s",
-            "server-a",
         ])
         .is_err());
         assert!(CliOptions::try_parse_from(["nodeflare", "--once", "--collect"]).is_err());
@@ -3066,7 +3155,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_samples_the_worker_would_reject_as_expired() {
+    fn drops_samples_the_server_would_reject_as_expired() {
         let mut samples = vec![
             Report {
                 timestamp: 1_000,

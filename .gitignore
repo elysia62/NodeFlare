@@ -1,0 +1,51 @@
+# 构建产物
+/build/
+/target/
+/backend/target/
+/backend/build/
+/agent/target/
+/frontend/dist/
+/frontend/admin-dist/
+/release/
+
+# 依赖
+/node_modules/
+/frontend/node_modules/
+
+# 数据库文件
+/backend/*.db
+/backend/*.db-shm
+/backend/*.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# 配置文件（包含密钥）
+/backend/config.toml
+config.toml
+
+# SQLx 编译时缓存
+/backend/.sqlx/
+.sqlx/
+
+# 本地运行状态
+*.log
+
+# 旧版部署遗留的本地密钥，避免迁移时误提交
+.dev.vars
+.dev.vars.*
+
+# 增量编译缓存。tsconfig 把它们指向 node_modules/.cache，
+# 这条只是兜住散落在别处的。
+*.tsbuildinfo
+
+# 编辑器与操作系统
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+
+# 本机 agent 工具目录，不属于项目
+/.agents/
+/.claude/
+/.codex/

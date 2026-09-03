@@ -5,7 +5,6 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
-  Cloud,
   CircleCheck,
   Coins,
   Copy,
@@ -26,6 +25,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sun,
+  Terminal,
   Trash2,
   Check,
   ExternalLink,
@@ -34,7 +34,7 @@ import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, use
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError, getToken, setToken } from "../api";
 import { formatByteSize, isOnline, parseByteSize } from "../format";
 import { derivePassword } from "../password";
-import { ASSET_CURRENCIES, type AdminServer, type CloudflareUsage, type Config, type DatabaseStats, type ExchangeRates, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue } from "../types";
+import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseStats, type ExchangeRates, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
 import { Checkbox } from "./Checkbox";
 import { TurnstileWidget } from "./TurnstileWidget";
 import { useDialog } from "./useDialog";
@@ -47,7 +47,7 @@ import pkg from "../../package.json";
 
 const VERSION = import.meta.env.VITE_NODEFLARE_VERSION || pkg.version;
 
-type AdminTab = "servers" | "latency" | "appearance" | "themes" | "themeSettings" | "alerts" | "security" | "data" | "about";
+type AdminTab = "servers" | "latency" | "appearance" | "themes" | "themeSettings" | "alerts" | "security" | "data" | "remote" | "about";
 type AgentPlatform = "linux" | "windows" | "macos" | "freebsd";
 
 interface AgentInstallInfo {
@@ -63,7 +63,8 @@ const adminPages: Record<AdminTab, { title: string; description: string }> = {
   themeSettings: { title: "主题设置", description: "调整当前前端主题提供的显示选项" },
   alerts: { title: "通知", description: "配置 Telegram 通知和资源告警阈值" },
   security: { title: "登录与安全", description: "管理管理员账号和 Cloudflare Turnstile 防护" },
-  data: { title: "监控数据库", description: "查看 D1 用量、汇率状态并维护历史数据" },
+  data: { title: "监控数据库", description: "查看数据库统计、汇率状态并维护历史数据" },
+  remote: { title: "远程执行", description: "向在线节点发送命令或脚本并查看执行结果" },
   about: { title: "关于", description: "版本信息与项目地址" },
 };
 
@@ -180,6 +181,8 @@ export function AdminPanel({
   const [password, setPassword] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
   const [turnstileReset, setTurnstileReset] = useState(0);
+  const [loginTotpCode, setLoginTotpCode] = useState("");
+  const [loginTotpRequired, setLoginTotpRequired] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -189,7 +192,6 @@ export function AdminPanel({
   const [draggingId, setDraggingId] = useState("");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [database, setDatabase] = useState<DatabaseStats | null>(null);
-  const [cloudflareUsage, setCloudflareUsage] = useState<CloudflareUsage | null>(null);
   const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [themes, setThemes] = useState<Theme[]>([]);
   const [themeName, setThemeName] = useState("");
@@ -208,16 +210,32 @@ export function AdminPanel({
   const [rxBaseBytes, setRxBaseBytes] = useState(0);
   const [txBaseBytes, setTxBaseBytes] = useState(0);
   const [installPlatform, setInstallPlatform] = useState<AgentPlatform>("linux");
+  const [selectedServerId, setSelectedServerId] = useState<string>("");
+  const [remoteCommand, setRemoteCommand] = useState("");
+  const [remoteScript, setRemoteScript] = useState("");
+  const [remoteMode, setRemoteMode] = useState<"command" | "script">("command");
+  const [remoteTasks, setRemoteTasks] = useState<RemoteTask[]>([]);
+  const [remoteTotpCode, setRemoteTotpCode] = useState("");
+  const [twoFactorStatus, setTwoFactorStatus] = useState<TotpStatus | null>(null);
+  const [twoFactorSetup, setTwoFactorSetup] = useState<TotpSetup | null>(null);
+  const [twoFactorCode, setTwoFactorCode] = useState("");
+
 
   const load = useCallback(async () => {
     if (!getToken()) return;
     setBusy(true);
     setError("");
     try {
-      const [serverResult, settingsResult, themesResult] = await Promise.all([api.adminServers(), api.settings(), api.themes()]);
+      const [serverResult, settingsResult, themesResult, twoFactorResult] = await Promise.all([
+        api.adminServers(),
+        api.settings(),
+        api.themes(),
+        api.twoFactorStatus(),
+      ]);
       setServers(serverResult.servers);
       setThemes(themesResult.themes);
       setSettings(settingsResult);
+      setTwoFactorStatus(twoFactorResult);
       setAuthenticated(true);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) {
@@ -262,13 +280,16 @@ export function AdminPanel({
     setError("");
     try {
       const passwordDerived = await derivePassword(password, config.password_client_salt);
-      const result = await api.login(username.trim(), password, passwordDerived, turnstileToken);
+      const result = await api.login(username.trim(), password, passwordDerived, turnstileToken, loginTotpCode);
       setToken(result.token);
       setPassword("");
       setTurnstileToken("");
+      setLoginTotpCode("");
+      setLoginTotpRequired(false);
       setAuthenticated(true);
       await load();
     } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 428) setLoginTotpRequired(true);
       setError(reason instanceof Error ? reason.message : "登录失败");
       setTurnstileToken("");
       setTurnstileReset((value) => value + 1);
@@ -465,13 +486,6 @@ export function AdminPanel({
     finally { setBusy(false); }
   }
 
-  async function loadCloudflareUsage() {
-    setBusy(true); setError("");
-    try { setCloudflareUsage(await api.cloudflareUsage()); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "读取 Cloudflare 用量失败"); }
-    finally { setBusy(false); }
-  }
-
   async function loadThemeSettings() {
     setBusy(true); setError("");
     try { setThemeSettingsSchema(await api.themeSettings()); }
@@ -544,6 +558,53 @@ export function AdminPanel({
     try { await api.logout(); }
     finally {
       setToken(""); setAuthenticated(false); setServers([]); setSettings(null); setSelectedIds([]);
+      setTwoFactorStatus(null); setTwoFactorSetup(null); setTwoFactorCode(""); setRemoteTotpCode("");
+    }
+  }
+
+  async function setupTwoFactor() {
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const setup = await api.setupTwoFactor();
+      setTwoFactorSetup(setup);
+      setTwoFactorStatus({ enabled: false, has_secret: true });
+      setTwoFactorCode("");
+      setNotice("两步验证密钥已生成，请先加入验证器再启用");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "生成两步验证密钥失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function enableTwoFactor() {
+    if (!/^\d{6}$/.test(twoFactorCode)) { setError("请输入 6 位两步验证码"); return; }
+    setBusy(true); setError(""); setNotice("");
+    try {
+      await api.enableTwoFactor(twoFactorCode);
+      setTwoFactorStatus({ enabled: true, has_secret: true });
+      setTwoFactorSetup(null);
+      setTwoFactorCode("");
+      setNotice("两步验证已启用");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "启用两步验证失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function disableTwoFactor() {
+    if (!/^\d{6}$/.test(twoFactorCode)) { setError("请输入 6 位两步验证码"); return; }
+    setBusy(true); setError(""); setNotice("");
+    try {
+      await api.disableTwoFactor(twoFactorCode);
+      setTwoFactorStatus({ enabled: false, has_secret: true });
+      setTwoFactorCode("");
+      setNotice("两步验证已禁用");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "禁用两步验证失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function copyTwoFactorValue(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setNotice("已复制");
+    } catch {
+      setError("复制失败，请手动选择复制");
     }
   }
 
@@ -583,6 +644,55 @@ export function AdminPanel({
   };
   const siteLogoUrl = settings ? settings.logo_url : config.logo_url;
 
+  const createRemoteTask = async () => {
+    if (!selectedServerId) {
+      setError("请选择服务器");
+      return;
+    }
+    if (remoteMode === "command" && !remoteCommand.trim()) {
+      setError("请输入命令");
+      return;
+    }
+    if (remoteMode === "script" && !remoteScript.trim()) {
+      setError("请输入脚本");
+      return;
+    }
+    if (twoFactorStatus?.enabled && !/^\d{6}$/.test(remoteTotpCode)) {
+      setError("远程执行需要 6 位两步验证码");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    try {
+      const data = await api.createRemoteTask({
+        server_id: selectedServerId,
+        command: remoteMode === "command" ? remoteCommand : "",
+        script: remoteMode === "script" ? remoteScript : "",
+        totp_code: remoteTotpCode,
+      });
+      setNotice(`任务已创建: ${data.task_id}`);
+      setRemoteCommand("");
+      setRemoteScript("");
+      setRemoteTotpCode("");
+      void loadRemoteTasks(selectedServerId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "创建任务失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadRemoteTasks = async (serverId = selectedServerId) => {
+    if (!serverId) return;
+
+    try {
+      setRemoteTasks(await api.remoteTasks(serverId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载任务列表失败");
+    }
+  };
+
   return (
     <div className={`admin-page ${dark ? "admin-dark" : ""}`}>
       {/* toast 的定位是按后台的顶栏算的；登录页没有顶栏，那里的错误走表单内提示 */}
@@ -595,9 +705,10 @@ export function AdminPanel({
           <div className="login-copy"><h1>管理员登录</h1><p>{config.site_name}</p></div>
           <label><span>用户名</span><input autoFocus type="text" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required aria-invalid={error ? true : undefined} aria-describedby={error ? "login-error" : undefined} /></label>
           <label><span>密码</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required aria-invalid={error ? true : undefined} aria-describedby={error ? "login-error" : undefined} /></label>
-          {config.turnstile_login_enabled || config.turnstile_enabled ? <div className="login-turnstile"><TurnstileWidget siteKey={config.turnstile_site_key} action="admin-login" theme={dark ? "dark" : "light"} resetKey={turnstileReset} onVerify={setTurnstileToken} onError={setError} /></div> : null}
+          {loginTotpRequired ? <label><span>两步验证码</span><input autoFocus inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={loginTotpCode} onChange={(event) => setLoginTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} required aria-invalid={error ? true : undefined} aria-describedby={error ? "login-error" : undefined} /></label> : null}
+          {config.turnstile_login_enabled ? <div className="login-turnstile"><TurnstileWidget siteKey={config.turnstile_site_key} action="admin-login" theme={dark ? "dark" : "light"} resetKey={turnstileReset} onVerify={setTurnstileToken} onError={setError} /></div> : null}
           {error ? <p className="login-error" id="login-error" role="alert"><CircleAlert size={15} aria-hidden="true" />{error}</p> : null}
-          <button className="primary-btn login-submit" disabled={busy || ((config.turnstile_login_enabled || config.turnstile_enabled) && !turnstileToken)} type="submit"><KeyRound size={15} />{busy ? "验证中" : "登录"}</button>
+          <button className="primary-btn login-submit" disabled={busy || (config.turnstile_login_enabled && !turnstileToken)} type="submit"><KeyRound size={15} />{busy ? "验证中" : "登录"}</button>
         </form>
       </div> : <section className="admin-shell" aria-label="管理面板">
         <header className="admin-topbar">
@@ -629,6 +740,7 @@ export function AdminPanel({
                 <button type="button" className={tab === "alerts" ? "active" : ""} aria-current={tab === "alerts" ? "page" : undefined} onClick={() => selectTab("alerts")}><AlertTriangle size={17} />通知</button>
                 <button type="button" className={tab === "security" ? "active" : ""} aria-current={tab === "security" ? "page" : undefined} onClick={() => selectTab("security")}><ShieldCheck size={17} />登录与安全</button>
                 <button type="button" className={tab === "data" ? "active" : ""} aria-current={tab === "data" ? "page" : undefined} onClick={() => { selectTab("data"); if (!database) void loadDatabase(); }}><Database size={17} />监控数据库</button>
+                <button type="button" className={tab === "remote" ? "active" : ""} aria-current={tab === "remote" ? "page" : undefined} onClick={() => selectTab("remote")}><Terminal size={17} />远程执行</button>
                 <button type="button" className={tab === "about" ? "active" : ""} aria-current={tab === "about" ? "page" : undefined} onClick={() => selectTab("about")}><Info size={17} />关于</button>
               </nav>
             </aside>
@@ -711,23 +823,30 @@ export function AdminPanel({
                   {tab === "security" ? <>
                     <div className="section-title"><ShieldCheck size={15} />账号与 Cloudflare 防护</div>
                     <div className="form-grid"><label><span>管理员用户名</span><input autoComplete="username" value={settings.admin_username} onChange={(event) => updateSettings("admin_username", event.target.value)} /></label><label><span>新密码（留空不修改）</span><input autoComplete="new-password" type="password" value={settings.new_password || ""} onChange={(event) => updateSettings("new_password", event.target.value)} placeholder="至少 8 个字符" /></label></div>
+                    <div className="two-factor-panel">
+                      <div className="two-factor-head"><div><div className="section-subtitle">TOTP 两步验证</div><p className="settings-hint">登录与远程执行可使用验证器生成的 6 位动态验证码保护。</p></div><span className={`two-factor-status ${twoFactorStatus?.enabled ? "enabled" : ""}`}>{twoFactorStatus?.enabled ? "已启用" : twoFactorStatus ? "未启用" : "读取中"}</span></div>
+                      {twoFactorSetup ? <div className="two-factor-setup">
+                        <label><span>验证器密钥</span><div className="copy-field"><input readOnly value={twoFactorSetup.secret} /><button type="button" className="secondary-btn compact" onClick={() => void copyTwoFactorValue(twoFactorSetup.secret)}><Copy size={14} />复制</button></div></label>
+                        <label><span>配置 URI</span><div className="copy-field"><input readOnly value={twoFactorSetup.uri} /><button type="button" className="secondary-btn compact" onClick={() => void copyTwoFactorValue(twoFactorSetup.uri)}><Copy size={14} />复制</button></div></label>
+                        <p className="settings-hint">将密钥或 URI 加入 Google Authenticator、Aegis、2FAS 等验证器，再输入当前验证码确认。</p>
+                      </div> : null}
+                      {twoFactorStatus?.enabled ? <div className="two-factor-actions"><label><span>当前验证码</span><input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={twoFactorCode} onChange={(event) => setTwoFactorCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="000000" /></label><button type="button" className="danger-btn" disabled={busy} onClick={() => void disableTwoFactor()}>禁用两步验证</button></div> : <div className="two-factor-actions">
+                        {twoFactorSetup ? <label><span>当前验证码</span><input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={twoFactorCode} onChange={(event) => setTwoFactorCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="000000" /></label> : <p className="settings-hint">{twoFactorStatus?.has_secret ? "已有未启用的密钥；重新生成后，旧密钥会失效。" : "尚未生成两步验证密钥。"}</p>}
+                        <button type="button" className="secondary-btn" disabled={busy} onClick={() => void setupTwoFactor()}>{twoFactorStatus?.has_secret ? "重新生成密钥" : "生成密钥"}</button>
+                        {twoFactorSetup ? <button type="button" className="primary-btn" disabled={busy} onClick={() => void enableTwoFactor()}>启用两步验证</button> : null}
+                      </div>}
+                    </div>
                     <div className="form-grid"><Toggle label="保护公开仪表盘" checked={settings.turnstile_enabled} onChange={(value) => updateSettings("turnstile_enabled", value)} /><Toggle label="保护管理员登录" checked={settings.turnstile_login_enabled} onChange={(value) => updateSettings("turnstile_login_enabled", value)} /></div>
                     <div className="form-grid"><label><span>Turnstile Site Key</span><input autoComplete="off" type="password" value={settings.turnstile_site_key} onChange={(event) => updateSettings("turnstile_site_key", event.target.value)} /></label><label><span>Turnstile Secret Key</span><input autoComplete="off" type="password" value={settings.turnstile_secret_key} onChange={(event) => updateSettings("turnstile_secret_key", event.target.value)} /></label></div>
-                    <p className="settings-hint">留空则读取后台配置。</p>
+                    <p className="settings-hint">已配置的密钥显示为 ********；两项同时清空可禁用 Turnstile。</p>
                   </> : null}
 
                   {tab === "data" ? <>
-                    <div className="section-title"><Database size={15} />D1 数据维护</div>
+                    <div className="section-title"><Database size={15} />数据库维护</div>
                     <div className="data-stat-grid">{database ? <><DataStat label="节点" value={database.server_count} /><DataStat label="在线" value={database.online_count} /><DataStat label="历史行数" value={database.history_rows.toLocaleString()} /></> : <p className="settings-hint">正在读取数据库统计...</p>}</div>
                     <div className="usage-section">
-                      <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取 D1 汇率快照"}</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={15} />立即更新</button></div>
+                      <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取汇率快照"}</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={15} />立即更新</button></div>
                       {exchangeRates ? <div className="usage-table-wrap"><table className="usage-table"><thead><tr><th>币种</th><th>1 CNY 可兑换</th></tr></thead><tbody>{ASSET_CURRENCIES.filter((currency) => currency !== "CNY").map((currency) => <tr key={currency}><th scope="row">{currency}</th><td>{exchangeRates.rates[currency]?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "--"}</td></tr>)}</tbody></table></div> : <div className="usage-empty">尚未读取</div>}
-                    </div>
-                    <div className="usage-section">
-                      <div className="usage-head"><div><div className="section-title"><Cloud size={15} />Cloudflare 用量</div><p className="settings-hint">统计周期使用 UTC</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void loadCloudflareUsage()}><RotateCw size={15} />{cloudflareUsage ? "刷新用量" : "查询用量"}</button></div>
-                      <div className="form-grid"><label><span>Cloudflare Account ID</span><input autoComplete="off" type="password" maxLength={32} value={settings.cloudflare_account_id} onChange={(event) => updateSettings("cloudflare_account_id", event.target.value)} placeholder="32 位账户 ID" /></label><label><span>Cloudflare API Token</span><input autoComplete="off" type="password" value={settings.cloudflare_api_token} onChange={(event) => updateSettings("cloudflare_api_token", event.target.value)} placeholder="Account Analytics: Read" /></label></div>
-                      <div className="usage-config-actions"><p className="settings-hint">Token 需要账户级 Account Analytics: Read 权限，并授权对应账户；留空读取 Worker Secret。</p><button type="submit" className="primary-btn compact" disabled={busy}><Save size={15} />保存用量配置</button></div>
-                      {cloudflareUsage ? <><div className="usage-table-wrap"><table className="usage-table cloudflare-usage-table"><thead><tr><th>周期</th><th>D1 读取</th><th>D1 写入</th><th>Workers 请求</th><th>DO 请求（估算）</th><th>DO 时长 (GB-s)</th></tr></thead><tbody><UsageRow label="今日" usage={cloudflareUsage.today} /><UsageRow label="昨日" usage={cloudflareUsage.yesterday} /></tbody></table></div><div className="usage-do-breakdown"><UsageDoBreakdown label="今日" usage={cloudflareUsage.today} /><UsageDoBreakdown label="昨日" usage={cloudflareUsage.yesterday} /></div></> : <div className="usage-empty">尚未读取</div>}
                     </div>
                     <div className="data-actions"><button type="button" className="secondary-btn" onClick={() => void loadDatabase()}>刷新统计</button><button type="button" className="danger-btn" onClick={() => void clearHistory()}><Trash2 size={15} />清空历史指标</button></div>
                     <p className="settings-hint">清空历史不会删除节点、密钥或最新状态。</p>
@@ -735,9 +854,81 @@ export function AdminPanel({
 
                   {tab !== "data" ? <div className="form-actions"><button className="primary-btn" disabled={busy}><Save size={15} />保存{tab === "security" ? "账号与安全设置" : "设置"}</button></div> : null}
                 </form>
+              ) : tab === "remote" ? (
+                <div className="admin-section">
+                  <div className="section-head"><h3>创建远程任务</h3>{selectedServerId ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void loadRemoteTasks(selectedServerId)}><RotateCw size={14} />刷新任务</button> : null}</div>
+                  <div className="form-grid">
+                    <label>
+                      <span>目标服务器</span>
+                      <select value={selectedServerId} onChange={(e) => { const serverId = e.target.value; setSelectedServerId(serverId); if (serverId) void loadRemoteTasks(serverId); else setRemoteTasks([]); }}>
+                        <option value="">请选择服务器</option>
+                        {servers.map((server) => (
+                          <option key={server.id} value={server.id}>{server.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="segmented" role="group" aria-label="执行模式">
+                    <button type="button" className={remoteMode === "command" ? "active" : ""} aria-pressed={remoteMode === "command"} onClick={() => setRemoteMode("command")}>命令模式</button>
+                    <button type="button" className={remoteMode === "script" ? "active" : ""} aria-pressed={remoteMode === "script"} onClick={() => setRemoteMode("script")}>脚本模式</button>
+                  </div>
+                  {remoteMode === "command" ? (
+                    <label>
+                      <span>命令</span>
+                      <input
+                        value={remoteCommand}
+                        onChange={(e) => setRemoteCommand(e.target.value)}
+                        placeholder="例如: df -h"
+                      />
+                    </label>
+                  ) : (
+                    <label>
+                      <span>脚本内容</span>
+                      <textarea
+                        rows={8}
+                        value={remoteScript}
+                        onChange={(e) => setRemoteScript(e.target.value)}
+                        placeholder="输入 Bash 脚本..."
+                      />
+                    </label>
+                  )}
+                  {twoFactorStatus?.enabled ? <label><span>两步验证码</span><input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={remoteTotpCode} onChange={(event) => setRemoteTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="执行前输入 6 位验证码" /></label> : null}
+                  <div className="form-actions">
+                    <button className="primary-btn" disabled={busy || !selectedServerId} onClick={() => void createRemoteTask()}>
+                      <Terminal size={15} />执行任务
+                    </button>
+                  </div>
+
+                  {selectedServerId && remoteTasks.length > 0 ? (
+                    <>
+                      <div className="section-head"><h3>任务历史</h3></div>
+                      <div className="task-list">
+                        {remoteTasks.map((task) => (
+                          <div key={task.id} className="task-item">
+                            <div className="task-header">
+                              <span className={`task-status ${task.status}`}>{task.status}</span>
+                              <code className="task-id">{task.id}</code>
+                              <span className="task-time">{new Date(task.requested_at * 1000).toLocaleString()}</span>
+                            </div>
+                            <div className="task-command">
+                              <strong>{task.command || "脚本执行"}</strong>
+                            </div>
+                            {task.status !== "pending" ? (
+                              <details>
+                                <summary>查看结果</summary>
+                                <pre className="task-result">{task.result}</pre>
+                                {task.exit_code !== null ? <div>退出码: {task.exit_code}</div> : null}
+                              </details>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
+                </div>
               ) : tab === "about" ? (
                 <div className="admin-section about-page">
-                  <div className="about-brand"><SiteLogo alt="" width="52" height="52" /><div><strong>NodeFlare</strong><small>基于 Rust、WebAssembly 和 Cloudflare Workers 的服务器监控</small></div></div>
+                  <div className="about-brand"><SiteLogo alt="" width="52" height="52" /><div><strong>NodeFlare</strong><small>基于 Rust、Axum、SQLite / PostgreSQL 与 WebSocket 的服务器监控</small></div></div>
                   <div className="about-rows">
                     <div className="about-row"><span>版本</span><strong>v{VERSION}</strong></div>
                     <div className="about-row"><span>项目地址</span><a href="https://github.com/imengying/NodeFlare" target="_blank" rel="noreferrer">github.com/imengying/NodeFlare<ExternalLink size={13} /></a></div>
@@ -787,12 +978,4 @@ function ThemeOption({ field, value, onChange }: { field: ThemeSettingField; val
 
 function DataStat({ label, value }: { label: string; value: number | string }) {
   return <div className="data-stat"><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function UsageRow({ label, usage }: { label: string; usage: CloudflareUsage["today"] }) {
-  return <tr><th scope="row">{label}</th><td>{usage.rows_read.toLocaleString()}</td><td>{usage.rows_written.toLocaleString()}</td><td>{usage.workers_requests.toLocaleString()}</td><td>{usage.durable_objects_requests.toLocaleString()}</td><td>{usage.durable_objects_duration.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td></tr>;
-}
-
-function UsageDoBreakdown({ label, usage }: { label: string; usage: CloudflareUsage["today"] }) {
-  return <div><strong>{label}</strong><span>HTTP {usage.durable_objects_http_requests.toLocaleString()}</span><span>休眠唤醒 {usage.durable_objects_hibernation_wakeups.toLocaleString()}</span><span>WS 入站 {usage.durable_objects_inbound_websocket_messages.toLocaleString()}</span><span>WS 出站 {usage.durable_objects_outbound_websocket_messages.toLocaleString()}</span><small>每 {usage.durable_objects_request_billing_ratio} 条入站消息折算 1 次请求</small></div>;
 }

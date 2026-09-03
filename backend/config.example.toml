@@ -1,0 +1,31 @@
+# NodeFlare 配置文件示例
+# 复制为 config.toml 并根据需要修改
+
+# 数据库连接 URL
+# SQLite: sqlite://path/to/db.sqlite 或 sqlite://nodeflare.db
+# PostgreSQL: postgres://user:password@localhost/nodeflare
+database_url = "sqlite://nodeflare.db"
+
+# 服务器监听地址
+bind_addr = "127.0.0.1:8080"
+
+# 管理员用户名
+admin_username = "admin"
+
+# 管理员密码（8-128 个字符；启动前必须替换此占位值）
+admin_password = "CHANGE_ME_WITH_A_STRONG_PASSWORD"
+
+# Cloudflare Turnstile 站点密钥（公开）
+# 留空则禁用 Turnstile
+turnstile_site_key = ""
+
+# Cloudflare Turnstile 密钥（私密）
+turnstile_secret_key = ""
+
+# 路径相对于本配置文件所在目录
+frontend_dir = "../frontend/dist"
+admin_frontend_dir = "../frontend/admin-dist"
+agent_dir = "../agent"
+
+# 管理员会话有效期（小时，范围 1-2160）
+session_ttl_hours = 168

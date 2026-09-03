@@ -4,7 +4,6 @@ set -eu
 SERVICE_NAME="nodeflare"
 INSTALL_DIR="/opt/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
-TOKEN_FILE="$INSTALL_DIR/token"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 OPENRC_FILE="/etc/init.d/$SERVICE_NAME"
 
@@ -13,12 +12,12 @@ usage() {
 NodeFlare Agent 安装脚本
 
 用法：
-  agent.sh -e <Worker URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
+  agent.sh -e <NodeFlare URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
   agent.sh --status
   agent.sh --uninstall
 
 参数：
-  -e  NodeFlare Worker 地址（必填）
+  -e  NodeFlare 服务地址（必填）
   -t  后台生成的 Agent Token（必填，请勿泄露）
   -i  初始上报间隔，15-3600 秒（默认 60）
   -m  GitHub 下载加速前缀（可选，仅作用于 Release 下载；
@@ -112,12 +111,12 @@ install_agent() {
   [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
   endpoint=${endpoint%/}
   [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
-  safe_value "$token" && safe_value "$endpoint" || fail "Worker 地址或 Agent Token 格式无效"
+  safe_value "$token" && safe_value "$endpoint" || fail "服务地址或 Agent Token 格式无效"
   case "$endpoint" in
     https://?*|http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*) ;;
-    *) fail "Worker 地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
+    *) fail "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
   esac
-  case "$endpoint" in *@*) fail "Worker 地址不能包含用户信息" ;; esac
+  case "$endpoint" in *@*) fail "服务地址不能包含用户信息" ;; esac
   case "$interval" in ''|*[!0-9]*) fail "上报间隔必须是整数" ;; esac
   [ "$interval" -ge 15 ] && [ "$interval" -le 3600 ] || fail "上报间隔必须在 15-3600 秒之间"
   mirror=${mirror%/}
@@ -200,9 +199,6 @@ install_agent() {
   esac
   mv "$temporary" "$AGENT_FILE"
   trap - EXIT HUP INT TERM
-  (umask 077; printf '%s\n' "$token" > "$TOKEN_FILE")
-  chmod 600 "$TOKEN_FILE"
-  token=""
   log "正在配置并启动 $init_system 服务"
   if [ "$init_system" = "systemd" ]; then
     printf '%s\n' \
@@ -213,7 +209,7 @@ install_agent() {
     '' \
     '[Service]' \
     'Type=simple' \
-    "ExecStart=$AGENT_FILE -e $endpoint --token-file $TOKEN_FILE -i $interval" \
+    "ExecStart=$AGENT_FILE -e $endpoint -t $token -i $interval" \
     'Restart=always' \
     'RestartSec=10' \
     'NoNewPrivileges=true' \
@@ -236,7 +232,7 @@ install_agent() {
       '#!/sbin/openrc-run' \
       "name=\"$SERVICE_NAME\"" \
       "command=\"$AGENT_FILE\"" \
-      "command_args=\"-e $endpoint --token-file $TOKEN_FILE -i $interval\"" \
+      "command_args=\"-e $endpoint -t $token -i $interval\"" \
       "command_user=\"root\"" \
       "supervisor=\"supervise-daemon\"" \
       "respawn_delay=10" \

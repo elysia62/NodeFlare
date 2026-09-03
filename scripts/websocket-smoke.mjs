@@ -60,7 +60,8 @@ function expectSocketStatus(path, token, statusCode) {
     });
     socket.once("unexpected-response", (_request, response) => {
       clearTimeout(timer);
-      response.resume();
+      response.destroy();
+      socket.terminate();
       if (response.statusCode === statusCode) {
         resolve();
       } else {

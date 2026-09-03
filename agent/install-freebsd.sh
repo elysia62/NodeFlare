@@ -4,7 +4,6 @@ set -eu
 SERVICE_NAME="nodeflare"
 INSTALL_DIR="/usr/local/libexec/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
-TOKEN_FILE="$INSTALL_DIR/token"
 SERVICE_FILE="/usr/local/etc/rc.d/$SERVICE_NAME"
 
 log() {
@@ -21,7 +20,7 @@ usage() {
 NodeFlare Agent FreeBSD 安装脚本
 
 用法：
-  install-freebsd.sh -e <Worker URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
+  install-freebsd.sh -e <NodeFlare URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
   install-freebsd.sh --status
   install-freebsd.sh --uninstall
 
@@ -64,7 +63,7 @@ if [ "${1:-}" = "--uninstall" ]; then
   log "正在停止并移除 NodeFlare Agent"
   service "$SERVICE_NAME" stop 2>/dev/null || true
   sysrc -x "${SERVICE_NAME}_enable" >/dev/null 2>&1 || true
-  rm -f "$SERVICE_FILE" "$AGENT_FILE" "$TOKEN_FILE"
+  rm -f "$SERVICE_FILE" "$AGENT_FILE"
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "NodeFlare Agent 已卸载"
   exit 0
@@ -117,12 +116,12 @@ done
 [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
 endpoint=${endpoint%/}
 [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
-safe_value "$token" && safe_value "$endpoint" || fail "Worker 地址或 Agent Token 格式无效"
+safe_value "$token" && safe_value "$endpoint" || fail "服务地址或 Agent Token 格式无效"
 case "$endpoint" in
   https://?*|http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*) ;;
-  *) fail "Worker 地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
+  *) fail "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
 esac
-case "$endpoint" in *@*) fail "Worker 地址不能包含用户信息" ;; esac
+case "$endpoint" in *@*) fail "服务地址不能包含用户信息" ;; esac
 case "$interval" in ''|*[!0-9]*) fail "上报间隔必须是整数" ;; esac
 [ "$interval" -ge 15 ] && [ "$interval" -le 3600 ] || fail "上报间隔必须在 15-3600 秒之间"
 mirror=${mirror%/}
@@ -186,9 +185,6 @@ log "正在配置并启动 FreeBSD rc.d 服务"
 service "$SERVICE_NAME" stop 2>/dev/null || true
 mv "$temporary" "$AGENT_FILE"
 trap - EXIT HUP INT TERM
-(umask 077; printf '%s\n' "$token" > "$TOKEN_FILE")
-chmod 600 "$TOKEN_FILE"
-token=""
 cat > "$SERVICE_FILE" <<EOF
 #!/bin/sh
 # PROVIDE: nodeflare
@@ -201,7 +197,7 @@ name="$SERVICE_NAME"
 rcvar="${SERVICE_NAME}_enable"
 pidfile="/var/run/\${name}.pid"
 command="/usr/sbin/daemon"
-command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint --token-file $TOKEN_FILE -i $interval"
+command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint -t $token -i $interval"
 
 load_rc_config "\${name}"
 : \${nodeflare_enable:="NO"}

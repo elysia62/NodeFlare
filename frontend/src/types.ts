@@ -206,8 +206,8 @@ export interface Server extends ServerSummary {
 export interface AdminServer extends ServerSummary {
   hidden: boolean;
   last_ip: string;
-  ip_v4: string | null;
-  ip_v6: string | null;
+  ip_v4: string;
+  ip_v6: string;
   network_interface: string;
   report_interval: number;
   collect_interval: number;
@@ -280,8 +280,6 @@ export interface Settings extends Omit<Config, "password_client_salt"> {
   offline_alert_minutes: number;
   expiry_alert_days: number;
   traffic_alert_percentage: number;
-  cloudflare_account_id: string;
-  cloudflare_api_token: string;
 }
 
 export interface TelegramSettings {
@@ -317,20 +315,34 @@ export interface DatabaseStats {
   history_rows: number;
 }
 
-interface CloudflareUsagePeriod {
-  rows_read: number;
-  rows_written: number;
-  workers_requests: number;
-  durable_objects_requests: number;
-  durable_objects_http_requests: number;
-  durable_objects_hibernation_wakeups: number;
-  durable_objects_inbound_websocket_messages: number;
-  durable_objects_outbound_websocket_messages: number;
-  durable_objects_request_billing_ratio: number;
-  durable_objects_duration: number;
+export interface TotpStatus {
+  enabled: boolean;
+  has_secret: boolean;
 }
 
-export interface CloudflareUsage {
-  today: CloudflareUsagePeriod;
-  yesterday: CloudflareUsagePeriod;
+export interface TotpSetup {
+  secret: string;
+  uri: string;
+  enabled: boolean;
+}
+
+export interface RemoteTask {
+  id: string;
+  server_id: string;
+  command: string;
+  script: string;
+  status: "pending" | "sent" | "success" | "failed";
+  requested_by: string;
+  requested_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  result: string;
+  exit_code: number | null;
+}
+
+export interface RemoteTaskInput {
+  server_id: string;
+  command: string;
+  script: string;
+  totp_code: string;
 }

@@ -49,9 +49,23 @@ jobs:
     name: Quality checks
     needs: metadata
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       NODEFLARE_VERSION: ${{ needs.metadata.outputs.version }}
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: nodeflare_smoke
+          POSTGRES_USER: nodeflare
+          POSTGRES_PASSWORD: SmokePostgresPassword123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nodeflare -d nodeflare_smoke"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,7 +73,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.0
@@ -71,56 +84,165 @@ jobs:
         run: bun test --cwd frontend
       - name: Build frontend
         run: bun run build:frontend
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
+      - name: Check backend formatting
+        run: cargo fmt --manifest-path backend/Cargo.toml -- --check
       - name: Check Agent formatting
         run: cargo fmt --manifest-path agent/Cargo.toml -- --check
-      - name: Lint Worker
-        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Lint backend
+        run: CARGO_TARGET_DIR=target/backend cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings
       - name: Lint Agent
-        run: cargo clippy --locked --manifest-path agent/Cargo.toml --all-targets -- -D warnings
-      - name: Test Worker
-        run: cargo test --locked --lib
+        run: CARGO_TARGET_DIR=target/agent cargo clippy --locked --manifest-path agent/Cargo.toml --all-targets -- -D warnings
+      - name: Test backend
+        run: CARGO_TARGET_DIR=target/backend cargo test --locked --manifest-path backend/Cargo.toml
       - name: Test Agent
-        run: cargo test --locked --manifest-path agent/Cargo.toml
-      - name: Build Worker
-        run: NODEFLARE_ADMIN_READY=1 sh scripts/build-worker.sh
-      - name: Smoke test Worker and D1
+        run: CARGO_TARGET_DIR=target/agent cargo test --locked --manifest-path agent/Cargo.toml
+      - name: Build backend
+        run: CARGO_TARGET_DIR=target/backend cargo build --locked --manifest-path backend/Cargo.toml
+      - name: Smoke test SQLite and PostgreSQL
         shell: bash
+        env:
+          POSTGRES_URL: postgres://nodeflare:SmokePostgresPassword123@127.0.0.1:5432/nodeflare_smoke
         run: |
           set -euo pipefail
-          state_dir="$RUNNER_TEMP/nodeflare-state"
-          log_file="$RUNNER_TEMP/nodeflare-dev.log"
-          export XDG_CONFIG_HOME="$RUNNER_TEMP/wrangler-config"
-          mkdir -p "$XDG_CONFIG_HOME"
+          sqlite_pid=""
+          postgres_pid=""
+          cleanup() {
+            if [ -n "$sqlite_pid" ]; then kill "$sqlite_pid" 2>/dev/null || true; fi
+            if [ -n "$postgres_pid" ]; then kill "$postgres_pid" 2>/dev/null || true; fi
+          }
+          trap cleanup EXIT
 
-          bunx wrangler d1 migrations apply DB --local --persist-to "$state_dir"
-          NODEFLARE_ADMIN_READY=1 NODEFLARE_WORKER_READY=1 \
-            bunx wrangler dev --local --persist-to "$state_dir" --port 8787 \
-              --var ADMIN_USERNAME:smoke --var ADMIN_PASSWORD:SmokePassword123 \
-              >"$log_file" 2>&1 &
-          dev_pid=$!
-          trap 'kill "$dev_pid" 2>/dev/null || true' EXIT
-
-          ready=0
-          for _ in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8787/api/bootstrap >/dev/null; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$ready" != 1 ]; then
+          wait_ready() {
+            local url=$1
+            local log_file=$2
+            local process_id=$3
+            for _ in $(seq 1 60); do
+              if curl --fail --silent "$url/api/bootstrap" >/dev/null; then return 0; fi
+              if ! kill -0 "$process_id" 2>/dev/null; then break; fi
+              sleep 1
+            done
             cat "$log_file"
+            return 1
+          }
+
+          sqlite_dir="$RUNNER_TEMP/nodeflare-sqlite"
+          mkdir -p "$sqlite_dir"
+          sqlite_config="$sqlite_dir/config.toml"
+          printf '%s\n' \
+            "database_url = \"sqlite://$sqlite_dir/nodeflare.db\"" \
+            'bind_addr = "127.0.0.1:18080"' \
+            'admin_username = "sqlite-smoke"' \
+            'admin_password = "SmokePassword123"' \
+            'turnstile_site_key = ""' \
+            'turnstile_secret_key = ""' \
+            "frontend_dir = \"$GITHUB_WORKSPACE/frontend/dist\"" \
+            "admin_frontend_dir = \"$GITHUB_WORKSPACE/frontend/admin-dist\"" \
+            "agent_dir = \"$GITHUB_WORKSPACE/agent\"" > "$sqlite_config"
+          target/backend/debug/nodeflare-backend --config "$sqlite_config" > "$sqlite_dir/server.log" 2>&1 &
+          sqlite_pid=$!
+          wait_ready http://127.0.0.1:18080 "$sqlite_dir/server.log" "$sqlite_pid"
+          MONITOR_BASE_URL=http://127.0.0.1:18080 \
+            MONITOR_ADMIN_USERNAME=sqlite-smoke \
+            MONITOR_ADMIN_PASSWORD=SmokePassword123 \
+            sh scripts/smoke-test.sh
+          kill "$sqlite_pid"
+          wait "$sqlite_pid" || true
+          sqlite_pid=""
+
+          postgres_dir="$RUNNER_TEMP/nodeflare-postgres"
+          mkdir -p "$postgres_dir"
+          postgres_config="$postgres_dir/config.toml"
+          printf '%s\n' \
+            "database_url = \"$POSTGRES_URL\"" \
+            'bind_addr = "127.0.0.1:18081"' \
+            'admin_username = "postgres-smoke"' \
+            'admin_password = "SmokePassword123"' \
+            'turnstile_site_key = ""' \
+            'turnstile_secret_key = ""' \
+            "frontend_dir = \"$GITHUB_WORKSPACE/frontend/dist\"" \
+            "admin_frontend_dir = \"$GITHUB_WORKSPACE/frontend/admin-dist\"" \
+            "agent_dir = \"$GITHUB_WORKSPACE/agent\"" > "$postgres_config"
+          target/backend/debug/nodeflare-backend --config "$postgres_config" > "$postgres_dir/server.log" 2>&1 &
+          postgres_pid=$!
+          wait_ready http://127.0.0.1:18081 "$postgres_dir/server.log" "$postgres_pid"
+          MONITOR_BASE_URL=http://127.0.0.1:18081 \
+            MONITOR_ADMIN_USERNAME=postgres-smoke \
+            MONITOR_ADMIN_PASSWORD=SmokePassword123 \
+            sh scripts/smoke-test.sh
+
+  server:
+    name: Server (${{ matrix.platform }})
+    needs: metadata
+    if: needs.metadata.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      CARGO_TARGET_DIR: target/server
+      NODEFLARE_VERSION: ${{ needs.metadata.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x64
+            target: x86_64-unknown-linux-musl
+            asset: nodeflare-server-linux-x64
+            emulate: false
+          - platform: Linux ARM64
+            target: aarch64-unknown-linux-musl
+            asset: nodeflare-server-linux-aarch64
+            emulate: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross compiler
+        run: cargo install cross --version 0.2.5 --locked
+      - name: Build server
+        run: CROSS_CONFIG=agent/Cross.toml cross build --manifest-path backend/Cargo.toml --release --locked --target ${{ matrix.target }}
+      - name: Stage server binary
+        run: |
+          mkdir -p release
+          cp "target/server/${{ matrix.target }}/release/nodeflare-backend" "release/${{ matrix.asset }}"
+          chmod +x "release/${{ matrix.asset }}"
+      - name: Install ARM64 emulator
+        if: matrix.emulate
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-user-static
+      - name: Verify server version
+        shell: bash
+        run: |
+          if [ "${{ matrix.emulate }}" = "true" ]; then
+            version_output=$(qemu-aarch64-static "release/${{ matrix.asset }}" --version)
+          else
+            version_output=$("release/${{ matrix.asset }}" --version)
+          fi
+          actual_version="${version_output##* }"
+          if [ "$actual_version" != "${{ needs.metadata.outputs.version }}" ]; then
+            echo "Server version $actual_version does not match tag ${{ needs.metadata.outputs.version }}" >&2
             exit 1
           fi
-
-          if ! MONITOR_BASE_URL=http://127.0.0.1:8787 \
-            MONITOR_ADMIN_USERNAME=smoke MONITOR_ADMIN_PASSWORD=SmokePassword123 \
-            sh scripts/smoke-test.sh; then
-            cat "$log_file"
+      - name: Verify static server binary
+        run: |
+          if readelf -l "release/${{ matrix.asset }}" | grep -q 'Requesting program interpreter'; then
+            echo "Linux server must be statically linked" >&2
             exit 1
           fi
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release/${{ matrix.asset }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.asset }}
+          path: release/${{ matrix.asset }}
+          if-no-files-found: error
 
   agent:
     name: Agent (${{ matrix.platform }})
@@ -183,7 +305,7 @@ jobs:
         run: cargo install cross --version 0.2.5 --locked
       - name: Build Rust Agent with cross
         if: matrix.cross
-        run: CROSS_CONFIG=Cross.toml cross build --manifest-path agent/Cargo.toml --release --locked --target ${{ matrix.target }}
+        run: CROSS_CONFIG=agent/Cross.toml cross build --manifest-path agent/Cargo.toml --release --locked --target ${{ matrix.target }}
       - name: Build Rust Agent with Cargo
         if: matrix.cross == false
         run: cargo build --manifest-path agent/Cargo.toml --release --locked --target ${{ matrix.target }}
@@ -282,10 +404,10 @@ jobs:
           bun-version: 1.4.0
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Build public frontend
-        run: bun run --cwd frontend build:public
+      - name: Build public and admin frontends
+        run: bun run build:frontend
       - name: Package frontend
-        run: tar -czf "nodeflare-frontend-${{ needs.metadata.outputs.version }}.tar.gz" -C frontend/dist .
+        run: tar -czf "nodeflare-frontend-${{ needs.metadata.outputs.version }}.tar.gz" -C frontend dist admin-dist
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: nodeflare-frontend-${{ needs.metadata.outputs.version }}.tar.gz
@@ -298,7 +420,7 @@ jobs:
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [metadata, quality, agent, frontend]
+    needs: [metadata, quality, server, agent, frontend]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

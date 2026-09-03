@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-MONITOR_BASE_URL=${MONITOR_BASE_URL:-http://127.0.0.1:8787}
+MONITOR_BASE_URL=${MONITOR_BASE_URL:-http://127.0.0.1:8080}
 MONITOR_TURNSTILE_TOKEN=${MONITOR_TURNSTILE_TOKEN:-XXXX.DUMMY.TOKEN.XXXX}
 : "${MONITOR_ADMIN_USERNAME:?Set MONITOR_ADMIN_USERNAME before running the smoke test}"
 : "${MONITOR_ADMIN_PASSWORD:?Set MONITOR_ADMIN_PASSWORD before running the smoke test}"
@@ -17,6 +17,11 @@ request() {
   monitor_curl --fail --location --silent --show-error "$@"
 }
 
+step() {
+  printf 'smoke: %s\n' "$1" >&2
+}
+
+step "bootstrap"
 bootstrap_json=$(request "$MONITOR_BASE_URL/api/bootstrap")
 printf '%s' "$bootstrap_json" | jq -e '.access == "ok" and (.servers | type == "array")' >/dev/null
 config_json=$(printf '%s' "$bootstrap_json" | jq -c '.config')
@@ -28,28 +33,30 @@ const key = await crypto.subtle.importKey("raw", encoder.encode(process.env.NODE
 const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", iterations: 600000, salt: encoder.encode(`nodeflare:${process.env.NODEFLARE_SALT}`) }, key, 256);
 console.log(Array.from(new Uint8Array(bits), byte => byte.toString(16).padStart(2, "0")).join(""));
 ')
-cross_origin_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
-  -H 'Origin: https://not-nodeflare.invalid' "$MONITOR_BASE_URL/api/bootstrap")
-[ "$cross_origin_status" = "403" ]
-
+step "static assets"
+security_headers=$(monitor_curl --silent --show-error --dump-header - --output /dev/null "$MONITOR_BASE_URL/")
+printf '%s' "$security_headers" | grep -qi '^x-content-type-options: nosniff'
+printf '%s' "$security_headers" | grep -qi '^x-frame-options: DENY'
+printf '%s' "$security_headers" | grep -qi "^content-security-policy:.*frame-ancestors 'none'"
 admin_html=$(request "$MONITOR_BASE_URL/admin")
 case "$admin_html" in
   *"/admin-assets/admin.js"*) ;;
   *)
-    echo "Embedded admin script is missing" >&2
+    echo "Admin script is missing" >&2
     exit 1
     ;;
 esac
 case "$admin_html" in
   *"/admin-assets/admin.css"*) ;;
   *)
-    echo "Embedded admin stylesheet is missing" >&2
+    echo "Admin stylesheet is missing" >&2
     exit 1
     ;;
 esac
 request "$MONITOR_BASE_URL/admin-assets/admin.js" | grep -q '管理面板'
 request "$MONITOR_BASE_URL/admin-assets/admin.css" | grep -q 'admin-shell'
 
+step "login and settings"
 login_json=$(request -H 'Content-Type: application/json' \
   --data "$(jq -nc --arg username "$MONITOR_ADMIN_USERNAME" --arg password "$MONITOR_ADMIN_PASSWORD" --arg password_derived "$password_derived" --arg turnstile_token "$MONITOR_TURNSTILE_TOKEN" '{username:$username,password:$password,password_derived:$password_derived,turnstile_token:$turnstile_token}')" \
   "$MONITOR_BASE_URL/api/admin/login")
@@ -78,6 +85,9 @@ server_id=
 latency_task_id=
 alert_rule_id=
 cleanup() {
+  if [ "${MONITOR_KEEP_RESOURCES:-0}" = "1" ]; then
+    return
+  fi
   if [ -n "$alert_rule_id" ]; then
     monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
       -X DELETE "$MONITOR_BASE_URL/api/admin/alert-rules/$alert_rule_id" >/dev/null || true
@@ -93,6 +103,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+step "admin resources"
 request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/telegram" | \
   jq -e '.telegram == null or (.telegram.bot_token == "********" and (.telegram.chat_id | length > 0))' >/dev/null
@@ -113,6 +124,7 @@ server_json=$(request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/servers")
 server_id=$(printf '%s' "$server_json" | jq -er '.id')
 agent_token=$(printf '%s' "$server_json" | jq -er '.agent_token')
+step "websocket report"
 MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
   MONITOR_AGENT_TOKEN="$agent_token" MONITOR_SERVER_ID="$server_id" \
   MONITOR_LATENCY_TASK_ID="$latency_task_id" \
@@ -124,15 +136,16 @@ request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/servers/$server_id/token" | \
   jq -e --arg token "$agent_token" '.agent_token == $token' >/dev/null
 
+step "persisted metrics"
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/servers" | \
   jq -e --arg id "$server_id" '.servers | any(.id == $id and .last_ip == "8.8.8.8")' >/dev/null
 
-request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/bootstrap" | jq -e --arg id "$server_id" --arg task_id "$latency_task_id" '.servers | any(.id == $id and .cpu == 18.5 and .gpu_usage == 32.5 and .disk_await_ms == 1.4 and (.gpus | length) == 1 and (.disks | length) == 1 and .disk_used == 21474836480 and .traffic_limit == 107374182400 and .net_rx_total == 2684354560 and .net_tx_total == 1342177280 and .price == 9.9 and (has("last_ip") | not) and (.latency | any(.task_id == $task_id and .latency_ms == 48.4 and .packet_loss == 75)))' >/dev/null
+post_report_bootstrap=$(request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/bootstrap")
+if ! printf '%s' "$post_report_bootstrap" | jq -e --arg id "$server_id" --arg task_id "$latency_task_id" '.servers | any(.id == $id and .cpu == 18.5 and .gpu_usage == 32.5 and .disk_await_ms == 1.4 and (.gpus | length) == 1 and (.disks | length) == 1 and .disk_used == 21474836480 and .traffic_limit == 107374182400 and .net_rx_total == 2684354560 and .net_tx_total == 1342177280 and .price == 9.9 and (has("last_ip") | not) and (.latency | any(.task_id == $task_id and .latency_ms == 48.4 and .packet_loss == 75)))' >/dev/null; then
+  printf '%s' "$post_report_bootstrap" | jq --arg id "$server_id" '.servers[] | select(.id == $id)' >&2
+  exit 1
+fi
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/history/$server_id?hours=1" | jq -e '.points | length >= 1 and any(.gpu_usage == 32.5)' >/dev/null
-history_cache_header=$(monitor_curl --silent --dump-header - --output /dev/null \
-  -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/history/$server_id?hours=1" | \
-  tr -d '\r' | awk -F ': ' 'tolower($1) == "x-cache" { print $2 }' | tail -1)
-[ "$history_cache_header" = "HIT" ]
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/latency/$server_id?hours=1" | jq -e --arg task_id "$latency_task_id" '(.tasks | any(.id == $task_id)) and (.points | any(.task_id == $task_id and .latency_ms > 38.399 and .latency_ms < 38.401 and .packet_loss > 49.999 and .packet_loss < 50.001))' >/dev/null
 
 # An Agent may have already measured a task when the administrator removes its
@@ -141,11 +154,13 @@ request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/js
   --data '{"name":"Smoke TCP","task_type":"tcp","target":"example.com","port":443,"interval_seconds":60,"default_enabled":true,"server_ids":[]}' \
   "$MONITOR_BASE_URL/api/admin/latency-tasks/$latency_task_id" >/dev/null
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/latency/$server_id?hours=1" | jq -e --arg task_id "$latency_task_id" '(.tasks | all(.id != $task_id)) and (.points | all(.task_id != $task_id))' >/dev/null
+step "agent reconfiguration"
 MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
   MONITOR_AGENT_TOKEN="$agent_token" MONITOR_SERVER_ID="$server_id" \
   MONITOR_LATENCY_TASK_ID="$latency_task_id" MONITOR_EXPECT_TASK_ASSIGNED=0 \
   MONITOR_CONFIG_ONLY=1 node scripts/websocket-smoke.mjs
 
+step "alerts and visibility"
 alert_rule_json=$(request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
   --data "$(jq -nc --arg server_id "$server_id" '{name:"Smoke CPU",metric:"cpu",threshold:80,duration_minutes:5,aggregation:"average",enabled:true,server_ids:[$server_id]}')" \
   "$MONITOR_BASE_URL/api/admin/alert-rules")

@@ -5,11 +5,11 @@ case "${1:-}" in
   frontend)
     paths="frontend package.json bun.lock scripts/build-frontend.sh scripts/build-key.sh scripts/resolve-version.sh"
     ;;
-  worker)
-    paths="src frontend Cargo.toml Cargo.lock build.rs scripts/build-worker.sh scripts/build-key.sh scripts/resolve-version.sh scripts/worker-shim.js"
+  backend)
+    paths="backend/Cargo.toml backend/Cargo.lock backend/src backend/migrations scripts/build-backend.sh scripts/build-key.sh scripts/resolve-version.sh"
     ;;
   *)
-    echo "usage: $0 frontend|worker" >&2
+    echo "usage: $0 frontend|backend" >&2
     exit 2
     ;;
 esac

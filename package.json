@@ -8,18 +8,16 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "bun run build:frontend && bun run db:local && NODEFLARE_ADMIN_READY=1 bunx wrangler dev",
+    "dev": "sh dev.sh",
     "dev:frontend": "bun run --cwd frontend dev",
-    "build": "bun run build:frontend && NODEFLARE_ADMIN_READY=1 sh scripts/build-worker.sh",
+    "start": "sh start.sh",
+    "build": "bun run build:frontend && bun run build:backend",
     "build:agent": "sh scripts/build-agent.sh",
+    "build:backend": "sh scripts/build-backend.sh",
     "build:frontend": "sh scripts/build-frontend.sh",
-    "deploy": "sh scripts/deploy-worker.sh",
-    "db:local": "bunx wrangler d1 migrations apply DB --local",
-    "db:remote": "bunx wrangler d1 migrations apply DB --remote",
     "test:smoke": "sh scripts/smoke-test.sh"
   },
   "devDependencies": {
-    "wrangler": "^4.127.0",
     "ws": "^8.21.3"
   },
   "overrides": {

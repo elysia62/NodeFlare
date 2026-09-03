@@ -1,6 +1,6 @@
 import type { LatencySample, LiveLatencyResult, Server } from "./types";
 
-/** A single Agent report as replayed by the Worker. */
+/** A single Agent report as replayed by the NodeFlare server. */
 export interface LiveSample {
   ts: number;
   data: Partial<Server> & { latency_results?: LiveLatencyResult[] };

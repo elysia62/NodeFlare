@@ -4,7 +4,6 @@ set -eu
 LABEL="com.nodeflare.agent"
 INSTALL_DIR="/usr/local/libexec/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
-TOKEN_FILE="$INSTALL_DIR/token"
 PLIST_FILE="/Library/LaunchDaemons/$LABEL.plist"
 
 log() {
@@ -21,7 +20,7 @@ usage() {
 NodeFlare Agent macOS 安装脚本
 
 用法：
-  install-macos.sh -e <Worker URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
+  install-macos.sh -e <NodeFlare URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
   install-macos.sh --status
   install-macos.sh --uninstall
 
@@ -40,7 +39,7 @@ if [ "${1:-}" = "--uninstall" ]; then
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行卸载"
   log "正在停止并移除 NodeFlare Agent"
   launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
-  rm -f "$PLIST_FILE" "$AGENT_FILE" "$TOKEN_FILE"
+  rm -f "$PLIST_FILE" "$AGENT_FILE"
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "NodeFlare Agent 已卸载"
   exit 0
@@ -86,12 +85,12 @@ done
 [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
 endpoint=${endpoint%/}
 [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
-safe_value "$token" && safe_value "$endpoint" || fail "Worker 地址或 Agent Token 格式无效"
+safe_value "$token" && safe_value "$endpoint" || fail "服务地址或 Agent Token 格式无效"
 case "$endpoint" in
   https://?*|http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*) ;;
-  *) fail "Worker 地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
+  *) fail "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
 esac
-case "$endpoint" in *@*) fail "Worker 地址不能包含用户信息" ;; esac
+case "$endpoint" in *@*) fail "服务地址不能包含用户信息" ;; esac
 case "$interval" in ''|*[!0-9]*) fail "上报间隔必须是整数" ;; esac
 [ "$interval" -ge 15 ] && [ "$interval" -le 3600 ] || fail "上报间隔必须在 15-3600 秒之间"
 mirror=${mirror%/}
@@ -159,15 +158,12 @@ log "正在配置并启动 macOS LaunchDaemon 服务"
 launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
 mv "$temporary" "$AGENT_FILE"
 trap - EXIT HUP INT TERM
-(umask 077; printf '%s\n' "$token" > "$TOKEN_FILE")
-chmod 600 "$TOKEN_FILE"
-token=""
 cat > "$PLIST_FILE" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>$LABEL</string>
-<key>ProgramArguments</key><array><string>$AGENT_FILE</string><string>-e</string><string>$endpoint</string><string>--token-file</string><string>$TOKEN_FILE</string><string>-i</string><string>$interval</string></array>
+<key>ProgramArguments</key><array><string>$AGENT_FILE</string><string>-e</string><string>$endpoint</string><string>-t</string><string>$token</string><string>-i</string><string>$interval</string></array>
 <key>KeepAlive</key><true/><key>RunAtLoad</key><true/>
 <key>StandardOutPath</key><string>/var/log/nodeflare-agent.log</string>
 <key>StandardErrorPath</key><string>/var/log/nodeflare-agent.log</string>

@@ -12,7 +12,6 @@ $ErrorActionPreference = "Stop"
 $TaskName = "NodeFlare Agent"
 $InstallDir = Join-Path $env:ProgramData "NodeFlare"
 $AgentFile = Join-Path $InstallDir "nodeflare-agent.exe"
-$TokenFile = Join-Path $InstallDir "token"
 
 function Write-Step([string]$Message) {
   Write-Host "[NodeFlare] $Message"
@@ -45,7 +44,7 @@ function Assert-Endpoint([string]$Value) {
     -not [string]::IsNullOrEmpty($Parsed.Query) -or
     -not [string]::IsNullOrEmpty($Parsed.Fragment)
   ) {
-    Write-InstallError "Worker 地址必须使用 HTTPS；仅本机调试可使用 HTTP"
+    Write-InstallError "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP"
   }
 }
 
@@ -148,10 +147,7 @@ try {
   Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
 }
 
-[IO.File]::WriteAllText($TokenFile, "$Token`n", [Text.UTF8Encoding]::new($false))
-& icacls.exe $TokenFile /inheritance:r /grant:r 'SYSTEM:F' 'Administrators:F' | Out-Null
-$Token = ""
-$TaskArguments = "-e `"$Endpoint`" --token-file `"$TokenFile`" -i $Interval"
+$TaskArguments = "-e `"$Endpoint`" -t `"$Token`" -i $Interval"
 Write-Step "正在注册并启动 Windows 计划任务"
 $TaskAction = New-ScheduledTaskAction -Execute $AgentFile -Argument $TaskArguments
 $Trigger = New-ScheduledTaskTrigger -AtStartup

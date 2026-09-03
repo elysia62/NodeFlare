@@ -1,0 +1,11 @@
+[build.env]
+passthrough = ["NODEFLARE_VERSION"]
+
+[target.aarch64-unknown-linux-musl]
+runner = "qemu-user"
+
+# cross 0.2.5 自带的 FreeBSD 镜像 sysroot 漏了 libgeom。上游 main 镜像已
+# 补齐完整 /lib 及共享库软链，因此为 FreeBSD Agent 固定使用该镜像摘要。
+# 该镜像以 FreeBSD 13 为 sysroot，所以产物最低支持 FreeBSD 13。
+[target.x86_64-unknown-freebsd]
+image = "ghcr.io/cross-rs/x86_64-unknown-freebsd@sha256:d1ecbeb055803f5316607acce26c8af2b8609a04e38a06ba7aed84f9df80042e"

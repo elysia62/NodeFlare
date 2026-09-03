@@ -1,4 +1,4 @@
-import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, CloudflareUsage, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema } from "./types";
+import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, RemoteTask, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
 
 const TOKEN_KEY = "nodeflare-admin-token";
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
@@ -54,13 +54,23 @@ export const api = {
     request<{ tasks: LatencyTestPoint[]; points: LatencySample[] }>(`/api/latency/${encodeURIComponent(id)}?hours=${hours}`),
   verifyTurnstile: (token: string) =>
     request<void>("/api/turnstile/verify", { method: "POST", body: JSON.stringify({ token }) }),
-  login: (username: string, password: string, passwordDerived: string, turnstileToken: string) =>
+  login: (username: string, password: string, passwordDerived: string, turnstileToken: string, totpCode = "") =>
     request<{ token: string }>("/api/admin/login", {
       method: "POST",
-      body: JSON.stringify({ username, password, password_derived: passwordDerived, turnstile_token: turnstileToken }),
+      body: JSON.stringify({ username, password, password_derived: passwordDerived, turnstile_token: turnstileToken, totp_code: totpCode }),
     }),
   logout: () => request<void>("/api/admin/logout", { method: "POST" }),
   settings: () => request<Settings>("/api/admin/settings", {}, true),
+  twoFactorStatus: () => request<TotpStatus>("/api/admin/2fa/status", {}, true),
+  setupTwoFactor: () => request<TotpSetup>("/api/admin/2fa/setup", { method: "POST" }, true),
+  enableTwoFactor: (totpCode: string) => request<void>("/api/admin/2fa/enable", {
+    method: "POST",
+    body: JSON.stringify({ totp_code: totpCode }),
+  }, true),
+  disableTwoFactor: (totpCode: string) => request<void>("/api/admin/2fa/disable", {
+    method: "POST",
+    body: JSON.stringify({ totp_code: totpCode }),
+  }, true),
   latencyTasks: () => request<{ tasks: LatencyTask[] }>("/api/admin/latency-tasks", {}, true),
   createLatencyTask: (input: LatencyTaskInput) =>
     request<{ id: string }>("/api/admin/latency-tasks", { method: "POST", body: JSON.stringify(input) }, true),
@@ -123,6 +133,11 @@ export const api = {
       true,
     ),
   databaseStats: () => request<DatabaseStats>("/api/admin/database", {}, true),
-  cloudflareUsage: () => request<CloudflareUsage>("/api/admin/cloudflare-usage", {}, true),
   clearHistory: () => request<void>("/api/admin/history", { method: "DELETE" }, true),
+  createRemoteTask: (input: RemoteTaskInput) => request<{ task_id: string }>("/api/admin/remote/task", {
+    method: "POST",
+    body: JSON.stringify(input),
+  }, true),
+  remoteTask: (id: string) => request<RemoteTask>(`/api/admin/remote/task/${encodeURIComponent(id)}`, {}, true),
+  remoteTasks: (serverId: string) => request<RemoteTask[]>(`/api/admin/remote/tasks/${encodeURIComponent(serverId)}`, {}, true),
 };
