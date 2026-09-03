@@ -50,7 +50,7 @@ pub struct Config {
 }
 
 fn default_database_url() -> String {
-    "sqlite:///var/lib/nodeflare/nodeflare.db".to_string()
+    "sqlite:///opt/nodeflare/data/server/nodeflare.db".to_string()
 }
 
 fn default_bind_addr() -> String {
@@ -70,7 +70,7 @@ fn default_agent_dir() -> PathBuf {
 }
 
 fn default_theme_dir() -> PathBuf {
-    PathBuf::from("/var/lib/nodeflare/themes")
+    PathBuf::from("/opt/nodeflare/data/server/themes")
 }
 
 fn default_session_hours() -> i64 {
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(args.config, Path::new("/etc/nodeflare/config.toml"));
         assert_eq!(
             default_database_url(),
-            "sqlite:///var/lib/nodeflare/nodeflare.db"
+            "sqlite:///opt/nodeflare/data/server/nodeflare.db"
         );
         assert_eq!(default_bind_addr(), "127.0.0.1:8080");
         assert_eq!(
@@ -187,7 +187,10 @@ mod tests {
             Path::new("/opt/nodeflare/share/admin")
         );
         assert_eq!(default_agent_dir(), Path::new("/opt/nodeflare/share/agent"));
-        assert_eq!(default_theme_dir(), Path::new("/var/lib/nodeflare/themes"));
+        assert_eq!(
+            default_theme_dir(),
+            Path::new("/opt/nodeflare/data/server/themes")
+        );
     }
 
     #[test]

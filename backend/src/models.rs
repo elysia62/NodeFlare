@@ -458,15 +458,8 @@ pub struct TotpStatusResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRemoteTaskRequest {
-    #[serde(default)]
-    pub server_id: String,
-    #[serde(default)]
     pub server_ids: Vec<String>,
-    #[serde(default)]
     pub command: String,
-    #[serde(default)]
-    pub script: String,
-    #[serde(default)]
     pub totp_code: String,
 }
 
@@ -475,7 +468,6 @@ pub struct RemoteTaskInfo {
     pub id: String,
     pub server_id: String,
     pub command: String,
-    pub script: String,
     pub status: String,
     pub requested_by: String,
     pub requested_at: i64,

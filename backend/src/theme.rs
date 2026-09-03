@@ -177,9 +177,7 @@ pub async fn install_archive(theme_dir: &Path, id: &str, archive: Vec<u8>) -> Re
 }
 
 pub async fn remove_installed(theme_dir: &Path, reference: &str) -> Result<()> {
-    let Some(root) = local_root(theme_dir, reference)? else {
-        return Ok(());
-    };
+    let root = local_root(theme_dir, reference)?;
     match tokio::fs::remove_dir_all(root).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -187,8 +185,8 @@ pub async fn remove_installed(theme_dir: &Path, reference: &str) -> Result<()> {
     }
 }
 
-pub async fn validate(client: &reqwest::Client, theme_dir: &Path, base: &str) -> Result<()> {
-    let (body, _) = fetch_theme_path(client, theme_dir, base, "index.html", "").await?;
+pub async fn validate(theme_dir: &Path, base: &str) -> Result<()> {
+    let (body, _) = fetch_theme_path(theme_dir, base, "index.html", "").await?;
     let html = String::from_utf8(body).context("主题 index.html 不是 UTF-8 文本")?;
     if html.trim().is_empty() {
         anyhow::bail!("主题 index.html 为空");
@@ -196,39 +194,21 @@ pub async fn validate(client: &reqwest::Client, theme_dir: &Path, base: &str) ->
     Ok(())
 }
 
-pub async fn settings_schema(
-    client: &reqwest::Client,
-    theme_dir: &Path,
-    base: &str,
-) -> Result<Value> {
-    if let Some(root) = local_root(theme_dir, base)? {
-        let Some(body) = read_local_optional(&root, "theme.json", SETTINGS_MAX_BYTES).await? else {
-            return Ok(empty_settings_schema());
-        };
-        let value: Value = serde_json::from_slice(&body)?;
-        return validate_settings_schema(value).context("主题 theme.json 设置格式无效");
-    }
-    let response = client
-        .get(remote_url(base, "theme.json")?)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
+pub async fn settings_schema(theme_dir: &Path, base: &str) -> Result<Value> {
+    let root = local_root(theme_dir, base)?;
+    let Some(body) = read_local_optional(&root, "theme.json", SETTINGS_MAX_BYTES).await? else {
         return Ok(empty_settings_schema());
-    }
-    let response = response.error_for_status()?;
-    let body = bounded_body(response, SETTINGS_MAX_BYTES, "主题 theme.json 过大").await?;
+    };
     let value: Value = serde_json::from_slice(&body)?;
     validate_settings_schema(value).context("主题 theme.json 设置格式无效")
 }
 
-pub async fn version(client: &reqwest::Client, theme_dir: &Path, base: &str) -> Option<String> {
-    let value = settings_schema(client, theme_dir, base).await.ok()?;
+pub async fn version(theme_dir: &Path, base: &str) -> Option<String> {
+    let value = settings_schema(theme_dir, base).await.ok()?;
     sanitize_version(value.get("version")?.as_str()?)
 }
 
 pub async fn fetch_theme_path(
-    client: &reqwest::Client,
     theme_dir: &Path,
     base: &str,
     relative: &str,
@@ -245,12 +225,9 @@ pub async fn fetch_theme_path(
     } else {
         ASSET_MAX_BYTES
     };
-    let (body, content_type) = if let Some(root) = local_root(theme_dir, base)? {
-        let body = read_local(&root, target, limit).await?;
-        (body, content_type(Path::new(target)).to_string())
-    } else {
-        fetch_remote(client, base, target, limit).await?
-    };
+    let root = local_root(theme_dir, base)?;
+    let body = read_local(&root, target, limit).await?;
+    let content_type = content_type(Path::new(target)).to_string();
     if target == "index.html" {
         let html = String::from_utf8(body)?;
         return Ok((rewrite_index(&html, prefix).into_bytes(), content_type));
@@ -274,30 +251,6 @@ fn sanitize_relative(value: &str) -> Result<&str> {
     Ok(relative)
 }
 
-async fn fetch_remote(
-    client: &reqwest::Client,
-    base: &str,
-    relative: &str,
-    limit: usize,
-) -> Result<(Vec<u8>, String)> {
-    let response = client
-        .get(remote_url(base, relative)?)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?
-        .error_for_status()?;
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    Ok((
-        bounded_body(response, limit, "远程主题资源过大").await?,
-        content_type,
-    ))
-}
-
 async fn bounded_body(response: reqwest::Response, limit: usize, message: &str) -> Result<Vec<u8>> {
     if response
         .content_length()
@@ -312,18 +265,6 @@ async fn bounded_body(response: reqwest::Response, limit: usize, message: &str) 
     Ok(body.to_vec())
 }
 
-fn remote_url(base: &str, relative: &str) -> Result<Url> {
-    let base = Url::parse(&format!("{}/", base.trim_end_matches('/')))?;
-    if base.scheme() != "https" || base.host_str() != Some("raw.githubusercontent.com") {
-        anyhow::bail!("主题资源地址无效");
-    }
-    let target = base.join(relative)?;
-    if target.origin() != base.origin() || !target.path().starts_with(base.path()) {
-        anyhow::bail!("主题资源越界");
-    }
-    Ok(target)
-}
-
 fn rewrite_index(html: &str, prefix: &str) -> String {
     let asset_prefix = format!("{}/assets/", prefix.trim_end_matches('/'));
     html.replace("\"/assets/", &format!("\"{asset_prefix}"))
@@ -331,7 +272,7 @@ fn rewrite_index(html: &str, prefix: &str) -> String {
 }
 
 fn empty_settings_schema() -> Value {
-    serde_json::json!({"schema": 1, "source": "remote", "settings": []})
+    serde_json::json!({"schema": 1, "source": "installed", "settings": []})
 }
 
 fn sanitize_version(value: &str) -> Option<String> {
@@ -356,12 +297,12 @@ fn validate_local_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn local_root(theme_dir: &Path, reference: &str) -> Result<Option<PathBuf>> {
-    let Some(id) = reference.strip_prefix(LOCAL_PREFIX) else {
-        return Ok(None);
-    };
+fn local_root(theme_dir: &Path, reference: &str) -> Result<PathBuf> {
+    let id = reference
+        .strip_prefix(LOCAL_PREFIX)
+        .context("主题来源不是本地安装包")?;
     validate_local_id(id)?;
-    Ok(Some(theme_dir.join(id)))
+    Ok(theme_dir.join(id))
 }
 
 async fn read_local(root: &Path, relative: &str, limit: usize) -> Result<Vec<u8>> {
@@ -607,7 +548,7 @@ fn validate_settings_schema(value: Value) -> Option<Value> {
     let mut result = value;
     result
         .as_object_mut()?
-        .insert("source".to_string(), Value::String("remote".to_string()));
+        .insert("source".to_string(), Value::String("installed".to_string()));
     Some(result)
 }
 

@@ -32,7 +32,7 @@ cargo run --locked --manifest-path backend/Cargo.toml -- \
 配置使用扁平 TOML 字段：
 
 ```toml
-database_url = "sqlite:///var/lib/nodeflare/nodeflare.db"
+database_url = "sqlite:///opt/nodeflare/data/server/nodeflare.db"
 bind_addr = "127.0.0.1:8080"
 admin_username = "admin"
 admin_password = "replace-with-a-long-random-password"
@@ -43,7 +43,7 @@ turnstile_secret_key = ""
 frontend_dir = "/opt/nodeflare/share/frontend"
 admin_frontend_dir = "/opt/nodeflare/share/admin"
 agent_dir = "/opt/nodeflare/share/agent"
-theme_dir = "/var/lib/nodeflare/themes"
+theme_dir = "/opt/nodeflare/data/server/themes"
 session_ttl_hours = 168
 ```
 
@@ -72,9 +72,8 @@ PostgreSQL 可将 `database_url` 改为 `postgres://user:password@host/database`
 - `GET|POST|PATCH|DELETE /api/admin/alert-rules*`
 - `POST /api/admin/remote/task`
 - `GET /api/admin/remote/task/:id`
-- `GET /api/admin/remote/tasks/:server_id`
 
-`POST /api/admin/remote/task` 接收一条命令和 `server_ids` 数组，一次验证后为每个节点创建独立执行结果。创建远程任务前必须为管理员启用 TOTP，并在请求中提交当前 6 位验证码。单节点调用仍可使用兼容字段 `server_id`。
+`POST /api/admin/remote/task` 接收一条命令和 `server_ids` 数组，一次验证后为每个节点创建独立执行结果。创建远程任务前必须为管理员启用 TOTP，并在请求中提交当前 6 位验证码。
 
 WebSocket：
 

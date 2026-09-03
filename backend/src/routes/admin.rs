@@ -456,7 +456,7 @@ pub async fn theme_activate(
             .await
             .map_err(ApiResponse::internal)?
             .ok_or_else(|| ApiResponse::not_found("主题不存在"))?;
-        crate::theme::validate(&state.http, &state.config.theme_dir, &url)
+        crate::theme::validate(&state.config.theme_dir, &url)
             .await
             .map_err(|error| ApiResponse::unprocessable(error.to_string()))?;
     }
@@ -479,7 +479,7 @@ pub async fn theme_preview(
             .await
             .map_err(ApiResponse::internal)?
     {
-        return Err(ApiResponse::not_found("远程主题不存在"));
+        return Err(ApiResponse::not_found("主题不存在"));
     }
     let proof = crate::db::queries::create_theme_preview(&state.db, &id)
         .await
@@ -526,7 +526,7 @@ pub async fn theme_settings(State(state): State<Arc<AppState>>) -> Result<Respon
         .map_err(ApiResponse::internal)?
         .ok_or_else(|| ApiResponse::not_found("当前主题不存在"))?;
     Ok(Json(
-        crate::theme::settings_schema(&state.http, &state.config.theme_dir, &url)
+        crate::theme::settings_schema(&state.config.theme_dir, &url)
             .await
             .map_err(|error| ApiResponse::unprocessable(error.to_string()))?,
     )
@@ -545,8 +545,8 @@ async fn create_installed_theme(
         .map_err(|error| ApiResponse::unprocessable(error.to_string()))?;
     let reference = crate::theme::local_reference(&id).map_err(ApiResponse::internal)?;
     let validation = async {
-        crate::theme::validate(&state.http, &state.config.theme_dir, &reference).await?;
-        crate::theme::settings_schema(&state.http, &state.config.theme_dir, &reference).await?;
+        crate::theme::validate(&state.config.theme_dir, &reference).await?;
+        crate::theme::settings_schema(&state.config.theme_dir, &reference).await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
@@ -554,7 +554,7 @@ async fn create_installed_theme(
         let _ = crate::theme::remove_installed(&state.config.theme_dir, &reference).await;
         return Err(ApiResponse::unprocessable(error.to_string()));
     }
-    let version = crate::theme::version(&state.http, &state.config.theme_dir, &reference)
+    let version = crate::theme::version(&state.config.theme_dir, &reference)
         .await
         .unwrap_or(fallback_version);
     if let Err(error) =

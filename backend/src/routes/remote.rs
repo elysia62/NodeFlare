@@ -20,8 +20,10 @@ struct CreatedRemoteTask {
 
 fn remote_server_ids(input: &CreateRemoteTaskRequest) -> Vec<String> {
     let mut seen = HashSet::new();
-    std::iter::once(input.server_id.as_str())
-        .chain(input.server_ids.iter().map(String::as_str))
+    input
+        .server_ids
+        .iter()
+        .map(String::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .filter(|id| seen.insert((*id).to_string()))
@@ -52,18 +54,14 @@ pub async fn create_task(
     Json(input): Json<CreateRemoteTaskRequest>,
 ) -> Result<Response, ApiResponse> {
     let command = input.command.trim();
-    let script = input.script.trim();
     let server_ids = remote_server_ids(&input);
     if server_ids.is_empty()
         || server_ids.len() > MAX_REMOTE_TARGETS
         || server_ids.iter().any(|id| id.len() > 80)
-        || command.is_empty() == script.is_empty()
+        || command.is_empty()
         || command.len() > 16_384
-        || script.len() > 256 * 1024
     {
-        return Err(ApiResponse::bad_request(
-            "请选择 1 至 128 个节点，并且只填写命令或脚本中的一项",
-        ));
+        return Err(ApiResponse::bad_request("请选择 1 至 128 个节点并填写命令"));
     }
     let totp = crate::db::queries::get_totp_secret(&state.db, &user.username)
         .await
@@ -87,15 +85,10 @@ pub async fn create_task(
 
     let mut tasks = Vec::with_capacity(server_ids.len());
     for server_id in server_ids {
-        let task = crate::db::queries::create_remote_task(
-            &state.db,
-            &server_id,
-            command,
-            script,
-            &user.username,
-        )
-        .await
-        .map_err(ApiResponse::internal)?;
+        let task =
+            crate::db::queries::create_remote_task(&state.db, &server_id, command, &user.username)
+                .await
+                .map_err(ApiResponse::internal)?;
         if state.send_remote_task(&task).await {
             crate::db::queries::mark_remote_task_sent(&state.db, &task.id, &task.server_id)
                 .await
@@ -107,13 +100,9 @@ pub async fn create_task(
         });
     }
 
-    let task_id = tasks
-        .first()
-        .map(|task| task.task_id.clone())
-        .unwrap_or_default();
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({"task_id": task_id, "tasks": tasks})),
+        Json(serde_json::json!({"tasks": tasks})),
     )
         .into_response())
 }
@@ -127,18 +116,6 @@ pub async fn get_task(
         .map_err(ApiResponse::internal)?
         .ok_or_else(|| ApiResponse::not_found("任务不存在"))?;
     Ok(Json(task).into_response())
-}
-
-pub async fn get_server_tasks(
-    State(state): State<Arc<AppState>>,
-    Path(server_id): Path<String>,
-) -> Result<Response, ApiResponse> {
-    Ok(Json(
-        crate::db::queries::server_remote_tasks(&state.db, &server_id, 50)
-            .await
-            .map_err(ApiResponse::internal)?,
-    )
-    .into_response())
 }
 
 #[cfg(test)]
@@ -178,12 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn accepts_single_and_batch_server_ids_without_duplicates() {
+    fn trims_batch_server_ids_without_duplicates() {
         let input = CreateRemoteTaskRequest {
-            server_id: " server-a ".to_string(),
-            server_ids: vec!["server-a".to_string(), "server-b".to_string()],
+            server_ids: vec![
+                " server-a ".to_string(),
+                "server-a".to_string(),
+                "server-b".to_string(),
+            ],
             command: "uptime".to_string(),
-            script: String::new(),
             totp_code: "123456".to_string(),
         };
 

@@ -55,7 +55,7 @@ export interface ThemeSettingField {
 
 export interface ThemeSettingsSchema {
   schema: number;
-  source: "builtin" | "remote";
+  source: "builtin" | "installed";
   settings: ThemeSettingField[];
 }
 
@@ -331,7 +331,6 @@ export interface RemoteTask {
   id: string;
   server_id: string;
   command: string;
-  script: string;
   status: "pending" | "sent" | "success" | "failed";
   requested_by: string;
   requested_at: number;

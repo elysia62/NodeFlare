@@ -4,8 +4,9 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 config_dir=/etc/nodeflare
 config_file=$config_dir/config.toml
-state_dir=/var/lib/nodeflare
 install_dir=/opt/nodeflare
+data_dir=$install_dir/data
+state_dir=$data_dir/server
 share_dir=$install_dir/share
 public_frontend_dir=$share_dir/frontend
 admin_frontend_dir=$share_dir/admin
@@ -13,11 +14,6 @@ agent_installer_dir=$share_dir/agent
 server_binary=$install_dir/nodeflare
 service_name=nodeflare
 service_file=/etc/systemd/system/nodeflare.service
-legacy_current_binary=/usr/local/bin/nodeflare
-legacy_server_binary=/usr/local/bin/nodeflare-server
-legacy_share_dir=/usr/local/share/nodeflare
-legacy_service_file=/etc/systemd/system/nodeflare-server.service
-agent_service_file=/etc/systemd/system/nodeflare-agent.service
 build_target_dir=""
 config_temp=""
 tty_state=""
@@ -139,7 +135,7 @@ write_config() {
     printf '%s\n' '# NodeFlare 服务端配置'
     printf '%s\n' '# 修改后运行：systemctl restart nodeflare'
     printf '\n'
-    printf 'database_url = "sqlite:///var/lib/nodeflare/nodeflare.db"\n'
+    printf 'database_url = "sqlite:///opt/nodeflare/data/server/nodeflare.db"\n'
     printf 'bind_addr = "127.0.0.1:8080"\n'
     printf 'admin_username = "%s"\n' "$escaped_username"
     printf 'admin_password = "%s"\n' "$escaped_password"
@@ -151,7 +147,7 @@ write_config() {
     printf 'frontend_dir = "/opt/nodeflare/share/frontend"\n'
     printf 'admin_frontend_dir = "/opt/nodeflare/share/admin"\n'
     printf 'agent_dir = "/opt/nodeflare/share/agent"\n'
-    printf 'theme_dir = "/var/lib/nodeflare/themes"\n'
+    printf 'theme_dir = "/opt/nodeflare/data/server/themes"\n'
     printf 'session_ttl_hours = 168\n'
   } > "$config_temp"
   chown root:root "$config_temp"
@@ -162,34 +158,17 @@ write_config() {
   prompt_value=""
 }
 
-migrate_config_paths() {
-  config_temp=$(mktemp "$config_dir/.config.toml.XXXXXX")
-  sed \
-    -e 's|^frontend_dir = "/usr/local/share/nodeflare/frontend"$|frontend_dir = "/opt/nodeflare/share/frontend"|' \
-    -e 's|^admin_frontend_dir = "/usr/local/share/nodeflare/admin"$|admin_frontend_dir = "/opt/nodeflare/share/admin"|' \
-    -e 's|^agent_dir = "/usr/local/share/nodeflare/agent"$|agent_dir = "/opt/nodeflare/share/agent"|' \
-    "$config_file" > "$config_temp"
-  chown root:root "$config_temp"
-  chmod 0600 "$config_temp"
-  mv -f -- "$config_temp" "$config_file"
-  config_temp=""
-}
-
 uninstall_server() {
   purge=$1
   log "停止并移除 NodeFlare 面板服务"
   if command -v systemctl >/dev/null 2>&1; then
-    migrate_legacy_agent_service
     systemctl disable --now "$service_name.service" >/dev/null 2>&1 || true
-    systemctl disable --now nodeflare-server.service >/dev/null 2>&1 || true
   fi
-  rm -f -- "$service_file" "$server_binary" "$legacy_service_file" "$legacy_current_binary" "$legacy_server_binary"
+  rm -f -- "$service_file" "$server_binary"
   rm -rf -- "$share_dir"
-  rmdir "$install_dir" 2>/dev/null || true
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed "$service_name.service" >/dev/null 2>&1 || true
-    systemctl reset-failed nodeflare-server.service >/dev/null 2>&1 || true
   fi
 
   if [ "$purge" = true ]; then
@@ -199,21 +178,9 @@ uninstall_server() {
     log "已保留配置 $config_file 和数据目录 $state_dir"
     log "如需彻底删除，运行：sudo ./install.sh --uninstall --purge"
   fi
+  rmdir "$data_dir" 2>/dev/null || true
+  rmdir "$install_dir" 2>/dev/null || true
   log "卸载完成"
-}
-
-migrate_legacy_agent_service() {
-  if [ -f "$service_file" ] && grep -Fq '/opt/nodeflare/agent' "$service_file"; then
-    log "将旧 Agent 服务 nodeflare 迁移为 nodeflare-agent"
-    systemctl disable --now nodeflare.service >/dev/null 2>&1 || true
-    if [ ! -e "$agent_service_file" ]; then
-      mv -- "$service_file" "$agent_service_file"
-    else
-      rm -f -- "$service_file"
-    fi
-    systemctl daemon-reload
-    systemctl enable --now nodeflare-agent.service >/dev/null 2>&1 || true
-  fi
 }
 
 mode=install
@@ -233,7 +200,6 @@ if [ "$mode" = uninstall ]; then
 fi
 [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 \
   || fail "当前系统未使用 systemd"
-migrate_legacy_agent_service
 for required_command in bun install mktemp sed grep wc tr id chown chmod mv cp stty; do
   command -v "$required_command" >/dev/null 2>&1 || fail "缺少命令：$required_command"
 done
@@ -254,10 +220,11 @@ sh "$script_dir/scripts/build-frontend.sh"
 sh "$script_dir/scripts/build-backend.sh"
 
 install -d -m 0700 -o root -g root "$config_dir"
+install -d -m 0755 -o root -g root "$install_dir"
+install -d -m 0750 -o root -g root "$data_dir"
 install -d -m 0750 -o root -g root "$state_dir"
 install -d -m 0750 -o root -g root "$state_dir/themes"
 chown -R root:root "$state_dir"
-install -d -m 0755 -o root -g root "$install_dir"
 install -d -m 0755 -o root -g root "$share_dir"
 rm -rf -- "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
 install -d -m 0755 -o root -g root "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
@@ -269,21 +236,14 @@ install -m 0755 "$script_dir/agent/install-freebsd.sh" "$agent_installer_dir/ins
 install -m 0644 "$script_dir/agent/install.ps1" "$agent_installer_dir/install.ps1"
 chown -R root:root "$share_dir"
 chmod -R u=rwX,go=rX "$share_dir"
-systemctl disable --now nodeflare-server.service >/dev/null 2>&1 || true
-rm -f -- "$legacy_service_file" "$legacy_current_binary" "$legacy_server_binary"
 install -m 0755 "$CARGO_TARGET_DIR/release/nodeflare" "$server_binary"
 install -m 0644 "$script_dir/deploy/nodeflare.service" "$service_file"
 
 if [ "$new_config" = true ]; then
   write_config
 else
-  migrate_config_paths
   chown root:root "$config_file"
   chmod 0600 "$config_file"
-fi
-
-if ! grep -Fq "$legacy_share_dir/" "$config_file"; then
-  rm -rf -- "$legacy_share_dir"
 fi
 
 systemctl daemon-reload

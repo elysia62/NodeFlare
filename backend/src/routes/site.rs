@@ -12,7 +12,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
     if path.starts_with("/api/") {
         return ApiResponse::not_found("接口不存在").into_response();
     }
-    if matches!(path, "/admin" | "/admin/" | "/admin/index.html") {
+    if path == "/admin" || path.starts_with("/admin/") {
         return local_file(&state.config.admin_frontend_dir, "admin.html", false).await;
     }
     if let Some(relative) = path.strip_prefix("/admin-assets/") {
@@ -83,15 +83,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
 }
 
 async fn theme_file(state: &AppState, base: &str, relative: &str, prefix: &str) -> Response {
-    match crate::theme::fetch_theme_path(
-        &state.http,
-        &state.config.theme_dir,
-        base,
-        relative,
-        prefix,
-    )
-    .await
-    {
+    match crate::theme::fetch_theme_path(&state.config.theme_dir, base, relative, prefix).await {
         Ok((body, content_type)) => response(body, &content_type, true),
         Err(error) => {
             tracing::warn!(%error, path = relative, "theme asset failed");

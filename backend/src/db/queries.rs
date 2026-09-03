@@ -44,10 +44,7 @@ pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<Ser
          s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, \
          s.report_interval, s.collect_interval, s.rx_correction, s.tx_correction, \
          s.agent_mirror, s.offline_notify_disabled, s.auto_update, \
-         l.latest_timestamp, l.latest_json, l.cpu AS legacy_cpu, l.mem_used AS legacy_mem_used, \
-         l.mem_total AS legacy_mem_total, l.disk_used AS legacy_disk_used, \
-         l.disk_total AS legacy_disk_total, l.net_in AS legacy_net_in, \
-         l.net_out AS legacy_net_out, l.uptime AS legacy_uptime \
+         l.latest_json \
          FROM servers s LEFT JOIN server_latest_state l ON l.server_id=s.id \
          ORDER BY s.sort_order, s.created_at"
     } else {
@@ -56,10 +53,7 @@ pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<Ser
          s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, \
          s.report_interval, s.collect_interval, s.rx_correction, s.tx_correction, \
          s.agent_mirror, s.offline_notify_disabled, s.auto_update, \
-         l.latest_timestamp, l.latest_json, l.cpu AS legacy_cpu, l.mem_used AS legacy_mem_used, \
-         l.mem_total AS legacy_mem_total, l.disk_used AS legacy_disk_used, \
-         l.disk_total AS legacy_disk_total, l.net_in AS legacy_net_in, \
-         l.net_out AS legacy_net_out, l.uptime AS legacy_uptime \
+         l.latest_json \
          FROM servers s LEFT JOIN server_latest_state l ON l.server_id=s.id \
          WHERE s.hidden=0 ORDER BY s.sort_order, s.created_at"
     };
@@ -68,57 +62,11 @@ pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<Ser
     rows.into_iter()
         .map(|row| {
             let id: String = row.try_get("id")?;
-            let timestamp: Option<i64> = row.try_get("latest_timestamp")?;
             let latest_json: Option<String> = row.try_get("latest_json")?;
             let report = latest_json
                 .as_deref()
                 .filter(|value| !value.is_empty() && *value != "{}")
                 .and_then(|value| serde_json::from_str::<AgentReport>(value).ok());
-            let legacy = timestamp.map(|timestamp| AgentReport {
-                timestamp,
-                cpu: row
-                    .try_get::<Option<f64>, _>("legacy_cpu")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0.0),
-                mem_used: row
-                    .try_get::<Option<i64>, _>("legacy_mem_used")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0),
-                mem_total: row
-                    .try_get::<Option<i64>, _>("legacy_mem_total")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0),
-                disk_used: row
-                    .try_get::<Option<i64>, _>("legacy_disk_used")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0),
-                disk_total: row
-                    .try_get::<Option<i64>, _>("legacy_disk_total")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0),
-                net_in: row
-                    .try_get::<Option<f64>, _>("legacy_net_in")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0.0),
-                net_out: row
-                    .try_get::<Option<f64>, _>("legacy_net_out")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0.0),
-                uptime: row
-                    .try_get::<Option<i64>, _>("legacy_uptime")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0),
-                ..AgentReport::default()
-            });
-            let report = report.or(legacy);
             let value = |read: fn(&AgentReport) -> f64| report.as_ref().map(read);
             let integer = |read: fn(&AgentReport) -> i64| report.as_ref().map(read);
             let text = |read: fn(&AgentReport) -> &String| report.as_ref().map(|r| read(r).clone());
@@ -148,7 +96,7 @@ pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<Ser
                 agent_mirror: row.try_get("agent_mirror")?,
                 offline_notify_disabled: row.try_get::<i64, _>("offline_notify_disabled")? != 0,
                 auto_update: row.try_get::<i64, _>("auto_update")? != 0,
-                timestamp: report.as_ref().map(|report| report.timestamp).or(timestamp),
+                timestamp: report.as_ref().map(|report| report.timestamp),
                 cpu: value(|r| r.cpu),
                 load1: value(|r| r.load1),
                 load5: value(|r| r.load5),
@@ -1353,14 +1301,12 @@ pub async fn create_remote_task(
     db: &Database,
     server_id: &str,
     command: &str,
-    script: &str,
     username: &str,
 ) -> Result<RemoteTaskInfo> {
     let task = RemoteTaskInfo {
         id: uuid::Uuid::new_v4().to_string(),
         server_id: server_id.to_string(),
         command: command.to_string(),
-        script: script.to_string(),
         status: "pending".to_string(),
         requested_by: username.to_string(),
         requested_at: now(),
@@ -1370,13 +1316,12 @@ pub async fn create_remote_task(
         exit_code: None,
     };
     sqlx::query(db.sql(
-        "INSERT INTO remote_tasks(id, server_id, command, script, status, requested_by, \
-         requested_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        "INSERT INTO remote_tasks(id, server_id, command, status, requested_by, requested_at) \
+         VALUES (?, ?, ?, 'pending', ?, ?)",
     ))
     .bind(&task.id)
     .bind(&task.server_id)
     .bind(&task.command)
-    .bind(&task.script)
     .bind(&task.requested_by)
     .bind(task.requested_at)
     .execute(db.pool())
@@ -1386,7 +1331,7 @@ pub async fn create_remote_task(
 
 pub async fn remote_task(db: &Database, id: &str) -> Result<Option<RemoteTaskInfo>> {
     let row = sqlx::query(db.sql(
-        "SELECT id, server_id, command, script, status, requested_by, requested_at, started_at, \
+        "SELECT id, server_id, command, status, requested_by, requested_at, started_at, \
          completed_at, result, exit_code FROM remote_tasks WHERE id=?",
     ))
     .bind(id)
@@ -1397,29 +1342,9 @@ pub async fn remote_task(db: &Database, id: &str) -> Result<Option<RemoteTaskInf
         .map_err(Into::into)
 }
 
-pub async fn server_remote_tasks(
-    db: &Database,
-    server_id: &str,
-    limit: i64,
-) -> Result<Vec<RemoteTaskInfo>> {
-    let rows = sqlx::query(db.sql(
-        "SELECT id, server_id, command, script, status, requested_by, requested_at, started_at, \
-         completed_at, result, exit_code FROM remote_tasks WHERE server_id=? \
-         ORDER BY requested_at DESC LIMIT ?",
-    ))
-    .bind(server_id)
-    .bind(limit.clamp(1, 200))
-    .fetch_all(db.pool())
-    .await?;
-    rows.into_iter()
-        .map(remote_task_from_row)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
 pub async fn pending_remote_tasks(db: &Database, server_id: &str) -> Result<Vec<RemoteTaskInfo>> {
     let rows = sqlx::query(db.sql(
-        "SELECT id, server_id, command, script, status, requested_by, requested_at, started_at, \
+        "SELECT id, server_id, command, status, requested_by, requested_at, started_at, \
          completed_at, result, exit_code FROM remote_tasks WHERE server_id=? AND status='pending' \
          ORDER BY requested_at LIMIT 50",
     ))
@@ -1439,7 +1364,6 @@ fn remote_task_from_row(
         id: row.try_get("id")?,
         server_id: row.try_get("server_id")?,
         command: row.try_get("command")?,
-        script: row.try_get("script")?,
         status: row.try_get("status")?,
         requested_by: row.try_get("requested_by")?,
         requested_at: row.try_get("requested_at")?,

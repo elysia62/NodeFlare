@@ -96,7 +96,6 @@ CREATE TABLE remote_tasks (
   id TEXT PRIMARY KEY,
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
   command TEXT NOT NULL,
-  script TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'sent', 'running', 'success', 'failed')),
   requested_by TEXT NOT NULL,
   requested_at BIGINT NOT NULL,

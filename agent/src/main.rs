@@ -1810,7 +1810,6 @@ struct RemoteTaskMessage {
     message_type: String,
     task_id: String,
     command: String,
-    script: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1826,17 +1825,7 @@ struct TaskResultMessage {
 fn execute_remote_task(task: &RemoteTaskMessage) -> TaskResultMessage {
     let task_id = task.task_id.clone();
 
-    // 优先执行 script，否则执行 command
-    let (shell, args) = if !task.script.is_empty() {
-        #[cfg(unix)]
-        {
-            ("sh", vec!["-c", task.script.as_str()])
-        }
-        #[cfg(target_os = "windows")]
-        {
-            ("cmd.exe", vec!["/C", task.script.as_str()])
-        }
-    } else if !task.command.is_empty() {
+    let (shell, args) = if !task.command.is_empty() {
         #[cfg(unix)]
         {
             ("sh", vec!["-c", task.command.as_str()])
@@ -1850,7 +1839,7 @@ fn execute_remote_task(task: &RemoteTaskMessage) -> TaskResultMessage {
             message_type: "task_result".to_string(),
             task_id,
             status: "failed".to_string(),
-            result: "No command or script provided".to_string(),
+            result: "No command provided".to_string(),
             exit_code: Some(-1),
         };
     };
@@ -2340,16 +2329,24 @@ fn pending_spool_path() -> Result<PathBuf> {
         return Ok(directory.join("pending.jsonl"));
     }
     #[cfg(target_os = "windows")]
-    if let Some(program_data) = env::var_os("ProgramData") {
-        let directory = PathBuf::from(program_data).join("NodeFlare");
+    {
+        let executable = env::current_exe()?;
+        let directory = executable
+            .parent()
+            .ok_or("agent executable path has no parent directory")?
+            .join("data")
+            .join("agent");
         fs::create_dir_all(&directory)?;
         return Ok(directory.join("pending.jsonl"));
     }
-    let executable = env::current_exe()?;
-    let directory = executable
-        .parent()
-        .ok_or("agent executable path has no parent directory")?;
-    Ok(directory.join("pending.jsonl"))
+    #[cfg(not(target_os = "windows"))]
+    {
+        let executable = env::current_exe()?;
+        let directory = executable
+            .parent()
+            .ok_or("agent executable path has no parent directory")?;
+        Ok(directory.join("pending.jsonl"))
+    }
 }
 
 fn load_pending_spool(path: &Path) -> Result<Vec<Report>> {

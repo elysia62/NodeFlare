@@ -254,7 +254,6 @@ fn send_task(outbound: &mpsc::UnboundedSender<AgentCommand>, task: &RemoteTaskIn
                 "type": "remote_task",
                 "task_id": task.id,
                 "command": task.command,
-                "script": task.script,
             })
             .to_string(),
         ))

@@ -10,12 +10,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $TaskName = "nodeflare-agent"
-$LegacyTaskName = "NodeFlare Agent"
 $InstallDir = Join-Path $env:ProgramFiles "NodeFlare"
-$StateDir = Join-Path $env:ProgramData "NodeFlare"
+$DataDir = Join-Path $InstallDir "data"
+$StateDir = Join-Path $DataDir "agent"
 $AgentFile = Join-Path $InstallDir "agent.exe"
-$LegacyAgentFile = Join-Path $StateDir "nodeflare-agent.exe"
-$LegacyCurrentAgentFile = Join-Path $StateDir "agent.exe"
 
 function Write-Step([string]$Message) {
   Write-Host "[NodeFlare] $Message"
@@ -73,11 +71,10 @@ if ($Uninstall) {
   Write-Step "正在停止并移除 NodeFlare Agent"
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-  Stop-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue
-  Unregister-ScheduledTask -TaskName $LegacyTaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $AgentFile -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $StateDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $DataDir -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
   Write-Host "NodeFlare Agent 已卸载"
   exit 0
 }
@@ -111,6 +108,7 @@ if ($TokenLength -gt 512) {
 $Endpoint = $Endpoint.TrimEnd('/')
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
 New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
 & icacls.exe $InstallDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
 & icacls.exe $StateDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
@@ -152,11 +150,7 @@ try {
     Write-InstallError "Release $($Release.tag_name) 与 Agent 版本 $InstalledVersion 不一致"
   }
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-  Stop-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue
-  Unregister-ScheduledTask -TaskName $LegacyTaskName -Confirm:$false -ErrorAction SilentlyContinue
   Move-Item -LiteralPath $Temporary -Destination $AgentFile -Force
-  Remove-Item -LiteralPath $LegacyAgentFile -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $LegacyCurrentAgentFile -Force -ErrorAction SilentlyContinue
 } finally {
   Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
 }

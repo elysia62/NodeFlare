@@ -138,10 +138,9 @@ export const api = {
     ),
   databaseStats: () => request<DatabaseStats>("/api/admin/database", {}, true),
   clearHistory: () => request<void>("/api/admin/history", { method: "DELETE" }, true),
-  createRemoteTask: (input: RemoteTaskInput) => request<{ task_id: string; tasks: RemoteTaskCreated[] }>("/api/admin/remote/task", {
+  createRemoteTask: (input: RemoteTaskInput) => request<{ tasks: RemoteTaskCreated[] }>("/api/admin/remote/task", {
     method: "POST",
     body: JSON.stringify(input),
   }, true),
   remoteTask: (id: string) => request<RemoteTask>(`/api/admin/remote/task/${encodeURIComponent(id)}`, {}, true),
-  remoteTasks: (serverId: string) => request<RemoteTask[]>(`/api/admin/remote/tasks/${encodeURIComponent(serverId)}`, {}, true),
 };

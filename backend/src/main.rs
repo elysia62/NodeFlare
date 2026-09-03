@@ -217,10 +217,6 @@ async fn main() -> Result<()> {
         .route("/api/admin/history", delete(routes::admin::history_delete))
         .route("/api/admin/remote/task", post(routes::remote::create_task))
         .route("/api/admin/remote/task/:id", get(routes::remote::get_task))
-        .route(
-            "/api/admin/remote/tasks/:server_id",
-            get(routes::remote::get_server_tasks),
-        )
         .layer(axum_middleware::from_fn_with_state(
             Arc::clone(&state),
             middleware::auth_middleware,

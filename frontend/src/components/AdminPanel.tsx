@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError, getToken, setToken } from "../api";
+import { adminTabFromPath, adminTabPaths, type AdminTab } from "../adminRoutes";
 import { formatByteSize, isOnline, parseByteSize } from "../format";
 import { derivePassword } from "../password";
 import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS } from "../refresh";
@@ -50,7 +51,6 @@ import pkg from "../../package.json";
 
 const VERSION = import.meta.env.VITE_NODEFLARE_VERSION || pkg.version;
 
-type AdminTab = "servers" | "latency" | "appearance" | "themes" | "themeSettings" | "alerts" | "security" | "data" | "remote" | "about";
 type AgentPlatform = "linux" | "windows" | "macos" | "freebsd";
 type ThemeSourceMode = "repository" | "upload";
 
@@ -63,7 +63,7 @@ const adminPages: Record<AdminTab, { title: string; description: string }> = {
   servers: { title: "服务器", description: "管理监控节点和运行参数" },
   latency: { title: "延迟检测", description: "配置分配给各服务器的 TCP 与 ICMP 延迟任务" },
   appearance: { title: "站点设置", description: "调整站点信息、公开内容和前台显示项目" },
-  themes: { title: "主题商店", description: "选择内置主题或安装远程主题" },
+  themes: { title: "主题商店", description: "选择内置主题或安装本地主题包" },
   themeSettings: { title: "主题设置", description: "调整当前前端主题提供的显示选项" },
   alerts: { title: "通知", description: "配置 Telegram 通知和资源告警阈值" },
   security: { title: "登录与安全", description: "管理管理员账号和 Cloudflare Turnstile 防护" },
@@ -71,6 +71,19 @@ const adminPages: Record<AdminTab, { title: string; description: string }> = {
   remote: { title: "远程执行", description: "输入一次性命令，选择服务器并通过 TOTP 验证后下发" },
   about: { title: "关于", description: "版本信息与项目地址" },
 };
+
+const adminNavigation = [
+  { tab: "servers" as const, label: "服务器", icon: ServerCog },
+  { tab: "latency" as const, label: "延迟检测", icon: RadioTower },
+  { tab: "remote" as const, label: "远程执行", icon: Terminal },
+  { tab: "alerts" as const, label: "通知", icon: AlertTriangle },
+  { tab: "themes" as const, label: "主题商店", icon: Palette },
+  { tab: "themeSettings" as const, label: "主题设置", icon: SlidersHorizontal },
+  { tab: "appearance" as const, label: "站点设置", icon: Eye },
+  { tab: "security" as const, label: "登录与安全", icon: ShieldCheck },
+  { tab: "data" as const, label: "监控数据库", icon: Database },
+  { tab: "about" as const, label: "关于", icon: Info },
+];
 
 const remoteTaskStatusLabels: Record<RemoteTask["status"], string> = {
   pending: "等待接收",
@@ -219,7 +232,7 @@ export function AdminPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [tab, setTab] = useState<AdminTab>("servers");
+  const [tab, setTab] = useState<AdminTab>(() => adminTabFromPath(window.location.pathname));
   const [servers, setServers] = useState<AdminServer[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [draggingId, setDraggingId] = useState("");
@@ -296,6 +309,26 @@ export function AdminPanel({
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    const canonicalPath = adminTabPaths[adminTabFromPath(window.location.pathname)];
+    if (window.location.pathname !== canonicalPath) {
+      window.history.replaceState(null, "", canonicalPath);
+    }
+    const handlePopState = () => {
+      setTab(adminTabFromPath(window.location.pathname));
+      setNotice("");
+      setError("");
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    if (tab === "themeSettings") void loadThemeSettings();
+    if (tab === "data" && !database) void loadDatabase();
+  }, [authenticated, tab]);
 
   useEffect(() => {
     const resetAuthentication = () => {
@@ -712,6 +745,8 @@ export function AdminPanel({
     theme_options: { ...current.theme_options, [key]: value },
   } : current);
   const selectTab = (next: AdminTab) => {
+    const path = adminTabPaths[next];
+    if (window.location.pathname !== path) window.history.pushState(null, "", path);
     setTab(next);
     setNotice("");
     setError("");
@@ -786,7 +821,6 @@ export function AdminPanel({
         id: task_id,
         server_id,
         command,
-        script: "",
         status: "pending" as const,
         requested_by: "",
         requested_at: requestedAt,
@@ -901,16 +935,14 @@ export function AdminPanel({
                   且 APG 的 tab 模式要求方向键 + roving tabindex，而主题设置和监控数据库点了要发请求，
                   方向键扫过就会连带触发。每项换的是整块内容和它自己的 h1，本质是页内导航，不是 tab 面板。 */}
               <nav className="admin-tabs" aria-labelledby="admin-nav-label">
-                <button type="button" className={tab === "servers" ? "active" : ""} aria-current={tab === "servers" ? "page" : undefined} onClick={() => selectTab("servers")}><ServerCog size={17} />服务器</button>
-                <button type="button" className={tab === "latency" ? "active" : ""} aria-current={tab === "latency" ? "page" : undefined} onClick={() => selectTab("latency")}><RadioTower size={17} />延迟检测</button>
-                <button type="button" className={tab === "remote" ? "active" : ""} aria-current={tab === "remote" ? "page" : undefined} onClick={() => selectTab("remote")}><Terminal size={17} />远程执行</button>
-                <button type="button" className={tab === "alerts" ? "active" : ""} aria-current={tab === "alerts" ? "page" : undefined} onClick={() => selectTab("alerts")}><AlertTriangle size={17} />通知</button>
-                <button type="button" className={tab === "themes" ? "active" : ""} aria-current={tab === "themes" ? "page" : undefined} onClick={() => selectTab("themes")}><Palette size={17} />主题商店</button>
-                <button type="button" className={tab === "themeSettings" ? "active" : ""} aria-current={tab === "themeSettings" ? "page" : undefined} onClick={() => { selectTab("themeSettings"); void loadThemeSettings(); }}><SlidersHorizontal size={17} />主题设置</button>
-                <button type="button" className={tab === "appearance" ? "active" : ""} aria-current={tab === "appearance" ? "page" : undefined} onClick={() => selectTab("appearance")}><Eye size={17} />站点设置</button>
-                <button type="button" className={tab === "security" ? "active" : ""} aria-current={tab === "security" ? "page" : undefined} onClick={() => selectTab("security")}><ShieldCheck size={17} />登录与安全</button>
-                <button type="button" className={tab === "data" ? "active" : ""} aria-current={tab === "data" ? "page" : undefined} onClick={() => { selectTab("data"); if (!database) void loadDatabase(); }}><Database size={17} />监控数据库</button>
-                <button type="button" className={tab === "about" ? "active" : ""} aria-current={tab === "about" ? "page" : undefined} onClick={() => selectTab("about")}><Info size={17} />关于</button>
+                {adminNavigation.map((item) => {
+                  const Icon = item.icon;
+                  return <a key={item.tab} href={adminTabPaths[item.tab]} className={tab === item.tab ? "active" : ""} aria-current={tab === item.tab ? "page" : undefined} onClick={(event) => {
+                    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                    event.preventDefault();
+                    selectTab(item.tab);
+                  }}><Icon size={17} />{item.label}</a>;
+                })}
               </nav>
             </aside>
             <div className="admin-content">

@@ -39,6 +39,7 @@ printf '%s' "$security_headers" | grep -qi '^x-content-type-options: nosniff'
 printf '%s' "$security_headers" | grep -qi '^x-frame-options: DENY'
 printf '%s' "$security_headers" | grep -qi "^content-security-policy:.*frame-ancestors 'none'"
 admin_html=$(request "$MONITOR_BASE_URL/admin")
+request "$MONITOR_BASE_URL/admin/about" | grep -q '/admin-assets/'
 admin_script=$(printf '%s' "$admin_html" | sed -n 's/.*src="\([^"]*\.js\)".*/\1/p' | head -n 1)
 admin_stylesheet=$(printf '%s' "$admin_html" | sed -n 's/.*href="\([^"]*\.css\)".*/\1/p' | head -n 1)
 [ -n "$admin_script" ] || { echo "Admin script is missing" >&2; exit 1; }
@@ -58,7 +59,7 @@ admin_token=$(printf '%s' "$login_json" | jq -er '.token')
 # remains inactive so the first admin settings save must still work.
 settings_payload=$(request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/settings" | \
-  jq -c '.site_description = "Smoke settings" | del(.admin_password_configured)')
+  jq -c '.site_description = "Smoke settings" | del(.admin_password_configured, .totp_login_enabled)')
 request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
   --data "$settings_payload" \
   "$MONITOR_BASE_URL/api/admin/settings" | jq -e '.settings.site_description == "Smoke settings"' >/dev/null
