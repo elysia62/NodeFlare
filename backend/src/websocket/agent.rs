@@ -1,8 +1,8 @@
 use super::{AgentCommand, AgentConnection, DashboardEvent};
+use crate::AppState;
 use crate::db::queries::{AgentIdentity, PersistResult};
 use crate::models::{AgentReport, RemoteTaskInfo};
-use crate::routes::{forwarded_ip, ApiResponse};
-use crate::AppState;
+use crate::routes::{ApiResponse, forwarded_ip};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;

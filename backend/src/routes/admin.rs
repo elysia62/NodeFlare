@@ -1,15 +1,16 @@
-use super::{admin_cookie, request_is_secure, ApiResponse};
+use super::{ApiResponse, admin_cookie, request_is_secure};
+use crate::AppState;
 use crate::db::SECRET_MASK;
 use crate::middleware::AuthenticatedUser;
 use crate::models::{
     AlertRuleInput, LatencyTaskInput, ServerBatchInput, ServerInput, ServerOrderInput,
-    SettingsInput, TelegramSettingsInput, ThemeInput,
+    SettingsInput, TelegramSettingsInput, ThemeInput, ThemeUploadInput,
 };
-use crate::AppState;
-use axum::extract::{Extension, Path, State};
-use axum::http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::body::to_bytes;
+use axum::extract::{Extension, Path, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE};
+use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -370,14 +371,10 @@ pub async fn themes_post(
     State(state): State<Arc<AppState>>,
     Json(input): Json<ThemeInput>,
 ) -> Result<Response, ApiResponse> {
-    if !(1..=80).contains(&input.name.trim().chars().count())
-        || input.description.trim().chars().count() > 300
-    {
-        return Err(ApiResponse::bad_request("主题名称或说明无效"));
-    }
-    let resolved = crate::theme::resolve_url(&input.url)
+    validate_theme_metadata(&input.name, &input.description)?;
+    let source_url = crate::theme::normalize_repository_url(&input.url)
         .map_err(|error| ApiResponse::bad_request(error.to_string()))?;
-    let digest = Sha256::digest(resolved.source_url.as_bytes());
+    let digest = Sha256::digest(source_url.as_bytes());
     let id = format!("theme-{}", &hex::encode(digest)[..16]);
     if crate::db::queries::theme_exists(&state.db, &id)
         .await
@@ -385,25 +382,68 @@ pub async fn themes_post(
     {
         return Err(ApiResponse::conflict("该主题已添加"));
     }
-    crate::theme::validate_remote(&state.http, &resolved.resolved_url)
+    let downloaded = crate::theme::download_latest_release(&state.http, &source_url)
         .await
         .map_err(|error| ApiResponse::unprocessable(error.to_string()))?;
-    let version = crate::theme::remote_version(&state.http, &resolved.resolved_url)
-        .await
-        .unwrap_or_default();
-    crate::db::queries::create_theme(
-        &state.db,
-        &id,
-        &ThemeInput {
-            url: resolved.source_url,
+    create_installed_theme(
+        &state,
+        id,
+        ThemeInput {
+            url: downloaded.source_url,
             ..input
         },
-        &resolved.resolved_url,
-        &version,
+        downloaded.archive,
+        downloaded.release_version,
     )
     .await
-    .map_err(ApiResponse::internal)?;
-    Ok((StatusCode::CREATED, Json(serde_json::json!({"id": id}))).into_response())
+}
+
+pub async fn themes_upload(
+    State(state): State<Arc<AppState>>,
+    Query(input): Query<ThemeUploadInput>,
+    request: Request,
+) -> Result<Response, ApiResponse> {
+    validate_theme_metadata(&input.name, &input.description)?;
+    let filename = validate_theme_filename(&input.filename)?;
+    if request
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > crate::theme::THEME_ZIP_MAX_BYTES)
+    {
+        return Err(ApiResponse::error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "主题 ZIP 不能超过 32 MiB",
+        ));
+    }
+    let archive = to_bytes(request.into_body(), crate::theme::THEME_ZIP_MAX_BYTES)
+        .await
+        .map_err(|_| ApiResponse::error(StatusCode::PAYLOAD_TOO_LARGE, "主题 ZIP 不能超过 32 MiB"))?
+        .to_vec();
+    if archive.is_empty() {
+        return Err(ApiResponse::bad_request("请选择非空 ZIP 文件"));
+    }
+    let digest = Sha256::digest(&archive);
+    let id = format!("theme-{}", &hex::encode(digest)[..16]);
+    if crate::db::queries::theme_exists(&state.db, &id)
+        .await
+        .map_err(ApiResponse::internal)?
+    {
+        return Err(ApiResponse::conflict("该主题 ZIP 已添加"));
+    }
+    create_installed_theme(
+        &state,
+        id,
+        ThemeInput {
+            name: input.name,
+            description: input.description,
+            url: format!("upload:{filename}"),
+        },
+        archive,
+        String::new(),
+    )
+    .await
 }
 
 pub async fn theme_activate(
@@ -416,7 +456,7 @@ pub async fn theme_activate(
             .await
             .map_err(ApiResponse::internal)?
             .ok_or_else(|| ApiResponse::not_found("主题不存在"))?;
-        crate::theme::validate_remote(&state.http, &url)
+        crate::theme::validate(&state.http, &state.config.theme_dir, &url)
             .await
             .map_err(|error| ApiResponse::unprocessable(error.to_string()))?;
     }
@@ -458,12 +498,19 @@ pub async fn theme_delete(
     if id == crate::theme::BUILTIN_THEME_ID {
         return Err(ApiResponse::bad_request("内置主题不能删除"));
     }
+    let reference = crate::db::queries::theme_resolved_url(&state.db, &id)
+        .await
+        .map_err(ApiResponse::internal)?
+        .ok_or_else(|| ApiResponse::not_found("主题不存在"))?;
     if !crate::db::queries::delete_theme(&state.db, &id)
         .await
         .map_err(ApiResponse::internal)?
     {
         return Err(ApiResponse::not_found("主题不存在"));
     }
+    crate::theme::remove_installed(&state.config.theme_dir, &reference)
+        .await
+        .map_err(ApiResponse::internal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -479,11 +526,68 @@ pub async fn theme_settings(State(state): State<Arc<AppState>>) -> Result<Respon
         .map_err(ApiResponse::internal)?
         .ok_or_else(|| ApiResponse::not_found("当前主题不存在"))?;
     Ok(Json(
-        crate::theme::remote_settings_schema(&state.http, &url)
+        crate::theme::settings_schema(&state.http, &state.config.theme_dir, &url)
             .await
             .map_err(|error| ApiResponse::unprocessable(error.to_string()))?,
     )
     .into_response())
+}
+
+async fn create_installed_theme(
+    state: &AppState,
+    id: String,
+    input: ThemeInput,
+    archive: Vec<u8>,
+    fallback_version: String,
+) -> Result<Response, ApiResponse> {
+    crate::theme::install_archive(&state.config.theme_dir, &id, archive)
+        .await
+        .map_err(|error| ApiResponse::unprocessable(error.to_string()))?;
+    let reference = crate::theme::local_reference(&id).map_err(ApiResponse::internal)?;
+    let validation = async {
+        crate::theme::validate(&state.http, &state.config.theme_dir, &reference).await?;
+        crate::theme::settings_schema(&state.http, &state.config.theme_dir, &reference).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = validation {
+        let _ = crate::theme::remove_installed(&state.config.theme_dir, &reference).await;
+        return Err(ApiResponse::unprocessable(error.to_string()));
+    }
+    let version = crate::theme::version(&state.http, &state.config.theme_dir, &reference)
+        .await
+        .unwrap_or(fallback_version);
+    if let Err(error) =
+        crate::db::queries::create_theme(&state.db, &id, &input, &reference, &version).await
+    {
+        let _ = crate::theme::remove_installed(&state.config.theme_dir, &reference).await;
+        return Err(ApiResponse::internal(error));
+    }
+    Ok((StatusCode::CREATED, Json(serde_json::json!({"id": id}))).into_response())
+}
+
+fn validate_theme_metadata(name: &str, description: &str) -> Result<(), ApiResponse> {
+    if !(1..=80).contains(&name.trim().chars().count()) || description.trim().chars().count() > 300
+    {
+        return Err(ApiResponse::bad_request("主题名称或说明无效"));
+    }
+    Ok(())
+}
+
+fn validate_theme_filename(value: &str) -> Result<String, ApiResponse> {
+    let filename = value.trim();
+    if filename.is_empty()
+        || filename.chars().count() > 255
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.chars().any(char::is_control)
+        || !filename.to_ascii_lowercase().ends_with(".zip")
+    {
+        return Err(ApiResponse::bad_request(
+            "上传文件必须是名称有效的 ZIP 文件",
+        ));
+    }
+    Ok(filename.to_string())
 }
 
 pub async fn exchange_refresh(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
@@ -710,14 +814,13 @@ async fn validate_settings(
     }) {
         return Err(ApiResponse::bad_request("主题设置格式无效"));
     }
-    if let Some(id) = input.active_theme_id.as_deref() {
-        if id != crate::theme::BUILTIN_THEME_ID
-            && !crate::db::queries::theme_exists(&state.db, id)
-                .await
-                .map_err(ApiResponse::internal)?
-        {
-            return Err(ApiResponse::bad_request("活动主题不存在"));
-        }
+    if let Some(id) = input.active_theme_id.as_deref()
+        && id != crate::theme::BUILTIN_THEME_ID
+        && !crate::db::queries::theme_exists(&state.db, id)
+            .await
+            .map_err(ApiResponse::internal)?
+    {
+        return Err(ApiResponse::bad_request("活动主题不存在"));
     }
     let site_key = submitted_secret(
         input.turnstile_site_key.as_deref(),

@@ -80,25 +80,67 @@ export function useNodeLatency(
 
   useEffect(() => {
     if (!enabled) { setLoading(false); return; }
-    let active = true;
-    const load = (force: boolean) => {
-      const hit = cache.get(server.id);
-      if (!force && hit && Date.now() - hit.at < CACHE_TTL) {
-        setFetched(hit.points);
-        setLoading(false);
-        return;
+    let stopped = false;
+    let running = false;
+    let timer: number | undefined;
+
+    const canRefresh = () => !document.hidden && navigator.onLine !== false;
+    const clearTimer = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
       }
-      if (!hit) setLoading(true);
-      void api.latencyHistory(server.id, WINDOW_HOURS).then((result) => {
-        cache.set(server.id, { at: Date.now(), points: result.points });
-        if (active) setFetched(result.points);
-      }).catch(() => {
-        // Keep the last successful samples visible during transient failures.
-      }).finally(() => { if (active) setLoading(false); });
     };
-    load(false);
-    const timer = window.setInterval(() => load(true), REFRESH_INTERVAL);
-    return () => { active = false; window.clearInterval(timer); };
+    const schedule = () => {
+      clearTimer();
+      if (!stopped && canRefresh()) {
+        timer = window.setTimeout(() => void load(true), REFRESH_INTERVAL);
+      }
+    };
+    const load = async (force: boolean) => {
+      clearTimer();
+      if (stopped || running || !canRefresh()) return;
+      running = true;
+      try {
+        const hit = cache.get(server.id);
+        if (!force && hit && Date.now() - hit.at < CACHE_TTL) {
+          setFetched(hit.points);
+          setLoading(false);
+          return;
+        }
+        if (!hit) setLoading(true);
+        const result = await api.latencyHistory(server.id, WINDOW_HOURS);
+        cache.set(server.id, { at: Date.now(), points: result.points });
+        if (!stopped) setFetched(result.points);
+      } catch {
+        // Keep the last successful samples visible during transient failures.
+      } finally {
+        running = false;
+        if (!stopped) setLoading(false);
+        schedule();
+      }
+    };
+    const resume = () => {
+      clearTimer();
+      if (!stopped && canRefresh() && !running) void load(true);
+    };
+    const pause = () => clearTimer();
+    const handleVisibility = () => {
+      if (document.hidden) pause();
+      else resume();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("online", resume);
+    window.addEventListener("offline", pause);
+    if (canRefresh()) void load(false);
+    return () => {
+      stopped = true;
+      clearTimer();
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("offline", pause);
+    };
   }, [enabled, server.id]);
 
   // 保留历史柱，同时用实时推送覆盖同一任务的最新样本。

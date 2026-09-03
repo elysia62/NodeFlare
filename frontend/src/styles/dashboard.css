@@ -183,7 +183,11 @@ html[data-blur="on"] .node-offline-overlay { backdrop-filter: blur(2px); }
 .detail-chart { min-width: 0; overflow: hidden; border-radius: 8px; padding: 16px; }
 .detail-chart > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 0 8px; }
 .detail-chart h3 { margin: 0; font-size: 14px; font-weight: 600; }
-.detail-chart header span { overflow: hidden; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.detail-chart header > span { overflow: hidden; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.network-live-values { display: inline-flex; align-items: center; gap: 10px; }
+.network-live-values b { font-size: 11px; font-weight: 600; }
+.network-live-values .upload { color: var(--success-bar); }
+.network-live-values .download { color: var(--info); }
 .detail-chart > div { width: 100%; height: 208px; }
 .latency-overview { min-width: 0; overflow: hidden; border-radius: 8px; }
 .latency-task-legend { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px 20px; border-bottom: 1px solid var(--border); padding: 10px 16px; }

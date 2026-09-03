@@ -6,8 +6,8 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::routes::{bearer_or_cookie, ApiResponse};
 use crate::AppState;
+use crate::routes::{ApiResponse, bearer_or_cookie};
 
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,

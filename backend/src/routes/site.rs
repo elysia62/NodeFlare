@@ -1,8 +1,8 @@
-use crate::routes::ApiResponse;
 use crate::AppState;
+use crate::routes::ApiResponse;
 use axum::body::Body;
 use axum::extract::{OriginalUri, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -16,7 +16,10 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
         return local_file(&state.config.admin_frontend_dir, "admin.html", false).await;
     }
     if let Some(relative) = path.strip_prefix("/admin-assets/") {
-        return local_file(&state.config.admin_frontend_dir, relative, true).await;
+        // Admin assets intentionally bypass browser caches. The panel is a
+        // privileged control surface, so serving the newest UI is more
+        // important than saving a small static transfer.
+        return local_file(&state.config.admin_frontend_dir, relative, false).await;
     }
     if let Some(relative) = path.strip_prefix("/agent/") {
         return local_file(&state.config.agent_dir, relative, true).await;
@@ -28,7 +31,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
             Ok(None) => return (StatusCode::FORBIDDEN, "主题预览链接已失效").into_response(),
             Err(error) => return ApiResponse::internal(error).into_response(),
         };
-        return remote_theme(
+        return theme_file(
             &state,
             &base,
             relative,
@@ -50,20 +53,19 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
             Ok(Some(base)) => base,
             _ => return StatusCode::NOT_FOUND.into_response(),
         };
-        return remote_theme(&state, &base, relative, "/__theme-active").await;
+        return theme_file(&state, &base, relative, "/__theme-active").await;
     }
 
     let settings = match crate::db::load_settings(&state.db).await {
         Ok(settings) => settings,
         Err(error) => return ApiResponse::internal(error).into_response(),
     };
-    if settings.active_theme_id != crate::theme::BUILTIN_THEME_ID {
-        if let Ok(Some(base)) =
+    if settings.active_theme_id != crate::theme::BUILTIN_THEME_ID
+        && let Ok(Some(base)) =
             crate::db::queries::theme_resolved_url(&state.db, &settings.active_theme_id).await
-        {
-            let relative = path.trim_start_matches('/');
-            return remote_theme(&state, &base, relative, "/__theme-active").await;
-        }
+    {
+        let relative = path.trim_start_matches('/');
+        return theme_file(&state, &base, relative, "/__theme-active").await;
     }
 
     let relative = path.trim_start_matches('/');
@@ -80,11 +82,19 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
     }
 }
 
-async fn remote_theme(state: &AppState, base: &str, relative: &str, prefix: &str) -> Response {
-    match crate::theme::fetch_theme_path(&state.http, base, relative, prefix).await {
+async fn theme_file(state: &AppState, base: &str, relative: &str, prefix: &str) -> Response {
+    match crate::theme::fetch_theme_path(
+        &state.http,
+        &state.config.theme_dir,
+        base,
+        relative,
+        prefix,
+    )
+    .await
+    {
         Ok((body, content_type)) => response(body, &content_type, true),
         Err(error) => {
-            tracing::warn!(%error, path = relative, "remote theme asset failed");
+            tracing::warn!(%error, path = relative, "theme asset failed");
             StatusCode::NOT_FOUND.into_response()
         }
     }
@@ -126,9 +136,25 @@ fn response(body: Vec<u8>, content_type: &str, cache: bool) -> Response {
         HeaderValue::from_static(if cache {
             "public, max-age=3600"
         } else {
-            "no-cache"
+            "no-store, no-cache, must-revalidate, max-age=0"
         }),
     );
+    if !cache {
+        response
+            .headers_mut()
+            .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        response
+            .headers_mut()
+            .insert(header::EXPIRES, HeaderValue::from_static("0"));
+        response.headers_mut().insert(
+            HeaderName::from_static("cdn-cache-control"),
+            HeaderValue::from_static("no-store"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("cloudflare-cdn-cache-control"),
+            HeaderValue::from_static("no-store"),
+        );
+    }
     response
 }
 

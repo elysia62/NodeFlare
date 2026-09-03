@@ -1,13 +1,13 @@
 [package]
-name = "nodeflare-backend"
+name = "nodeflare"
 version = "0.0.1"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "Server monitoring system with WebSocket support"
 repository = "https://github.com/imengying/NodeFlare"
 
 [[bin]]
-name = "nodeflare-backend"
+name = "nodeflare"
 path = "src/main.rs"
 
 [dependencies]
@@ -35,6 +35,7 @@ reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"
 data-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
 url = "2.5"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = 3

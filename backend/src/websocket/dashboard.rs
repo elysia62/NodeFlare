@@ -1,6 +1,6 @@
-use crate::routes::public::{dashboard_access, DashboardAccess};
-use crate::routes::ApiResponse;
 use crate::AppState;
+use crate::routes::ApiResponse;
+use crate::routes::public::{DashboardAccess, dashboard_access};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -27,10 +27,10 @@ pub async fn handle(
     match dashboard_access(&state, &headers, &settings).await {
         Ok(DashboardAccess::Ok) => {}
         Ok(DashboardAccess::Login) => {
-            return ApiResponse::unauthorized("此仪表盘需要登录后访问").into_response()
+            return ApiResponse::unauthorized("此仪表盘需要登录后访问").into_response();
         }
         Ok(DashboardAccess::Turnstile) => {
-            return ApiResponse::forbidden("请先完成人机验证").into_response()
+            return ApiResponse::forbidden("请先完成人机验证").into_response();
         }
         Err(error) => return error.into_response(),
     }

@@ -31,7 +31,7 @@ pub(crate) fn batch_len(queue: &VecDeque<Report>) -> usize {
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{batch_len, MAX_LIVE_BATCH_BYTES};
+    use super::{MAX_LIVE_BATCH_BYTES, batch_len};
     use crate::Report;
 
     #[test]

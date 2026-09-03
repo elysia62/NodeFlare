@@ -1,10 +1,15 @@
 #!/bin/sh
 set -eu
 
-SERVICE_NAME="nodeflare"
+SERVICE_NAME="nodeflare-agent"
+RC_NAME="nodeflare_agent"
+LEGACY_SERVICE_NAME="nodeflare"
 INSTALL_DIR="/usr/local/libexec/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
+STATE_DIR="/var/db/nodeflare-agent"
+PENDING_FILE="$STATE_DIR/pending.jsonl"
 SERVICE_FILE="/usr/local/etc/rc.d/$SERVICE_NAME"
+LEGACY_SERVICE_FILE="/usr/local/etc/rc.d/$LEGACY_SERVICE_NAME"
 
 log() {
   printf '[NodeFlare] %s\n' "$1"
@@ -57,13 +62,23 @@ download_file() {
   fi
 }
 
+remove_legacy_agent_service() {
+  if [ -f "$LEGACY_SERVICE_FILE" ] && grep -Fq "$AGENT_FILE" "$LEGACY_SERVICE_FILE"; then
+    service "$LEGACY_SERVICE_NAME" stop 2>/dev/null || true
+    sysrc -x "${LEGACY_SERVICE_NAME}_enable" >/dev/null 2>&1 || true
+    rm -f "$LEGACY_SERVICE_FILE"
+  fi
+}
+
 if [ "${1:-}" = "--uninstall" ]; then
   [ "$#" -eq 1 ] || fail "--uninstall 不接受其它参数"
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行卸载"
   log "正在停止并移除 NodeFlare Agent"
+  remove_legacy_agent_service
   service "$SERVICE_NAME" stop 2>/dev/null || true
-  sysrc -x "${SERVICE_NAME}_enable" >/dev/null 2>&1 || true
-  rm -f "$SERVICE_FILE" "$AGENT_FILE"
+  sysrc -x "${RC_NAME}_enable" >/dev/null 2>&1 || true
+  rm -f "$SERVICE_FILE" "$AGENT_FILE" "$INSTALL_DIR/pending.jsonl"
+  rm -rf "$STATE_DIR"
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "NodeFlare Agent 已卸载"
   exit 0
@@ -136,7 +151,12 @@ if [ -n "$mirror" ]; then
   case "$mirror" in *@*) fail "下载加速前缀不能包含用户信息" ;; esac
 fi
 
-mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+chmod 755 "$INSTALL_DIR"
+chmod 750 "$STATE_DIR"
+if [ -f "$INSTALL_DIR/pending.jsonl" ] && [ ! -e "$PENDING_FILE" ]; then
+  mv "$INSTALL_DIR/pending.jsonl" "$PENDING_FILE"
+fi
 temporary="$INSTALL_DIR/.agent.$$.download"
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
 artifact="agent-freebsd-x64"
@@ -182,29 +202,32 @@ installed_version=${installed_version##* }
 [ "$installed_version" = "${release_tag#v}" ] || fail "Release $release_tag 与 Agent 版本 $installed_version 不一致"
 
 log "正在配置并启动 FreeBSD rc.d 服务"
+remove_legacy_agent_service
 service "$SERVICE_NAME" stop 2>/dev/null || true
 mv "$temporary" "$AGENT_FILE"
 trap - EXIT HUP INT TERM
 cat > "$SERVICE_FILE" <<EOF
 #!/bin/sh
-# PROVIDE: nodeflare
+# PROVIDE: nodeflare_agent
 # REQUIRE: NETWORKING
 # KEYWORD: shutdown
 
 . /etc/rc.subr
 
-name="$SERVICE_NAME"
-rcvar="${SERVICE_NAME}_enable"
+export NODEFLARE_STATE_DIR="$STATE_DIR"
+
+name="$RC_NAME"
+rcvar="${RC_NAME}_enable"
 pidfile="/var/run/\${name}.pid"
 command="/usr/sbin/daemon"
 command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint -t $token -i $interval"
 
 load_rc_config "\${name}"
-: \${nodeflare_enable:="NO"}
+: \${nodeflare_agent_enable:="NO"}
 run_rc_command "\$1"
 EOF
 chmod 700 "$SERVICE_FILE"
-sysrc "${SERVICE_NAME}_enable=YES" >/dev/null
+sysrc "${RC_NAME}_enable=YES" >/dev/null
 service "$SERVICE_NAME" start
 service "$SERVICE_NAME" status >/dev/null || {
   service "$SERVICE_NAME" status >&2 || true

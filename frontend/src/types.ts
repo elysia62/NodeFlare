@@ -24,6 +24,7 @@ export interface Config {
   show_uptime: boolean;
   turnstile_enabled: boolean;
   turnstile_login_enabled: boolean;
+  totp_login_enabled: boolean;
   turnstile_site_key: string;
   password_client_salt: string;
 }
@@ -341,8 +342,12 @@ export interface RemoteTask {
 }
 
 export interface RemoteTaskInput {
-  server_id: string;
+  server_ids: string[];
   command: string;
-  script: string;
   totp_code: string;
+}
+
+export interface RemoteTaskCreated {
+  server_id: string;
+  task_id: string;
 }

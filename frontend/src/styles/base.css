@@ -38,14 +38,6 @@
   text-rendering: optimizeLegibility;
 }
 
-/* Komari 优化：主题切换时禁用所有过渡动画，避免闪烁 */
-[data-theme-switching] *,
-[data-theme-switching] *::before,
-[data-theme-switching] *::after {
-  transition: none !important;
-  animation: none !important;
-}
-
 .dark {
   --background: #0b0e0f;
   --foreground: #f3f6f5;

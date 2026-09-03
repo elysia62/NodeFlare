@@ -1,15 +1,15 @@
 use super::{
-    admin_cookie, bearer_or_cookie, forwarded_ip, hostname, request_is_secure, ApiResponse,
+    ApiResponse, admin_cookie, bearer_or_cookie, forwarded_ip, hostname, request_is_secure,
 };
+use crate::AppState;
 use crate::middleware::AuthenticatedUser;
 use crate::models::{
     Enable2FaRequest, LoginRequest, TotpSetupResponse, TotpStatusResponse, TurnstileVerifyRequest,
 };
-use crate::AppState;
-use axum::extract::{Extension, State};
-use axum::http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::extract::{Extension, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -57,19 +57,18 @@ pub async fn login(
         crate::db::queries::get_totp_secret(&state.db, &settings.admin_username)
             .await
             .map_err(ApiResponse::internal)?
+        && enabled
     {
-        if enabled {
-            if input.totp_code.trim().is_empty() {
-                return Err(ApiResponse::error(
-                    StatusCode::PRECONDITION_REQUIRED,
-                    "请输入两步验证码",
-                ));
-            }
-            if !crate::totp::verify_totp(&secret, input.totp_code.trim())
-                .map_err(ApiResponse::internal)?
-            {
-                return Err(ApiResponse::unauthorized("两步验证码错误"));
-            }
+        if input.totp_code.trim().is_empty() {
+            return Err(ApiResponse::error(
+                StatusCode::PRECONDITION_REQUIRED,
+                "请输入两步验证码",
+            ));
+        }
+        if !crate::totp::verify_totp(&secret, input.totp_code.trim())
+            .map_err(ApiResponse::internal)?
+        {
+            return Err(ApiResponse::unauthorized("两步验证码错误"));
         }
     }
     let token = crate::db::create_session(

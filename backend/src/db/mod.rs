@@ -4,7 +4,7 @@ use crate::auth;
 use crate::config::Config;
 use crate::models::{PublicConfig, SettingsInput, SettingsView};
 use anyhow::Result;
-use sqlx::any::{install_default_drivers, AnyPoolOptions};
+use sqlx::any::{AnyPoolOptions, install_default_drivers};
 use sqlx::migrate::Migrator;
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
@@ -143,6 +143,7 @@ impl Settings {
             turnstile_enabled: self.turnstile_enabled && turnstile_configured,
             turnstile_login_enabled: (self.turnstile_login_enabled || self.turnstile_enabled)
                 && turnstile_configured,
+            totp_login_enabled: false,
             turnstile_site_key: if turnstile_configured {
                 self.turnstile_site_key.clone()
             } else {

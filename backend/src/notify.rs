@@ -1,4 +1,4 @@
-use crate::db::{self, queries, Database, Settings};
+use crate::db::{self, Database, Settings, queries};
 use crate::models::TelegramSettingsView;
 use anyhow::{Context, Result};
 use serde_json::Value;

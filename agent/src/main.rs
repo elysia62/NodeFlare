@@ -15,7 +15,7 @@ use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 use sysinfo::{Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 use tungstenite::client::IntoClientRequest;
-use tungstenite::{connect, Error as WebSocketError, Message};
+use tungstenite::{Error as WebSocketError, Message, connect};
 
 #[cfg(not(any(
     target_os = "linux",
@@ -88,7 +88,7 @@ struct RuntimeConfig {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "nodeflare", version = VERSION, about = "NodeFlare monitoring agent")]
+#[command(name = "agent", version = VERSION, about = "NodeFlare monitoring agent")]
 struct CliOptions {
     /// NodeFlare endpoint
     #[arg(short = 'e', value_name = "URL")]
@@ -144,19 +144,21 @@ impl LatencyExecutor {
             let result_tx = result_tx.clone();
             thread::Builder::new()
                 .name(format!("nodeflare-latency-{index}"))
-                .spawn(move || loop {
-                    let task = match task_rx.lock() {
-                        Ok(receiver) => receiver.recv(),
-                        Err(_) => return,
-                    };
-                    match task {
-                        Ok(task) => {
-                            if result_tx.send(execute_latency_task(task)).is_err() {
-                                return;
+                .spawn(move || {
+                    loop {
+                        let task = match task_rx.lock() {
+                            Ok(receiver) => receiver.recv(),
+                            Err(_) => return,
+                        };
+                        match task {
+                            Ok(task) => {
+                                if result_tx.send(execute_latency_task(task)).is_err() {
+                                    return;
+                                }
                             }
-                        }
-                        Err(mpsc::RecvError) => return,
-                    };
+                            Err(mpsc::RecvError) => return,
+                        };
+                    }
                 })?;
         }
 
@@ -2329,6 +2331,20 @@ fn prune_report_samples(samples: &mut Vec<Report>, now: i64) {
 }
 
 fn pending_spool_path() -> Result<PathBuf> {
+    if let Some(value) = env::var_os("NODEFLARE_STATE_DIR") {
+        let directory = PathBuf::from(value);
+        if !directory.is_absolute() {
+            return Err("NODEFLARE_STATE_DIR must be an absolute path".into());
+        }
+        fs::create_dir_all(&directory)?;
+        return Ok(directory.join("pending.jsonl"));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(program_data) = env::var_os("ProgramData") {
+        let directory = PathBuf::from(program_data).join("NodeFlare");
+        fs::create_dir_all(&directory)?;
+        return Ok(directory.join("pending.jsonl"));
+    }
     let executable = env::current_exe()?;
     let directory = executable
         .parent()
@@ -2591,7 +2607,7 @@ fn update(agent: &ureq::Agent, mirror: &str) -> Result<bool> {
             "Wait-Process -Id $targetPid; ",
             "Move-Item -LiteralPath $env:NODEFLARE_UPDATE_NEW ",
             "-Destination $env:NODEFLARE_UPDATE_CURRENT -Force; ",
-            "try { Start-ScheduledTask -TaskName 'NodeFlare Agent' -ErrorAction Stop } ",
+            "try { Start-ScheduledTask -TaskName 'nodeflare-agent' -ErrorAction Stop } ",
             "catch { $restartArgs=@($env:NODEFLARE_UPDATE_ARGS | ConvertFrom-Json); ",
             "Start-Process -FilePath $env:NODEFLARE_UPDATE_CURRENT -ArgumentList $restartArgs }"
         );
@@ -2645,16 +2661,15 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         .map(|report| report.latency_results.len())
         .sum::<usize>();
     prune_report_samples(&mut pending_samples, unix_timestamp());
-    if loaded_len != pending_samples.len()
+    if (loaded_len != pending_samples.len()
         || loaded_latency
             != pending_samples
                 .iter()
                 .map(|report| report.latency_results.len())
-                .sum::<usize>()
+                .sum::<usize>())
+        && let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples)
     {
-        if let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples) {
-            eprintln!("pending report spool cleanup failed: {error}");
-        }
+        eprintln!("pending report spool cleanup failed: {error}");
     }
     let mut last_emitted_timestamp = pending_samples
         .iter()
@@ -2680,10 +2695,10 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             let before = pending_samples.len();
             pending_samples.retain(|report| report.timestamp > persisted_through);
             stats.persisted_samples_pruned(before.saturating_sub(pending_samples.len()));
-            if before != pending_samples.len() {
-                if let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples) {
-                    eprintln!("pending report spool compaction failed: {error}");
-                }
+            if before != pending_samples.len()
+                && let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples)
+            {
+                eprintln!("pending report spool compaction failed: {error}");
             }
             if once_target_timestamp.is_some_and(|target| persisted_through >= target) {
                 return Ok(());
@@ -2776,16 +2791,15 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
                 pending_samples.drain(..overflow);
                 stats.live_queue_dropped(overflow);
             }
-            if before_prune != pending_samples.len()
+            if (before_prune != pending_samples.len()
                 || latency_before_prune
                     != pending_samples
                         .iter()
                         .map(|report| report.latency_results.len())
-                        .sum::<usize>()
+                        .sum::<usize>())
+                && let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples)
             {
-                if let Err(error) = rewrite_pending_spool(&spool_path, &pending_samples) {
-                    eprintln!("pending report spool compaction failed: {error}");
-                }
+                eprintln!("pending report spool compaction failed: {error}");
             }
             next_collect = advance_deadline(
                 next_collect,
@@ -2842,7 +2856,7 @@ fn main() {
     let options = CliOptions::parse();
     let result = run(&options, options.once || options.collect, options.collect);
     if let Err(error) = result {
-        eprintln!("nodeflare-agent: {error}");
+        eprintln!("agent: {error}");
         std::process::exit(1);
     }
 }
@@ -2853,15 +2867,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
+        CLOCK_CALIBRATION_MAX_AGE, CliOptions, ClockCalibration, GithubReleaseAsset, LatencyResult,
+        LatencyTask, LiveAck, MAX_LATENCY_TASKS, MAX_PENDING_LATENCY_RESULTS,
+        PUBLIC_IP_STALE_AFTER, PublicIpValue, Report, UPDATE_CHECK_JITTER_MAX_SECONDS,
         ack_d1_interval, ack_wss_interval, advance_deadline, clock_offset_from_http_date,
         corrected_timestamp, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
         live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
         parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
         parse_system_profiler_gpu_names, ping_latencies, ping_latency, prune_report_samples,
         release_asset_sha256, sanitize_latency_tasks, update_check_jitter, valid_endpoint,
-        version_triplet, CliOptions, ClockCalibration, GithubReleaseAsset, LatencyResult,
-        LatencyTask, LiveAck, PublicIpValue, Report, CLOCK_CALIBRATION_MAX_AGE, MAX_LATENCY_TASKS,
-        MAX_PENDING_LATENCY_RESULTS, PUBLIC_IP_STALE_AFTER, UPDATE_CHECK_JITTER_MAX_SECONDS,
+        version_triplet,
     };
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
@@ -3080,7 +3095,7 @@ mod tests {
     #[test]
     fn parses_cli_options() {
         let parsed = CliOptions::try_parse_from([
-            "nodeflare",
+            "agent",
             "-e",
             "https://monitor.example.com",
             "-t",
@@ -3094,19 +3109,21 @@ mod tests {
         assert_eq!(parsed.token, "agent-token");
         assert_eq!(parsed.interval, 60);
         assert!(parsed.once);
-        assert!(CliOptions::try_parse_from(["nodeflare", "-t"]).is_err());
-        assert!(CliOptions::try_parse_from(["nodeflare", "-t", "first", "-t", "second"]).is_err());
-        assert!(CliOptions::try_parse_from([
-            "nodeflare",
-            "-e",
-            "https://monitor.example.com",
-            "-t",
-            "agent-token",
-            "--token-file",
-            "/run/nodeflare/token",
-        ])
-        .is_err());
-        assert!(CliOptions::try_parse_from(["nodeflare", "--once", "--collect"]).is_err());
+        assert!(CliOptions::try_parse_from(["agent", "-t"]).is_err());
+        assert!(CliOptions::try_parse_from(["agent", "-t", "first", "-t", "second"]).is_err());
+        assert!(
+            CliOptions::try_parse_from([
+                "agent",
+                "-e",
+                "https://monitor.example.com",
+                "-t",
+                "agent-token",
+                "--token-file",
+                "/run/nodeflare/token",
+            ])
+            .is_err()
+        );
+        assert!(CliOptions::try_parse_from(["agent", "--once", "--collect"]).is_err());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::{now, Database, SECRET_MASK};
+use super::{Database, SECRET_MASK, now};
 use crate::auth;
 use crate::models::{
     AgentLatencyResult, AgentLatencyTask, AgentReport, AlertRuleInput, AlertRuleView,

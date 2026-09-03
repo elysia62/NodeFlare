@@ -9,26 +9,50 @@ NodeFlare 是一个自部署的服务器监控面板。服务端使用 Rust/Axum
 需要稳定版 Rust、Bun 1.4+，以及常见的 C/C++ 构建工具。
 
 ```bash
-cp backend/config.example.toml backend/config.toml
-$EDITOR backend/config.toml
-./start.sh
+sudo ./install.sh
 ```
 
-必须先替换示例中的 `admin_password` 占位值，否则服务会拒绝启动。`start.sh` 会安装尚未安装的前端依赖、构建公开页和管理页、编译后端，然后监听配置的地址。
+首次安装会在终端询问管理员用户名，并隐藏输入、二次确认管理员密码。脚本会构建 NodeFlare，将后端安装为 `/opt/nodeflare/nodeflare`、静态资源安装到 `/opt/nodeflare/share`、systemd 服务安装为 `nodeflare.service`，并将配置写入 `/etc/nodeflare/config.toml`。重复运行安装脚本会保留已有配置和数据库。
+面板不会创建额外的 Linux 系统用户，systemd 服务的运行方式与 Agent 一致。
 
-默认可从 `http://127.0.0.1:8080` 访问公开面板，管理页位于 `/admin`。首次登录后可在“登录与安全”中启用 TOTP 两步验证。
+默认可从 `http://127.0.0.1:8080` 访问公开面板，管理页位于 `/admin`。首次登录后可在“登录与安全”中启用 TOTP 两步验证；远程执行使用一次性命令，可同时选择多台服务器，每次下发都必须提交当前 TOTP 验证码。
+
+常用管理命令：
+
+```bash
+systemctl status nodeflare
+systemctl restart nodeflare
+journalctl -u nodeflare -f
+```
+
+卸载程序但保留配置和数据库：
+
+```bash
+sudo ./install.sh --uninstall
+```
+
+连同 `/etc/nodeflare` 和 `/var/lib/nodeflare` 彻底删除：
+
+```bash
+sudo ./install.sh --uninstall --purge
+```
 
 ## 配置
 
-配置项是扁平 TOML 字段，路径均相对于配置文件所在目录解析。完整模板见 [`backend/config.example.toml`](backend/config.example.toml)。
+正式安装的配置文件是 `/etc/nodeflare/config.toml`。安装时只交互式询问用户名和密码；监听地址、数据库、Turnstile、静态资源与会话时长等均保留在该 TOML 文件中。相对路径以配置文件所在目录为基准解析。
 
 SQLite 示例：
 
 ```toml
-database_url = "sqlite://nodeflare.db"
+database_url = "sqlite:///var/lib/nodeflare/nodeflare.db"
 bind_addr = "127.0.0.1:8080"
 admin_username = "admin"
 admin_password = "replace-with-a-long-random-password"
+frontend_dir = "/opt/nodeflare/share/frontend"
+admin_frontend_dir = "/opt/nodeflare/share/admin"
+agent_dir = "/opt/nodeflare/share/agent"
+theme_dir = "/var/lib/nodeflare/themes"
+session_ttl_hours = 168
 ```
 
 PostgreSQL 示例：
@@ -55,7 +79,18 @@ curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agen
 
 Agent 通过 `/api/agent/ws` 建立 WebSocket 连接。除 localhost 调试外，安装脚本要求 HTTPS。
 
+Agent Token 由面板生成，安装脚本将可执行文件安装为 `agent`（Windows 为 `agent.exe`），服务名为 `nodeflare-agent`。Linux 安装位置为 `/opt/nodeflare/agent`；macOS 与 FreeBSD 使用 `/usr/local/libexec/nodeflare/agent`；Windows 使用 `%ProgramFiles%\NodeFlare\agent.exe`。Token 只作为 systemd、OpenRC、launchd 或 Windows 计划任务的启动参数保存，不会另行生成 token 或 Agent 配置文件。网络中断时的非敏感暂存数据使用各平台标准数据目录（Linux 为 `/var/lib/nodeflare-agent`，FreeBSD 为 `/var/db/nodeflare-agent`，macOS 为 `/Library/Application Support/NodeFlare`，Windows 为 `%ProgramData%\NodeFlare`）。
+
+主题商店支持直接上传 ZIP，也支持填写 GitHub 仓库主页地址并安装该仓库 latest Release 中的 ZIP。主题解压后保存在 `theme_dir`，ZIP 根目录必须包含 `index.html`，也允许外层仅有一个打包目录。
+
 ## 开发与构建
+
+本地开发仍使用 `backend/config.toml`：
+
+```bash
+cp backend/config.example.toml backend/config.toml
+$EDITOR backend/config.toml
+```
 
 ```bash
 # 构建静态前端并启动 debug 后端
@@ -119,10 +154,10 @@ server {
 
 ## 备份
 
-SQLite 默认文件是 `backend/nodeflare.db`。可在服务运行时使用 SQLite 的一致性备份命令：
+SQLite 正式安装的默认文件是 `/var/lib/nodeflare/nodeflare.db`。可在服务运行时使用 SQLite 的一致性备份命令：
 
 ```bash
-sqlite3 backend/nodeflare.db ".backup '/var/backups/nodeflare.db'"
+sqlite3 /var/lib/nodeflare/nodeflare.db ".backup '/var/backups/nodeflare.db'"
 ```
 
 PostgreSQL 使用标准工具：

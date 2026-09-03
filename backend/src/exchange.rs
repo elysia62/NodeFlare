@@ -1,4 +1,4 @@
-use crate::db::{self, queries, Database};
+use crate::db::{self, Database, queries};
 use crate::models::ExchangeRatesView;
 use anyhow::{Context, Result};
 use serde_json::Value;

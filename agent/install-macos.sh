@@ -1,10 +1,14 @@
 #!/bin/sh
 set -eu
 
-LABEL="com.nodeflare.agent"
+LABEL="nodeflare-agent"
+LEGACY_LABEL="com.nodeflare.agent"
 INSTALL_DIR="/usr/local/libexec/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
+STATE_DIR="/Library/Application Support/NodeFlare"
+PENDING_FILE="$STATE_DIR/pending.jsonl"
 PLIST_FILE="/Library/LaunchDaemons/$LABEL.plist"
+LEGACY_PLIST_FILE="/Library/LaunchDaemons/$LEGACY_LABEL.plist"
 
 log() {
   printf '[NodeFlare] %s\n' "$1"
@@ -39,7 +43,9 @@ if [ "${1:-}" = "--uninstall" ]; then
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行卸载"
   log "正在停止并移除 NodeFlare Agent"
   launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
-  rm -f "$PLIST_FILE" "$AGENT_FILE"
+  launchctl bootout system "$LEGACY_PLIST_FILE" 2>/dev/null || true
+  rm -f "$PLIST_FILE" "$LEGACY_PLIST_FILE" "$AGENT_FILE" "$INSTALL_DIR/pending.jsonl"
+  rm -rf "$STATE_DIR"
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "NodeFlare Agent 已卸载"
   exit 0
@@ -105,7 +111,12 @@ if [ -n "$mirror" ]; then
   case "$mirror" in *@*) fail "下载加速前缀不能包含用户信息" ;; esac
 fi
 
-mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+chmod 755 "$INSTALL_DIR"
+chmod 750 "$STATE_DIR"
+if [ -f "$INSTALL_DIR/pending.jsonl" ] && [ ! -e "$PENDING_FILE" ]; then
+  mv "$INSTALL_DIR/pending.jsonl" "$PENDING_FILE"
+fi
 temporary="$INSTALL_DIR/.agent.$$.download"
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
 artifact="agent-macos-aarch64"
@@ -156,6 +167,8 @@ installed_version=${installed_version##* }
 [ "$installed_version" = "${release_tag#v}" ] || fail "Release $release_tag 与 Agent 版本 $installed_version 不一致"
 log "正在配置并启动 macOS LaunchDaemon 服务"
 launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
+launchctl bootout system "$LEGACY_PLIST_FILE" 2>/dev/null || true
+rm -f "$LEGACY_PLIST_FILE"
 mv "$temporary" "$AGENT_FILE"
 trap - EXIT HUP INT TERM
 cat > "$PLIST_FILE" <<EOF
@@ -164,6 +177,7 @@ cat > "$PLIST_FILE" <<EOF
 <plist version="1.0"><dict>
 <key>Label</key><string>$LABEL</string>
 <key>ProgramArguments</key><array><string>$AGENT_FILE</string><string>-e</string><string>$endpoint</string><string>-t</string><string>$token</string><string>-i</string><string>$interval</string></array>
+<key>EnvironmentVariables</key><dict><key>NODEFLARE_STATE_DIR</key><string>$STATE_DIR</string></dict>
 <key>KeepAlive</key><true/><key>RunAtLoad</key><true/>
 <key>StandardOutPath</key><string>/var/log/nodeflare-agent.log</string>
 <key>StandardErrorPath</key><string>/var/log/nodeflare-agent.log</string>

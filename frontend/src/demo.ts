@@ -25,6 +25,7 @@ export const demoConfig: Config = {
   show_uptime: true,
   turnstile_enabled: false,
   turnstile_login_enabled: true,
+  totp_login_enabled: false,
   turnstile_site_key: "",
   password_client_salt: "nodeflare-demo-password-kdf",
 };

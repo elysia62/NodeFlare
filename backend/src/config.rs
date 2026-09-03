@@ -13,7 +13,7 @@ pub const VERSION: &str = match option_env!("NODEFLARE_VERSION") {
 #[command(version = VERSION, about = "NodeFlare standalone monitoring server")]
 pub struct Args {
     /// Path to the TOML configuration file.
-    #[arg(short, long, default_value = "backend/config.toml")]
+    #[arg(short, long, default_value = "/etc/nodeflare/config.toml")]
     pub config: PathBuf,
 
     /// Override the configured bind address.
@@ -43,28 +43,34 @@ pub struct Config {
     pub admin_frontend_dir: PathBuf,
     #[serde(default = "default_agent_dir")]
     pub agent_dir: PathBuf,
+    #[serde(default = "default_theme_dir")]
+    pub theme_dir: PathBuf,
     #[serde(default = "default_session_hours")]
     pub session_ttl_hours: i64,
 }
 
 fn default_database_url() -> String {
-    "sqlite://nodeflare.db".to_string()
+    "sqlite:///var/lib/nodeflare/nodeflare.db".to_string()
 }
 
 fn default_bind_addr() -> String {
-    "0.0.0.0:8080".to_string()
+    "127.0.0.1:8080".to_string()
 }
 
 fn default_public_frontend_dir() -> PathBuf {
-    PathBuf::from("../frontend/dist")
+    PathBuf::from("/opt/nodeflare/share/frontend")
 }
 
 fn default_admin_frontend_dir() -> PathBuf {
-    PathBuf::from("../frontend/admin-dist")
+    PathBuf::from("/opt/nodeflare/share/admin")
 }
 
 fn default_agent_dir() -> PathBuf {
-    PathBuf::from("../agent")
+    PathBuf::from("/opt/nodeflare/share/agent")
+}
+
+fn default_theme_dir() -> PathBuf {
+    PathBuf::from("/var/lib/nodeflare/themes")
 }
 
 fn default_session_hours() -> i64 {
@@ -84,6 +90,7 @@ impl Config {
         config.frontend_dir = resolve_path(base, &config.frontend_dir);
         config.admin_frontend_dir = resolve_path(base, &config.admin_frontend_dir);
         config.agent_dir = resolve_path(base, &config.agent_dir);
+        config.theme_dir = resolve_path(base, &config.theme_dir);
         config.database_url = resolve_database_url(base, &config.database_url)?;
         config.session_ttl_hours = config.session_ttl_hours.clamp(1, 24 * 90);
         if config.admin_username.trim().is_empty()
@@ -96,7 +103,9 @@ impl Config {
             anyhow::bail!("admin_password must be 8-128 characters");
         }
         if is_example_password(&config.admin_password) {
-            anyhow::bail!("admin_password still contains the example placeholder; replace it before starting NodeFlare");
+            anyhow::bail!(
+                "admin_password still contains the example placeholder; replace it before starting NodeFlare"
+            );
         }
         Ok(config)
     }
@@ -152,8 +161,34 @@ fn resolve_database_url(base: &Path, value: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_example_password, resolve_database_url};
+    use super::{
+        Args, default_admin_frontend_dir, default_agent_dir, default_bind_addr,
+        default_database_url, default_public_frontend_dir, default_theme_dir, is_example_password,
+        resolve_database_url,
+    };
+    use clap::Parser;
     use std::path::Path;
+
+    #[test]
+    fn defaults_to_system_install_paths() {
+        let args = Args::try_parse_from(["nodeflare"]).unwrap();
+        assert_eq!(args.config, Path::new("/etc/nodeflare/config.toml"));
+        assert_eq!(
+            default_database_url(),
+            "sqlite:///var/lib/nodeflare/nodeflare.db"
+        );
+        assert_eq!(default_bind_addr(), "127.0.0.1:8080");
+        assert_eq!(
+            default_public_frontend_dir(),
+            Path::new("/opt/nodeflare/share/frontend")
+        );
+        assert_eq!(
+            default_admin_frontend_dir(),
+            Path::new("/opt/nodeflare/share/admin")
+        );
+        assert_eq!(default_agent_dir(), Path::new("/opt/nodeflare/share/agent"));
+        assert_eq!(default_theme_dir(), Path::new("/var/lib/nodeflare/themes"));
+    }
 
     #[test]
     fn resolves_database_relative_to_config() {

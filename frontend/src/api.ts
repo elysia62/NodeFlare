@@ -1,4 +1,4 @@
-import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, RemoteTask, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
+import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, RemoteTask, RemoteTaskCreated, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
 
 const TOKEN_KEY = "nodeflare-admin-token";
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
@@ -20,7 +20,7 @@ export function setToken(token: string) {
 
 async function request<T>(path: string, init: RequestInit = {}, admin = false): Promise<T> {
   const headers = new Headers(init.headers);
-  if (init.body) headers.set("Content-Type", "application/json");
+  if (typeof init.body === "string" && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(path, { ...init, headers });
@@ -93,6 +93,10 @@ export const api = {
   themes: () => request<{ themes: Theme[] }>("/api/admin/themes", {}, true),
   addTheme: (input: Pick<Theme, "name" | "description" | "url">) =>
     request<{ id: string }>("/api/admin/themes", { method: "POST", body: JSON.stringify(input) }, true),
+  uploadTheme: (input: Pick<Theme, "name" | "description">, file: File) => {
+    const query = new URLSearchParams({ ...input, filename: file.name });
+    return request<{ id: string }>(`/api/admin/themes/upload?${query}`, { method: "POST", body: file }, true);
+  },
   activateTheme: (id: string) =>
     request<void>(`/api/admin/themes/${encodeURIComponent(id)}/activate`, { method: "POST" }, true),
   previewTheme: (id: string) =>
@@ -134,7 +138,7 @@ export const api = {
     ),
   databaseStats: () => request<DatabaseStats>("/api/admin/database", {}, true),
   clearHistory: () => request<void>("/api/admin/history", { method: "DELETE" }, true),
-  createRemoteTask: (input: RemoteTaskInput) => request<{ task_id: string }>("/api/admin/remote/task", {
+  createRemoteTask: (input: RemoteTaskInput) => request<{ task_id: string; tasks: RemoteTaskCreated[] }>("/api/admin/remote/task", {
     method: "POST",
     body: JSON.stringify(input),
   }, true),

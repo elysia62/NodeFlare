@@ -109,6 +109,7 @@ pub struct PublicConfig {
     pub show_uptime: bool,
     pub turnstile_enabled: bool,
     pub turnstile_login_enabled: bool,
+    pub totp_login_enabled: bool,
     pub turnstile_site_key: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub password_client_salt: String,
@@ -396,6 +397,16 @@ pub struct ThemeInput {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeUploadInput {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub filename: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ThemeView {
     pub id: String,
@@ -447,7 +458,10 @@ pub struct TotpStatusResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRemoteTaskRequest {
+    #[serde(default)]
     pub server_id: String,
+    #[serde(default)]
+    pub server_ids: Vec<String>,
     #[serde(default)]
     pub command: String,
     #[serde(default)]

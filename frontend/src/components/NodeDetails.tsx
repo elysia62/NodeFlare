@@ -85,12 +85,33 @@ function InfoGroup({ icon, title, children }: { icon: React.ReactNode; title: st
   return <section className="info-group glass-panel"><h2>{icon}{title}</h2><div className="info-group-grid">{children}</div></section>;
 }
 
-function ChartCard({ title, value, children }: { title: string; value: string; children: React.ReactNode }) {
+function ChartCard({ title, value, children }: { title: string; value: React.ReactNode; children: React.ReactNode }) {
   return <div className="detail-chart glass-panel"><header><h3>{title}</h3><span>{value}</span></header><div>{children}</div></div>;
 }
 
 function resourceTicks(total: number): number[] {
   return Array.from({ length: 5 }, (_, index) => total * index / 4);
+}
+
+function networkAxisMaximum(points: LoadChartPoint[]): number {
+  const peak = points.reduce((maximum, point) => Math.max(
+    maximum,
+    point.net_in ?? 0,
+    point.net_out ?? 0,
+  ), 0);
+  if (peak <= 0) return 1024;
+
+  // Four readable intervals plus headroom keep the peak line and top label
+  // away from the SVG edge. Decimal nice steps work well with byte labels.
+  const roughStep = peak * 1.15 / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const normalized = roughStep / magnitude;
+  const factor = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 2.5 ? 2.5 : normalized <= 5 ? 5 : 10;
+  return Math.max(1024, factor * magnitude * 4);
+}
+
+function formatNetworkAxis(value: number): string {
+  return formatBytes(value, value >= 1024 ** 2 ? 1 : 0);
 }
 
 function latencyBucketSeconds(hours: number, taskCount: number): number {
@@ -289,6 +310,8 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
     () => insertLoadGaps(points, loadChartHours),
     [loadChartHours, points],
   );
+  const networkMaximum = useMemo(() => networkAxisMaximum(data), [data]);
+  const networkTicks = useMemo(() => resourceTicks(networkMaximum), [networkMaximum]);
   const latencySeries = useMemo(() => {
     return latencyTasks.map((task, index) => {
       const samples = latencyPoints.filter((point) => point.task_id === task.id);
@@ -388,8 +411,8 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
             <ChartCard title={ui(locale, "硬盘", "Disk")} value={`${formatBytes(last.disk_used)} / ${formatBytes(last.disk_total)}`}>
               <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis domain={[0, last.disk_total]} ticks={resourceTicks(last.disk_total)} tick={{ fontSize: 10 }} width={56} tickFormatter={(value) => formatBytes(Number(value), 0)} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value) => [formatBytes(Number(value)), "硬盘"]} /><Area type="monotone" dataKey="disk_used" stroke="var(--warning-bar)" fill="var(--warning-bar)" fillOpacity={0.15} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
             </ChartCard>
-            <ChartCard title={ui(locale, "网络", "Network")} value={`↑ ${formatSpeed(last.net_out)}  ↓ ${formatSpeed(last.net_in)}`}>
-              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis tick={{ fontSize: 10 }} width={48} tickFormatter={(value) => formatBytes(Number(value), 0)} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value, name) => [formatSpeed(Number(value)), name === "net_out" ? "上行" : "下行"]} /><Area type="monotone" dataKey="net_out" stroke="var(--success-bar)" fill="var(--success-bar)" fillOpacity={0.12} strokeWidth={2} dot={false} isAnimationActive={false} /><Area type="monotone" dataKey="net_in" stroke="var(--info)" fill="var(--info)" fillOpacity={0.1} strokeWidth={2} dot={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
+            <ChartCard title={ui(locale, "网络", "Network")} value={<span className="network-live-values"><b className="upload">↑ {formatSpeed(last.net_out)}</b><b className="download">↓ {formatSpeed(last.net_in)}</b></span>}>
+              <ResponsiveContainer width="100%" height="100%"><AreaChart data={data} margin={{ top: 14, right: 8, bottom: 2, left: 2 }}><defs><linearGradient id="network-upload-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--success-bar)" stopOpacity={0.28} /><stop offset="100%" stopColor="var(--success-bar)" stopOpacity={0.02} /></linearGradient><linearGradient id="network-download-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--info)" stopOpacity={0.24} /><stop offset="100%" stopColor="var(--info)" stopOpacity={0.02} /></linearGradient></defs><CartesianGrid vertical={false} stroke="var(--chart-grid)" strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} axisLine={false} tickLine={false} tickMargin={8} tick={{ fontSize: 10 }} minTickGap={30} tickFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} /><YAxis domain={[0, networkMaximum]} ticks={networkTicks} axisLine={false} tickLine={false} tickMargin={6} tick={{ fontSize: 10 }} width={62} tickFormatter={(value) => formatNetworkAxis(Number(value))} /><Tooltip contentStyle={tooltipStyle} labelFormatter={(value) => chartTimeLabel(Number(value), loadChartHours, locale)} formatter={(value, name) => [formatSpeed(Number(value)), name === "net_out" ? "上行" : "下行"]} /><Area type="monotone" dataKey="net_out" name="net_out" stroke="var(--success-bar)" fill="url(#network-upload-fill)" strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} /><Area type="monotone" dataKey="net_in" name="net_in" stroke="var(--info)" fill="url(#network-download-fill)" strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} /></AreaChart></ResponsiveContainer>
             </ChartCard>
           </div>
         ) : (

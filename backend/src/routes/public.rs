@@ -1,11 +1,11 @@
-use super::{bearer_or_cookie, cookie, ApiResponse};
+use super::{ApiResponse, bearer_or_cookie, cookie};
+use crate::AppState;
 use crate::db::Settings;
 use crate::models::{PublicConfig, WakeServersInput};
-use crate::AppState;
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,6 +33,19 @@ impl DashboardAccess {
             Self::Turnstile => "turnstile",
         }
     }
+}
+
+async fn public_config_with_totp(
+    state: &AppState,
+    settings: &Settings,
+) -> Result<PublicConfig, ApiResponse> {
+    let mut config = settings.public_config();
+    config.totp_login_enabled =
+        crate::db::queries::get_totp_secret(&state.db, &settings.admin_username)
+            .await
+            .map_err(ApiResponse::internal)?
+            .is_some_and(|(_, enabled)| enabled);
+    Ok(config)
 }
 
 pub async fn dashboard_access(
@@ -75,7 +88,7 @@ pub async fn bootstrap(
         .await
         .map_err(ApiResponse::internal)?;
     let access = dashboard_access(&state, &headers, &settings).await?;
-    let config = settings.public_config();
+    let config = public_config_with_totp(&state, &settings).await?;
     if access != DashboardAccess::Ok {
         return Ok(Json(BootstrapResponse {
             config,
@@ -102,12 +115,10 @@ pub async fn bootstrap(
 }
 
 pub async fn config(State(state): State<Arc<AppState>>) -> Result<Json<PublicConfig>, ApiResponse> {
-    Ok(Json(
-        crate::db::load_settings(&state.db)
-            .await
-            .map_err(ApiResponse::internal)?
-            .public_config(),
-    ))
+    let settings = crate::db::load_settings(&state.db)
+        .await
+        .map_err(ApiResponse::internal)?;
+    Ok(Json(public_config_with_totp(&state, &settings).await?))
 }
 
 pub async fn servers(

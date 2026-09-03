@@ -11,6 +11,11 @@ import {
 } from "./live";
 import { ui } from "./locale";
 import { resolveBackground, themeToggle } from "./theme";
+import {
+  BOOTSTRAP_POLL_INTERVAL_MS,
+  createRefreshQueue,
+  shouldSyncBootstrap,
+} from "./refresh";
 import { connectLive } from "./transport";
 import type { Config, ExchangeRates, Server } from "./types";
 import { derivePassword } from "./password";
@@ -25,8 +30,6 @@ const demoViewConfig: Config = demoMode && search.has("carrier")
   ? { ...demoConfig, theme_options: { ...demoConfig.theme_options, showCarrierLatency: true } }
   : demoConfig;
 const defaultConfig: Config = { ...demoViewConfig, site_description: "", site_name: "" };
-const BOOTSTRAP_POLL_INTERVAL = 15_000;
-const BOOTSTRAP_POLL_TICKS_WHEN_LIVE = 20;
 const MAX_CLOCK_STEP_MS = 5_000;
 
 type Access = "ok" | "login" | "turnstile";
@@ -87,50 +90,59 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const liveConnectedRef = useRef(false);
   const playbackRef = useRef<PlaybackBuffer>(new Map());
   const serversRef = useRef<Server[]>([]);
-  const themeSwitchFrame = useRef<number | null>(null);
+  const localeRef = useRef(config.locale);
+  const reloadQueueRef = useRef<ReturnType<typeof createRefreshQueue> | null>(null);
+
+  localeRef.current = config.locale;
 
   const dark = appearance ? appearance === "dark" : config.default_theme === "system" ? systemDark : config.default_theme === "dark";
   const background = resolveBackground(config.background_url, dark);
   const blur = themeToggle(config, "enableBlur");
   const carrierLatency = config.show_latency && themeToggle(config, "showCarrierLatency", false);
 
-  const reload = useCallback(async (quiet = false) => {
-    if (!quiet) setLoading(true);
-    if (demoMode) {
-      setConfig(demoViewConfig);
-      setConfigReady(true);
-      setServers(demoServers);
-      setExchangeRates(demoExchangeRates);
-      setError("");
-      setLoading(false);
-      return;
-    }
-    try {
-      const result = await api.bootstrap();
-      setConfig(result.config);
-      setConfigReady(true);
-      setServers(result.servers);
-      setExchangeRates(result.exchange_rates);
-      setAccess(result.access);
-      if (result.access !== "ok") {
-        playbackRef.current.clear();
-        setLiveMetrics({});
+  if (!reloadQueueRef.current) {
+    reloadQueueRef.current = createRefreshQueue(async (quiet) => {
+      if (!quiet) setLoading(true);
+      if (demoMode) {
+        setConfig(demoViewConfig);
+        setConfigReady(true);
+        setServers(demoServers);
+        setExchangeRates(demoExchangeRates);
+        setError("");
+        setLoading(false);
+        return;
       }
-      setError("");
-    } catch (reason) {
-      const status = reason instanceof ApiError ? reason.status : 0;
-      if (status === 401 || status === 403) {
-        setAccess(status === 401 ? "login" : "turnstile");
-        setServers([]);
-        playbackRef.current.clear();
-        setLiveMetrics({});
-        setError(status === 403 && reason instanceof Error ? reason.message : "");
-      } else {
-        setError(reason instanceof Error ? reason.message : ui(config.locale, "无法加载节点状态", "Unable to load server status"));
+      try {
+        const result = await api.bootstrap();
+        setConfig(result.config);
+        setConfigReady(true);
+        setServers(result.servers);
+        setExchangeRates(result.exchange_rates);
+        setAccess(result.access);
+        if (result.access !== "ok") {
+          playbackRef.current.clear();
+          setLiveMetrics({});
+        }
+        setError("");
+      } catch (reason) {
+        const status = reason instanceof ApiError ? reason.status : 0;
+        if (status === 401 || status === 403) {
+          setAccess(status === 401 ? "login" : "turnstile");
+          setServers([]);
+          playbackRef.current.clear();
+          setLiveMetrics({});
+          setError(status === 403 && reason instanceof Error ? reason.message : "");
+        } else {
+          setError(reason instanceof Error ? reason.message : ui(localeRef.current, "无法加载节点状态", "Unable to load server status"));
+        }
+      } finally {
+        setLoading(false);
       }
-    } finally {
-      setLoading(false);
-    }
+    });
+  }
+
+  const reload = useCallback((quiet = false): Promise<void> => {
+    return reloadQueueRef.current!(quiet);
   }, []);
 
   const login = useCallback(async (username: string, password: string, turnstileToken: string, totpCode: string) => {
@@ -154,19 +166,64 @@ export function AppProvider({ children }: { children: ReactNode }) {
     pruneStalePlayback(playbackRef.current, servers);
   }, [servers]);
 
-  // Poll as a safety net: often when the live feed is down, rarely when it is
-  // healthy, so a missed frame cannot leave the page stale indefinitely.
-  // Hidden tabs skip polling entirely — the live socket is dropped while
-  // hidden, and a background tab has nobody to keep fresh.
+  // Komari-style refresh discipline: recursive scheduling prevents overlapping
+  // requests, hidden/offline pages stay idle, and returning to the page forces
+  // one immediate bootstrap sync. WebSocket data remains the fast path.
   useEffect(() => {
-    if (access !== "ok") return;
-    let ticks = 0;
-    const timer = window.setInterval(() => {
-      if (document.hidden) return;
-      ticks += 1;
-      if (!liveConnectedRef.current || ticks % BOOTSTRAP_POLL_TICKS_WHEN_LIVE === 0) void reload(true);
-    }, BOOTSTRAP_POLL_INTERVAL);
-    return () => clearInterval(timer);
+    if (access !== "ok" || demoMode) return;
+    let stopped = false;
+    let timer: number | undefined;
+    let lastSyncAt = Date.now();
+
+    const canRefresh = () => !document.hidden && navigator.onLine !== false;
+    const clearTimer = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+    const schedule = () => {
+      clearTimer();
+      if (!stopped && canRefresh()) {
+        timer = window.setTimeout(run, BOOTSTRAP_POLL_INTERVAL_MS);
+      }
+    };
+    const run = async () => {
+      clearTimer();
+      if (stopped || !canRefresh()) return;
+      const now = Date.now();
+      if (shouldSyncBootstrap(liveConnectedRef.current, now - lastSyncAt)) {
+        await reload(true);
+        lastSyncAt = Date.now();
+      }
+      schedule();
+    };
+    const refreshNow = () => {
+      clearTimer();
+      if (stopped || !canRefresh()) return;
+      void reload(true).finally(() => {
+        if (stopped) return;
+        lastSyncAt = Date.now();
+        schedule();
+      });
+    };
+    const handleVisibility = () => {
+      if (document.hidden) clearTimer();
+      else refreshNow();
+    };
+    const handleOffline = () => clearTimer();
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("online", refreshNow);
+    window.addEventListener("offline", handleOffline);
+    schedule();
+    return () => {
+      stopped = true;
+      clearTimer();
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("online", refreshNow);
+      window.removeEventListener("offline", handleOffline);
+    };
   }, [access, reload]);
 
   useEffect(() => {
@@ -260,24 +317,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setAppearance((current) => {
       const resolved = current ?? (dark ? "dark" : "light");
       const next = resolved === "dark" ? "light" : "dark";
-
-      // Komari 优化：标记主题切换中，避免过渡动画闪烁
-      const root = document.documentElement;
-      root.dataset.themeSwitching = "true";
-      root.classList.toggle("dark", next === "dark");
-      root.style.colorScheme = next;
-
-      // 双帧延迟后移除标记
-      if (themeSwitchFrame.current !== null) {
-        cancelAnimationFrame(themeSwitchFrame.current);
-      }
-      themeSwitchFrame.current = requestAnimationFrame(() => {
-        themeSwitchFrame.current = requestAnimationFrame(() => {
-          delete root.dataset.themeSwitching;
-          themeSwitchFrame.current = null;
-        });
-      });
-
       localStorage.setItem("nodeflare-theme", next);
       return next;
     });
@@ -305,15 +344,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     login,
     verify,
   }), [access, background, blur, carrierLatency, config, configReady, dark, error, exchangeRates, goHome, liveMetrics, liveServers, loading, login, openServer, reload, selectedId, toggleTheme, verify]);
-
-  // 组件卸载时清理动画帧
-  useEffect(() => {
-    return () => {
-      if (themeSwitchFrame.current !== null) {
-        cancelAnimationFrame(themeSwitchFrame.current);
-      }
-    };
-  }, []);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

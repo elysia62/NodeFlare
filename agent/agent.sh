@@ -1,11 +1,16 @@
 #!/bin/sh
 set -eu
 
-SERVICE_NAME="nodeflare"
+SERVICE_NAME="nodeflare-agent"
+LEGACY_SERVICE_NAME="nodeflare"
 INSTALL_DIR="/opt/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
+STATE_DIR="/var/lib/nodeflare-agent"
+PENDING_FILE="$STATE_DIR/pending.jsonl"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 OPENRC_FILE="/etc/init.d/$SERVICE_NAME"
+LEGACY_SERVICE_FILE="/etc/systemd/system/$LEGACY_SERVICE_NAME.service"
+LEGACY_OPENRC_FILE="/etc/init.d/$LEGACY_SERVICE_NAME"
 
 usage() {
   cat <<'EOF'
@@ -47,6 +52,21 @@ detect_init_system() {
     printf 'openrc'
   else
     printf 'unknown'
+  fi
+}
+
+remove_legacy_agent_service() {
+  init_system="$1"
+  if [ "$init_system" = "systemd" ] && [ -f "$LEGACY_SERVICE_FILE" ] \
+    && grep -Fq "$AGENT_FILE" "$LEGACY_SERVICE_FILE"; then
+    systemctl disable --now "$LEGACY_SERVICE_NAME" 2>/dev/null || true
+    rm -f "$LEGACY_SERVICE_FILE"
+    systemctl daemon-reload
+  elif [ "$init_system" = "openrc" ] && [ -f "$LEGACY_OPENRC_FILE" ] \
+    && grep -Fq "$AGENT_FILE" "$LEGACY_OPENRC_FILE"; then
+    rc-service "$LEGACY_SERVICE_NAME" stop 2>/dev/null || true
+    rc-update del "$LEGACY_SERVICE_NAME" default 2>/dev/null || true
+    rm -f "$LEGACY_OPENRC_FILE"
   fi
 }
 
@@ -134,7 +154,12 @@ install_agent() {
   init_system=$(detect_init_system)
   [ "$init_system" != "unknown" ] || fail "未检测到正在运行的 systemd 或 OpenRC"
 
-  mkdir -p "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+  chmod 755 "$INSTALL_DIR"
+  chmod 750 "$STATE_DIR"
+  if [ -f "$INSTALL_DIR/pending.jsonl" ] && [ ! -e "$PENDING_FILE" ]; then
+    mv "$INSTALL_DIR/pending.jsonl" "$PENDING_FILE"
+  fi
   temporary="$INSTALL_DIR/.agent.$$.download"
   trap 'rm -f "$temporary"' EXIT HUP INT TERM
   artifact="agent-linux-$arch"
@@ -197,13 +222,14 @@ install_agent() {
     systemd) systemctl stop "$SERVICE_NAME" 2>/dev/null || true ;;
     openrc) rc-service "$SERVICE_NAME" stop 2>/dev/null || true ;;
   esac
+  remove_legacy_agent_service "$init_system"
   mv "$temporary" "$AGENT_FILE"
   trap - EXIT HUP INT TERM
   log "正在配置并启动 $init_system 服务"
   if [ "$init_system" = "systemd" ]; then
     printf '%s\n' \
     '[Unit]' \
-    'Description=nodeflare' \
+    'Description=NodeFlare Agent' \
     'After=network-online.target' \
     'Wants=network-online.target' \
     '' \
@@ -216,7 +242,8 @@ install_agent() {
     'PrivateTmp=true' \
     'ProtectHome=true' \
     'ProtectSystem=strict' \
-    "ReadWritePaths=$INSTALL_DIR" \
+    "Environment=NODEFLARE_STATE_DIR=$STATE_DIR" \
+    "ReadWritePaths=$INSTALL_DIR $STATE_DIR" \
     '' \
     '[Install]' \
     'WantedBy=multi-user.target' > "$SERVICE_FILE"
@@ -234,6 +261,7 @@ install_agent() {
       "command=\"$AGENT_FILE\"" \
       "command_args=\"-e $endpoint -t $token -i $interval\"" \
       "command_user=\"root\"" \
+      "export NODEFLARE_STATE_DIR=\"$STATE_DIR\"" \
       "supervisor=\"supervise-daemon\"" \
       "respawn_delay=10" \
       'depend() { need net; }' > "$OPENRC_FILE"
@@ -272,6 +300,7 @@ uninstall_agent() {
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行卸载"
   log "正在停止并移除 NodeFlare Agent"
   init_system=$(detect_init_system)
+  remove_legacy_agent_service "$init_system"
   case "$init_system" in
     systemd) systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true ;;
     openrc)
@@ -282,7 +311,9 @@ uninstall_agent() {
   rm -f "$SERVICE_FILE"
   rm -f "$OPENRC_FILE"
   [ "$init_system" != "systemd" ] || systemctl daemon-reload 2>/dev/null || true
-  rm -rf "$INSTALL_DIR"
+  rm -f "$AGENT_FILE" "$INSTALL_DIR/pending.jsonl"
+  rm -rf "$STATE_DIR"
+  rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "NodeFlare Agent 已卸载"
 }
 

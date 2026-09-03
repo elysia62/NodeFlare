@@ -39,22 +39,14 @@ printf '%s' "$security_headers" | grep -qi '^x-content-type-options: nosniff'
 printf '%s' "$security_headers" | grep -qi '^x-frame-options: DENY'
 printf '%s' "$security_headers" | grep -qi "^content-security-policy:.*frame-ancestors 'none'"
 admin_html=$(request "$MONITOR_BASE_URL/admin")
-case "$admin_html" in
-  *"/admin-assets/admin.js"*) ;;
-  *)
-    echo "Admin script is missing" >&2
-    exit 1
-    ;;
-esac
-case "$admin_html" in
-  *"/admin-assets/admin.css"*) ;;
-  *)
-    echo "Admin stylesheet is missing" >&2
-    exit 1
-    ;;
-esac
-request "$MONITOR_BASE_URL/admin-assets/admin.js" | grep -q '管理面板'
-request "$MONITOR_BASE_URL/admin-assets/admin.css" | grep -q 'admin-shell'
+admin_script=$(printf '%s' "$admin_html" | sed -n 's/.*src="\([^"]*\.js\)".*/\1/p' | head -n 1)
+admin_stylesheet=$(printf '%s' "$admin_html" | sed -n 's/.*href="\([^"]*\.css\)".*/\1/p' | head -n 1)
+[ -n "$admin_script" ] || { echo "Admin script is missing" >&2; exit 1; }
+[ -n "$admin_stylesheet" ] || { echo "Admin stylesheet is missing" >&2; exit 1; }
+request "$MONITOR_BASE_URL$admin_script" | grep -q '管理面板'
+request "$MONITOR_BASE_URL$admin_stylesheet" | grep -q 'admin-shell'
+admin_headers=$(monitor_curl --silent --show-error --dump-header - --output /dev/null "$MONITOR_BASE_URL/admin")
+printf '%s' "$admin_headers" | grep -qi '^cache-control:.*no-store'
 
 step "login and settings"
 login_json=$(request -H 'Content-Type: application/json' \

@@ -12,15 +12,15 @@ mod turnstile;
 mod websocket;
 
 use anyhow::{Context, Result};
+use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware as axum_middleware;
 use axum::routing::{delete, get, patch, post};
-use axum::Router;
 use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tower_http::trace::TraceLayer;
 
 pub struct AppState {
@@ -191,6 +191,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/admin/themes",
             get(routes::admin::themes_get).post(routes::admin::themes_post),
+        )
+        .route(
+            "/api/admin/themes/upload",
+            post(routes::admin::themes_upload),
         )
         .route(
             "/api/admin/themes/:id/activate",

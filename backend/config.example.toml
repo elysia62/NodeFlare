@@ -1,5 +1,5 @@
-# NodeFlare 配置文件示例
-# 复制为 config.toml 并根据需要修改
+# NodeFlare 本地开发配置示例
+# 正式安装请运行仓库根目录的 install.sh，配置将写入 /etc/nodeflare/config.toml
 
 # 数据库连接 URL
 # SQLite: sqlite://path/to/db.sqlite 或 sqlite://nodeflare.db
@@ -26,6 +26,9 @@ turnstile_secret_key = ""
 frontend_dir = "../frontend/dist"
 admin_frontend_dir = "../frontend/admin-dist"
 agent_dir = "../agent"
+
+# 下载或上传的主题 ZIP 解压目录
+theme_dir = "themes"
 
 # 管理员会话有效期（小时，范围 1-2160）
 session_ttl_hours = 168
