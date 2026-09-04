@@ -27,6 +27,15 @@ pub enum DatabaseKind {
     Postgres,
 }
 
+impl DatabaseKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgresql",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Database {
     pool: AnyPool,
@@ -56,6 +65,58 @@ impl Database {
 
     pub fn is_postgres(&self) -> bool {
         self.kind == DatabaseKind::Postgres
+    }
+
+    pub async fn stats(&self) -> Result<crate::models::DatabaseStats> {
+        let (size_bytes, reclaimable_bytes) = match self.kind {
+            DatabaseKind::Sqlite => {
+                let page_count = sqlx::query_scalar::<_, i64>("PRAGMA page_count")
+                    .fetch_one(&self.pool)
+                    .await?;
+                let page_size = sqlx::query_scalar::<_, i64>("PRAGMA page_size")
+                    .fetch_one(&self.pool)
+                    .await?;
+                let free_pages = sqlx::query_scalar::<_, i64>("PRAGMA freelist_count")
+                    .fetch_one(&self.pool)
+                    .await?;
+                (
+                    page_count.saturating_mul(page_size),
+                    Some(free_pages.saturating_mul(page_size)),
+                )
+            }
+            DatabaseKind::Postgres => (
+                sqlx::query_scalar::<_, i64>("SELECT pg_database_size(current_database())::BIGINT")
+                    .fetch_one(&self.pool)
+                    .await?,
+                None,
+            ),
+        };
+        Ok(crate::models::DatabaseStats {
+            kind: self.kind.as_str().to_string(),
+            size_bytes,
+            reclaimable_bytes,
+        })
+    }
+
+    pub async fn reclaim_space(&self) -> Result<()> {
+        match self.kind {
+            DatabaseKind::Sqlite => {
+                sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .execute(&self.pool)
+                    .await?;
+                sqlx::query("VACUUM").execute(&self.pool).await?;
+                sqlx::query("PRAGMA optimize").execute(&self.pool).await?;
+                sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .execute(&self.pool)
+                    .await?;
+            }
+            DatabaseKind::Postgres => {
+                sqlx::query("VACUUM (FULL, ANALYZE)")
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn optimize(&self) -> Result<()> {
@@ -201,13 +262,7 @@ impl Settings {
 
 pub async fn connect(database_url: &str) -> Result<Database> {
     install_default_drivers();
-    let kind = if database_url.starts_with("sqlite:") {
-        DatabaseKind::Sqlite
-    } else if database_url.starts_with("postgres:") || database_url.starts_with("postgresql:") {
-        DatabaseKind::Postgres
-    } else {
-        anyhow::bail!("unsupported database URL");
-    };
+    let kind = database_kind(database_url)?;
     let sqlite_in_memory =
         kind == DatabaseKind::Sqlite && database_url.trim_start().starts_with("sqlite::memory:");
     if kind == DatabaseKind::Sqlite && !sqlite_in_memory {
@@ -240,6 +295,16 @@ pub async fn connect(database_url: &str) -> Result<Database> {
     }
     let pool = options.connect(database_url).await?;
     Ok(Database { pool, kind })
+}
+
+pub fn database_kind(database_url: &str) -> Result<DatabaseKind> {
+    if database_url.starts_with("sqlite:") {
+        Ok(DatabaseKind::Sqlite)
+    } else if database_url.starts_with("postgres:") || database_url.starts_with("postgresql:") {
+        Ok(DatabaseKind::Postgres)
+    } else {
+        anyhow::bail!("unsupported database URL")
+    }
 }
 
 fn ensure_sqlite_file(database_url: &str) -> Result<()> {
@@ -787,6 +852,12 @@ mod tests {
             .unwrap();
         assert_eq!(journal_mode, "wal");
         assert_eq!(auto_vacuum, 2);
+
+        let stats = db.stats().await.unwrap();
+        assert_eq!(stats.kind, "sqlite");
+        assert!(stats.size_bytes > 0);
+        assert!(stats.reclaimable_bytes.is_some());
+        db.reclaim_space().await.unwrap();
     }
 
     #[tokio::test]

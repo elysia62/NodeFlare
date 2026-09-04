@@ -471,11 +471,8 @@ async fn restore_table<R: Read + Seek + Send>(
     Ok(restored)
 }
 
-pub async fn restore_archive(db: &Database, archive: &[u8]) -> Result<usize> {
-    if archive.is_empty() || archive.len() > DATABASE_BACKUP_MAX_BYTES {
-        bail!("数据库备份 ZIP 大小无效");
-    }
-    let mut archive = ZipArchive::new(Cursor::new(archive)).context("文件不是有效的 ZIP")?;
+async fn restore<R: Read + Seek + Send>(db: &Database, source: R) -> Result<usize> {
+    let mut archive = ZipArchive::new(source).context("文件不是有效的 ZIP")?;
     let _manifest = validate_archive(&mut archive)?;
     let schema = database_schema(db).await?;
 
@@ -517,9 +514,48 @@ pub async fn restore_archive(db: &Database, archive: &[u8]) -> Result<usize> {
     Ok(restored)
 }
 
+pub async fn restore_archive(db: &Database, archive: &[u8]) -> Result<usize> {
+    if archive.is_empty() || archive.len() > DATABASE_BACKUP_MAX_BYTES {
+        bail!("数据库备份 ZIP 大小无效");
+    }
+    restore(db, Cursor::new(archive)).await
+}
+
+pub async fn copy_database(source: &Database, target: &Database) -> Result<usize> {
+    let archive = export_archive(source).await?;
+    restore(target, archive.file).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn copies_database_through_a_streamed_archive() {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        source.migrate().await.unwrap();
+        target.migrate().await.unwrap();
+        sqlx::query(
+            "INSERT INTO settings(key, value) VALUES \
+             ('site_name', 'Migrated'), \
+             ('admin_username', 'admin'), \
+             ('admin_password_hash', 'hash'), \
+             ('password_client_salt', 'salt'), \
+             ('password_scheme', 'argon2-client-pbkdf2-v1')",
+        )
+        .execute(source.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(copy_database(&source, &target).await.unwrap(), 5);
+        let site_name =
+            sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key='site_name'")
+                .fetch_one(target.pool())
+                .await
+                .unwrap();
+        assert_eq!(site_name, "Migrated");
+    }
 
     #[tokio::test]
     async fn sqlite_backup_round_trip_restores_data_and_clears_sessions() {

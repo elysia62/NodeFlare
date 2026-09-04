@@ -149,7 +149,7 @@ impl Config {
     }
 }
 
-pub fn clear_bootstrap_password(path: &Path) -> Result<bool> {
+fn replace_assignment(path: &Path, key: &str, replacement: &str) -> Result<bool> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read configuration {}", path.display()))?;
     let mut output = String::with_capacity(content.len());
@@ -159,14 +159,14 @@ pub fn clear_bootstrap_password(path: &Path) -> Result<bool> {
             .strip_suffix('\n')
             .map_or((segment, ""), |line| (line, "\n"));
         let trimmed = line.trim_start();
-        let is_password = !trimmed.starts_with('#')
+        let matches = !trimmed.starts_with('#')
             && trimmed
-                .strip_prefix("admin_password")
+                .strip_prefix(key)
                 .is_some_and(|rest| rest.trim_start().starts_with('='));
-        if is_password {
+        if matches {
             let indentation = &line[..line.len() - trimmed.len()];
             output.push_str(indentation);
-            output.push_str("admin_password = \"\"");
+            output.push_str(replacement);
             output.push_str(newline);
             replaced = true;
         } else {
@@ -189,6 +189,22 @@ pub fn clear_bootstrap_password(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+pub fn clear_bootstrap_password(path: &Path) -> Result<bool> {
+    replace_assignment(path, "admin_password", "admin_password = \"\"")
+}
+
+pub fn update_database_url(path: &Path, database_url: &str) -> Result<()> {
+    if database_url.chars().any(char::is_control) {
+        anyhow::bail!("database URL contains control characters");
+    }
+    let escaped = database_url.replace('\\', "\\\\").replace('"', "\\\"");
+    let replacement = format!("database_url = \"{escaped}\"");
+    if !replace_assignment(path, "database_url", &replacement)? {
+        anyhow::bail!("database_url is missing from configuration");
+    }
+    Ok(())
+}
+
 fn is_example_password(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -204,7 +220,7 @@ fn resolve_path(base: &Path, value: &Path) -> PathBuf {
     }
 }
 
-fn resolve_database_url(base: &Path, value: &str) -> Result<String> {
+pub fn resolve_database_url(base: &Path, value: &str) -> Result<String> {
     let value = value.trim();
     if value.starts_with("postgres://") || value.starts_with("postgresql://") {
         return Ok(value.to_string());
@@ -239,7 +255,7 @@ mod tests {
         Args, clear_bootstrap_password, default_admin_frontend_dir, default_agent_dir,
         default_bind_addr, default_config_path, default_data_dir, default_database_url,
         default_public_frontend_dir, default_share_dir, default_theme_dir, is_example_password,
-        resolve_database_url,
+        resolve_database_url, update_database_url,
     };
     use clap::Parser;
     use std::path::Path;
@@ -308,5 +324,29 @@ mod tests {
             "admin_username = \"admin\"\nadmin_password = \"\"\n# admin_password = \"comment\"\ndatabase_url = \"sqlite::memory:\"\n"
         );
         assert!(!clear_bootstrap_password(&path).unwrap());
+    }
+
+    #[test]
+    fn updates_only_the_database_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "database_url = \"sqlite://nodeflare.db\"\n# database_url = \"ignored\"\nbind_addr = \"127.0.0.1:8080\"\n",
+        )
+        .unwrap();
+        update_database_url(
+            &path,
+            "postgres://nodeflare:p%40ss@127.0.0.1:5432/nodeflare?sslmode=prefer",
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(
+            "database_url = \"postgres://nodeflare:p%40ss@127.0.0.1:5432/nodeflare?sslmode=prefer\""
+        ));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("# database_url = \"ignored\"")
+        );
     }
 }

@@ -74,14 +74,14 @@ Windows 使用 `install.ps1 -Uninstall`，彻底删除数据时再加 `-Purge`�
 
 ## 数据库与备份
 
-管理后台的“数据库”页面可直接导出或恢复 ZIP，SQLite 和 PostgreSQL 都支持。
+管理后台的“数据库”页面可查看占用空间、手动回收空间、导出或恢复 ZIP，SQLite 和 PostgreSQL 都支持。
 
 - 备份包含设置、节点、监控历史、通知、主题、远程任务和安全配置。
 - 登录会话等临时数据不会导出；恢复完成后需要重新登录。
 - 建议使用相同版本的 NodeFlare 恢复备份。
 - `pg_dump` 和 SQLite `.backup` 仍可作为额外的数据库原生备份方式，但不是使用内置 ZIP 功能的前提。
 
-切换 `database_url` 只会连接或初始化目标数据库，不会自动迁移原数据库的数据。需要迁移时使用后台 ZIP 导出和恢复。
+“数据库迁移”可在 SQLite 和 PostgreSQL 之间复制全部持久数据。迁移会覆盖目标库中已有的 NodeFlare 数据并更新 `database_url`，完成后重启 NodeFlare。
 
 ## 安装 Agent
 

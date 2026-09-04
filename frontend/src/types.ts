@@ -310,9 +310,16 @@ export interface AlertRuleInput extends Omit<AlertRule, "id" | "enabled"> {
 }
 
 export interface DatabaseStats {
-  server_count: number;
-  online_count: number;
-  history_rows: number;
+  kind: "sqlite" | "postgresql";
+  size_bytes: number;
+  reclaimable_bytes: number | null;
+}
+
+export interface DatabaseMigrationResult {
+  migrated_rows: number;
+  target_kind: DatabaseStats["kind"];
+  size_bytes: number;
+  restart_required: boolean;
 }
 
 export interface LoginSession {

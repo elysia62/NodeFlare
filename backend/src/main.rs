@@ -30,17 +30,26 @@ use tower_http::trace::TraceLayer;
 pub struct AppState {
     pub db: db::Database,
     pub config: config::Config,
+    pub config_path: std::path::PathBuf,
+    pub database_overridden: bool,
     pub http: reqwest::Client,
     pub agents: RwLock<HashMap<String, websocket::AgentConnection>>,
     pub dashboard_tx: broadcast::Sender<websocket::DashboardEvent>,
     pub database_maintenance: Mutex<()>,
-    pub database_restoring: AtomicBool,
+    pub database_maintenance_active: AtomicBool,
     pub login_attempts: security::AttemptLimiter,
     pub remote_totp_attempts: security::AttemptLimiter,
     pub password_verifications: Arc<Semaphore>,
 }
 
 impl AppState {
+    pub async fn disconnect_agents(&self) {
+        let agents = std::mem::take(&mut *self.agents.write().await);
+        for connection in agents.into_values() {
+            let _ = connection.sender.try_send(websocket::AgentCommand::Close);
+        }
+    }
+
     pub async fn push_agent_config(&self, server_id: &str) {
         let Some(connection) = self.agents.read().await.get(server_id).cloned() else {
             return;
@@ -112,6 +121,7 @@ async fn main() -> Result<()> {
 
     let args = config::Args::parse();
     let mut config = config::Config::load(&args.config)?;
+    let database_overridden = args.database.is_some();
     if let Some(database) = args.database {
         config.database_url = database;
     }
@@ -155,11 +165,13 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         db: database,
         config,
+        config_path: args.config,
+        database_overridden,
         http,
         agents: RwLock::new(HashMap::new()),
         dashboard_tx,
         database_maintenance: Mutex::new(()),
-        database_restoring: AtomicBool::new(false),
+        database_maintenance_active: AtomicBool::new(false),
         login_attempts: security::AttemptLimiter::new(
             5,
             std::time::Duration::from_secs(5 * 60),
@@ -260,6 +272,14 @@ async fn main() -> Result<()> {
         )
         .route("/api/admin/database", get(routes::admin::database_stats))
         .route(
+            "/api/admin/database/reclaim",
+            post(routes::admin::database_reclaim),
+        )
+        .route(
+            "/api/admin/database/migrate",
+            post(routes::admin::database_migrate),
+        )
+        .route(
             "/api/admin/database/backup",
             get(routes::admin::database_backup),
         )
@@ -267,7 +287,6 @@ async fn main() -> Result<()> {
             "/api/admin/database/restore",
             post(routes::admin::database_restore),
         )
-        .route("/api/admin/history", delete(routes::admin::history_delete))
         .route("/api/admin/remote/task", post(routes::remote::create_task))
         .route("/api/admin/remote/task/{id}", get(routes::remote::get_task))
         .layer(axum_middleware::from_fn_with_state(

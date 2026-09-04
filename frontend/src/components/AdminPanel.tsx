@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Info,
   ArrowLeft,
+  ArrowRightLeft,
   ChevronDown,
   ChevronUp,
   CircleAlert,
@@ -36,7 +37,7 @@ import {
 import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError, getToken, setToken } from "../api";
 import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } from "../adminRoutes";
-import { formatByteSize, isOnline, parseByteSize } from "../format";
+import { formatBytes, formatByteSize, isOnline, parseByteSize } from "../format";
 import { derivePassword } from "../password";
 import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS } from "../refresh";
 import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseStats, type ExchangeRates, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
@@ -68,7 +69,7 @@ const adminPages: Record<AdminTab, { title: string; description: string }> = {
   themeSettings: { title: "主题设置", description: "调整当前前端主题提供的显示选项" },
   alerts: { title: "通知", description: "配置 Telegram 通知和资源告警阈值" },
   security: { title: "登录与安全", description: "管理管理员账号、登录设备和安全验证" },
-  data: { title: "数据库", description: "查看状态、备份恢复并维护历史数据" },
+  data: { title: "数据库", description: "查看空间、备份恢复和迁移数据库" },
   remote: { title: "远程执行", description: "输入命令并执行" },
   about: { title: "关于", description: "版本信息与项目地址" },
 };
@@ -254,6 +255,7 @@ export function AdminPanel({
   const [draggingId, setDraggingId] = useState("");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [database, setDatabase] = useState<DatabaseStats | null>(null);
+  const [databaseMigrationUrl, setDatabaseMigrationUrl] = useState("");
   const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [exchangeRatesExpanded, setExchangeRatesExpanded] = useState(false);
   const [themes, setThemes] = useState<Theme[]>([]);
@@ -586,6 +588,33 @@ export function AdminPanel({
     finally { setBusy(false); }
   }
 
+  async function reclaimDatabase() {
+    if (!window.confirm("回收空间期间数据库会短暂不可用，确认继续？")) return;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const result = await api.reclaimDatabase();
+      setDatabase(result.database);
+      setNotice(result.reclaimed_bytes > 0 ? `已回收 ${formatBytes(result.reclaimed_bytes)}` : "数据库已整理，当前没有可释放空间");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "回收数据库空间失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function migrateDatabase() {
+    const databaseUrl = databaseMigrationUrl.trim();
+    if (!databaseUrl) return;
+    const source = database?.kind === "postgresql" ? "PostgreSQL" : "SQLite";
+    const target = database?.kind === "postgresql" ? "SQLite" : "PostgreSQL";
+    if (!window.confirm(`将 ${source} 迁移到 ${target}？目标库中已有的 NodeFlare 数据会被覆盖。`)) return;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const result = await api.migrateDatabase(databaseUrl);
+      setDatabaseMigrationUrl("");
+      const targetName = result.target_kind === "postgresql" ? "PostgreSQL" : "SQLite";
+      window.alert(`数据库已迁移到 ${targetName}，共 ${result.migrated_rows.toLocaleString()} 行（${formatBytes(result.size_bytes)}），并已更新配置。请重启 NodeFlare 后重新登录。`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "数据库迁移失败"); }
+    finally { setBusy(false); }
+  }
+
   async function refreshExchangeRates() {
     setBusy(true); setError(""); setNotice("");
     try {
@@ -700,14 +729,6 @@ export function AdminPanel({
       await load();
       setNotice("主题已删除");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "删除主题失败"); }
-    finally { setBusy(false); }
-  }
-
-  async function clearHistory() {
-    if (!window.confirm("确认清空全部历史指标？节点配置和最新状态不会删除。")) return;
-    setBusy(true); setError("");
-    try { await api.clearHistory(); setNotice("历史指标已清空"); await loadDatabase(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "清理历史失败"); }
     finally { setBusy(false); }
   }
 
@@ -1077,7 +1098,7 @@ export function AdminPanel({
                   </form>
                 </div>
               ) : settings && (tab === "appearance" || tab === "themeSettings" || tab === "alerts" || tab === "security" || tab === "data") ? (
-                <form className="settings-form" onSubmit={saveSite}>
+                <form className="settings-form" onSubmit={tab === "data" ? (event) => { event.preventDefault(); void migrateDatabase(); } : saveSite}>
                   {tab === "appearance" ? <>
                     <div className="section-title"><Eye size={15} />外观与展示</div>
                     <div className="form-grid"><label><span>站点名称</span><input required value={settings.site_name} onChange={(event) => updateSettings("site_name", event.target.value)} /></label><label><span>站点描述</span><input value={settings.site_description} onChange={(event) => updateSettings("site_description", event.target.value)} /></label></div>
@@ -1129,13 +1150,15 @@ export function AdminPanel({
 
                   {tab === "data" ? <>
                     <div className="section-head database-section-head"><div><h3>数据库维护</h3><span>备份包含节点、设置、历史、任务及安全配置，请妥善保管。</span></div><div className="section-actions"><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void exportDatabaseBackup()}><Download size={15} />导出备份</button><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => databaseRestoreInputRef.current?.click()}><Upload size={15} />恢复备份</button><input ref={databaseRestoreInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void restoreDatabaseBackup(file); }} /></div></div>
-                    <div className="data-stat-grid">{database ? <><DataStat label="节点" value={database.server_count} /><DataStat label="在线" value={database.online_count} /><DataStat label="历史行数" value={database.history_rows.toLocaleString()} /></> : <p className="settings-hint">正在读取数据库统计...</p>}</div>
+                    <div className="database-storage"><div><span>数据库大小</span><strong>{database ? formatBytes(database.size_bytes) : "读取中..."}</strong>{database ? <small>{database.kind === "postgresql" ? "PostgreSQL" : "SQLite"}{database.reclaimable_bytes ? ` · 可回收 ${formatBytes(database.reclaimable_bytes)}` : ""}</small> : null}</div><button type="button" className="secondary-btn" disabled={busy || !database} onClick={() => void reclaimDatabase()}><RotateCw size={15} />回收空间</button></div>
+                    <div className="database-migration">
+                      <div><div className="section-title"><ArrowRightLeft size={15} />数据库迁移</div><p className="settings-hint">将当前 {database?.kind === "postgresql" ? "PostgreSQL" : "SQLite"} 数据复制到 {database?.kind === "postgresql" ? "SQLite" : "PostgreSQL"}，完成后自动更新配置，重启服务后生效。</p></div>
+                      <div className="database-migration-form"><label><span>目标数据库 URL</span><input required type="password" autoComplete="off" maxLength={2048} spellCheck={false} value={databaseMigrationUrl} onChange={(event) => setDatabaseMigrationUrl(event.target.value)} placeholder={database?.kind === "postgresql" ? "sqlite://nodeflare-migrated.db" : "postgres://user:password@127.0.0.1:5432/nodeflare?sslmode=prefer"} /></label><button className="primary-btn" disabled={busy || !databaseMigrationUrl.trim()}><ArrowRightLeft size={15} />{busy ? "迁移中" : "开始迁移"}</button></div>
+                    </div>
                     <div className="usage-section">
                       <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取汇率快照"}</p></div><div className="usage-head-actions">{exchangeRatesExpanded ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={15} />立即更新</button> : null}<button type="button" className="secondary-btn compact usage-toggle" aria-expanded={exchangeRatesExpanded} onClick={() => setExchangeRatesExpanded((expanded) => !expanded)}>{exchangeRatesExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}{exchangeRatesExpanded ? "收起" : "展开"}</button></div></div>
                       {exchangeRatesExpanded ? exchangeRates ? <div className="usage-table-wrap"><table className="usage-table"><thead><tr><th>币种</th><th>1 CNY 可兑换</th></tr></thead><tbody>{ASSET_CURRENCIES.filter((currency) => currency !== "CNY").map((currency) => <tr key={currency}><th scope="row">{currency}</th><td>{exchangeRates.rates[currency]?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "--"}</td></tr>)}</tbody></table></div> : <div className="usage-empty">尚未读取</div> : null}
                     </div>
-                    <div className="data-actions"><button type="button" className="secondary-btn" onClick={() => void loadDatabase()}>刷新统计</button><button type="button" className="danger-btn" onClick={() => void clearHistory()}><Trash2 size={15} />清空历史指标</button></div>
-                    <p className="settings-hint">清空历史不会删除节点、密钥或最新状态。</p>
                   </> : null}
 
                   {tab !== "data" ? <div className="form-actions"><button className="primary-btn" disabled={busy}><Save size={15} />保存{tab === "security" ? "账号与安全设置" : "设置"}</button></div> : null}
@@ -1226,8 +1249,4 @@ function ThemeOption({ field, value, onChange }: { field: ThemeSettingField; val
     return <label className="theme-option"><span>{field.label}</span><input type="number" min={field.min} max={field.max} step={field.step} value={typeof value === "number" ? value : ""} onChange={(event) => onChange(Number(event.target.value))} /></label>;
   }
   return <label className={`theme-option ${field.type === "color" ? "theme-color-option" : ""}`}><span>{field.label}</span><input type={field.type} maxLength={field.type === "color" ? undefined : 500} placeholder={field.placeholder} value={typeof value === "string" ? value : field.type === "color" ? "#0f766e" : ""} onChange={(event) => onChange(event.target.value)} /></label>;
-}
-
-function DataStat({ label, value }: { label: string; value: number | string }) {
-  return <div className="data-stat"><span>{label}</span><strong>{value}</strong></div>;
 }

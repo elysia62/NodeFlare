@@ -1,4 +1,4 @@
-import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
+import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
 
 const TOKEN_KEY = "nodeflare-admin-token";
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
@@ -145,6 +145,16 @@ export const api = {
       true,
     ),
   databaseStats: () => request<DatabaseStats>("/api/admin/database", {}, true),
+  reclaimDatabase: () => request<{ database: DatabaseStats; reclaimed_bytes: number }>(
+    "/api/admin/database/reclaim",
+    { method: "POST" },
+    true,
+  ),
+  migrateDatabase: (databaseUrl: string) => request<DatabaseMigrationResult>(
+    "/api/admin/database/migrate",
+    { method: "POST", body: JSON.stringify({ database_url: databaseUrl }) },
+    true,
+  ),
   databaseBackup: async () => {
     const response = await requestResponse("/api/admin/database/backup", {}, true);
     const disposition = response.headers.get("Content-Disposition") ?? "";
@@ -155,7 +165,6 @@ export const api = {
     const query = new URLSearchParams({ filename: file.name });
     return request<{ restored_rows: number }>(`/api/admin/database/restore?${query}`, { method: "POST", body: file }, true);
   },
-  clearHistory: () => request<void>("/api/admin/history", { method: "DELETE" }, true),
   createRemoteTask: (input: RemoteTaskInput) => request<{ tasks: RemoteTaskCreated[] }>("/api/admin/remote/task", {
     method: "POST",
     body: JSON.stringify(input),

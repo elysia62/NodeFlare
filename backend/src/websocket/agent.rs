@@ -57,10 +57,10 @@ pub async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if state.database_restoring.load(Ordering::Acquire) {
+    if state.database_maintenance_active.load(Ordering::Acquire) {
         return ApiResponse::error(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "数据库正在恢复，请稍后重试",
+            "数据库正在维护，请稍后重试",
         )
         .into_response();
     }
@@ -209,7 +209,7 @@ async fn handle_text(
     outbound: &mpsc::Sender<AgentCommand>,
     text: &str,
 ) {
-    if state.database_restoring.load(Ordering::Acquire) {
+    if state.database_maintenance_active.load(Ordering::Acquire) {
         send_persistence_error(outbound, 0);
         return;
     }

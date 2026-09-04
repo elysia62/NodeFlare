@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Database, ServerIcon, WalletCards } from "lucide-react";
-import { formatBytes, formatCurrency, formatSpeed, formatSpeedParts, isOnline, number, remainingAssetValue } from "../format";
+import { formatBytes, formatCurrency, formatSpeedParts, isOnline, number, remainingAssetValue } from "../format";
 import { assetCurrency, themeToggle } from "../theme";
 import type { Config, ExchangeRates, Server } from "../types";
 import { ui } from "../locale";
@@ -30,7 +30,7 @@ export function StatsBar({ servers, config, exchangeRates }: { servers: Server[]
   const peakDownload = onlineServers.reduce<Server | null>((peak, server) => !peak || number(server.net_in) > number(peak.net_in) ? server : peak, null);
   const peakDetail = (server: Server | null, field: "net_out" | "net_in") => {
     if (!server || number(server[field]) <= 0) return <span>{ui(locale, "暂无实时流量", "No live traffic")}</span>;
-    return <span title={server.name}>{ui(locale, `峰值 ${server.name} · ${formatSpeed(server[field])}`, `Peak ${server.name} · ${formatSpeed(server[field])}`)}</span>;
+    return <span title={server.name}>{ui(locale, `峰值 ${server.name}`, `Peak ${server.name}`)}</span>;
   };
   const paid = servers.filter((server) => server.price > 0);
   const toDisplayCurrency = (value: number, currency: string) => {

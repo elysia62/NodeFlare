@@ -28,9 +28,15 @@ pub struct DatabaseRestoreInput {
     filename: String,
 }
 
-struct DatabaseRestoreFlag<'a>(&'a std::sync::atomic::AtomicBool);
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseMigrationInput {
+    database_url: String,
+}
 
-impl Drop for DatabaseRestoreFlag<'_> {
+struct DatabaseOperationFlag<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for DatabaseOperationFlag<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
@@ -612,15 +618,84 @@ pub async fn exchange_refresh(State(state): State<Arc<AppState>>) -> Result<Resp
 }
 
 pub async fn database_stats(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    let threshold = crate::db::load_settings(&state.db)
+    Ok(Json(state.db.stats().await.map_err(ApiResponse::internal)?).into_response())
+}
+
+pub async fn database_reclaim(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+    let _maintenance = state.database_maintenance.lock().await;
+    state
+        .database_maintenance_active
+        .store(true, Ordering::Release);
+    let _operation = DatabaseOperationFlag(&state.database_maintenance_active);
+    state.disconnect_agents().await;
+
+    let before = state.db.stats().await.map_err(ApiResponse::internal)?;
+    state
+        .db
+        .reclaim_space()
         .await
-        .map_err(ApiResponse::internal)?
-        .offline_threshold_seconds;
-    Ok(Json(
-        crate::db::queries::database_stats(&state.db, threshold)
-            .await
-            .map_err(ApiResponse::internal)?,
-    )
+        .map_err(ApiResponse::internal)?;
+    let database = state.db.stats().await.map_err(ApiResponse::internal)?;
+    let reclaimed_bytes = before.size_bytes.saturating_sub(database.size_bytes);
+    Ok(Json(serde_json::json!({
+        "database": database,
+        "reclaimed_bytes": reclaimed_bytes,
+    }))
+    .into_response())
+}
+
+pub async fn database_migrate(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<DatabaseMigrationInput>,
+) -> Result<Response, ApiResponse> {
+    if state.database_overridden {
+        return Err(ApiResponse::bad_request(
+            "使用 --database 启动时无法自动切换配置",
+        ));
+    }
+    let value = input.database_url.trim();
+    if value.is_empty() || value.len() > 2048 || value.chars().any(char::is_control) {
+        return Err(ApiResponse::bad_request("请输入有效的目标数据库 URL"));
+    }
+    let base = state
+        .config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let target_url = crate::config::resolve_database_url(base, value)
+        .map_err(|_| ApiResponse::bad_request("目标数据库 URL 格式无效"))?;
+    let target_kind = crate::db::database_kind(&target_url)
+        .map_err(|_| ApiResponse::bad_request("目标数据库 URL 格式无效"))?;
+    if target_kind == state.db.kind() {
+        return Err(ApiResponse::bad_request("目标必须使用另一种数据库类型"));
+    }
+
+    let _maintenance = state.database_maintenance.lock().await;
+    state
+        .database_maintenance_active
+        .store(true, Ordering::Release);
+    let _operation = DatabaseOperationFlag(&state.database_maintenance_active);
+    state.disconnect_agents().await;
+
+    let target = crate::db::connect(&target_url)
+        .await
+        .map_err(|_| ApiResponse::unprocessable("无法连接目标数据库，请检查地址、账号和网络"))?;
+    target
+        .migrate()
+        .await
+        .map_err(|_| ApiResponse::unprocessable("无法初始化目标数据库，请检查账号权限"))?;
+    let migrated_rows = crate::backup::copy_database(&state.db, &target)
+        .await
+        .map_err(|error| ApiResponse::unprocessable(format!("迁移失败：{error}")))?;
+    let database = target.stats().await.map_err(ApiResponse::internal)?;
+    crate::config::update_database_url(&state.config_path, &target_url)
+        .map_err(ApiResponse::internal)?;
+
+    Ok(Json(serde_json::json!({
+        "migrated_rows": migrated_rows,
+        "target_kind": target_kind.as_str(),
+        "size_bytes": database.size_bytes,
+        "restart_required": true,
+    }))
     .into_response())
 }
 
@@ -683,28 +758,15 @@ pub async fn database_restore(
     })?;
 
     let _maintenance = state.database_maintenance.lock().await;
-    if state.database_restoring.swap(true, Ordering::AcqRel) {
-        return Err(ApiResponse::conflict("数据库正在恢复"));
-    }
-    let _restore_flag = DatabaseRestoreFlag(&state.database_restoring);
-    let agents = std::mem::take(&mut *state.agents.write().await);
-    for connection in agents.into_values() {
-        let _ = connection
-            .sender
-            .try_send(crate::websocket::AgentCommand::Close);
-    }
+    state
+        .database_maintenance_active
+        .store(true, Ordering::Release);
+    let _operation = DatabaseOperationFlag(&state.database_maintenance_active);
+    state.disconnect_agents().await;
     let restored_rows = crate::backup::restore_archive(&state.db, &archive)
         .await
         .map_err(|error| ApiResponse::unprocessable(format!("恢复失败：{error}")))?;
     Ok(Json(serde_json::json!({"restored_rows": restored_rows})).into_response())
-}
-
-pub async fn history_delete(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    let _maintenance = state.database_maintenance.lock().await;
-    crate::db::queries::clear_history(&state.db)
-        .await
-        .map_err(ApiResponse::internal)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 fn validate_id(id: &str) -> Result<(), ApiResponse> {

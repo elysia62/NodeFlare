@@ -487,9 +487,9 @@ pub struct RemoteTaskInfo {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DatabaseStats {
-    pub server_count: i64,
-    pub online_count: i64,
-    pub history_rows: i64,
+    pub kind: String,
+    pub size_bytes: i64,
+    pub reclaimable_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -135,6 +135,14 @@ request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/themes" | \
   jq -e '.themes | any(.builtin == true and .id == "builtin-nodeflare-glass" and .name == "NodeFlare Glass" and .active == true)' >/dev/null
 
+step "database size and reclaim"
+request -H "Authorization: Bearer $admin_token" \
+  "$MONITOR_BASE_URL/api/admin/database" | \
+  jq -e '(.kind == "sqlite" or .kind == "postgresql") and .size_bytes > 0' >/dev/null
+request -H "Authorization: Bearer $admin_token" -X POST \
+  "$MONITOR_BASE_URL/api/admin/database/reclaim" | \
+  jq -e '.database.size_bytes > 0 and .reclaimed_bytes >= 0' >/dev/null
+
 step "database backup and restore"
 backup_file=$(mktemp /tmp/nodeflare-backup.XXXXXX.zip)
 request -H "Authorization: Bearer $admin_token" \
@@ -231,5 +239,14 @@ hidden_history_status=$(monitor_curl --silent --output /dev/null --write-out '%{
   -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/history/$server_id?hours=1")
 [ "$hidden_history_status" = "404" ]
+
+if [ -n "${MONITOR_MIGRATION_URL:-}" ]; then
+  step "database migration"
+  migration_payload=$(jq -nc --arg database_url "$MONITOR_MIGRATION_URL" '{database_url:$database_url}')
+  request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+    --data "$migration_payload" "$MONITOR_BASE_URL/api/admin/database/migrate" | \
+    jq -e --arg kind "${MONITOR_MIGRATION_KIND:-postgresql}" \
+      '.migrated_rows > 0 and .target_kind == $kind and .size_bytes > 0 and .restart_required == true' >/dev/null
+fi
 
 echo "Smoke test passed"

@@ -1,9 +1,9 @@
 use super::{Database, SECRET_MASK, now};
 use crate::auth;
 use crate::models::{
-    AgentLatencyResult, AgentLatencyTask, AgentReport, AlertRuleInput, AlertRuleView,
-    DatabaseStats, HistoryPoint, LatencySample, LatencyTaskInput, LatencyTaskView, RemoteTaskInfo,
-    ServerInput, ServerView, TelegramSettingsInput, TelegramSettingsView, ThemeInput, ThemeView,
+    AgentLatencyResult, AgentLatencyTask, AgentReport, AlertRuleInput, AlertRuleView, HistoryPoint,
+    LatencySample, LatencyTaskInput, LatencyTaskView, RemoteTaskInfo, ServerInput, ServerView,
+    TelegramSettingsInput, TelegramSettingsView, ThemeInput, ThemeView,
 };
 use anyhow::{Context, Result};
 use sqlx::any::AnyArguments;
@@ -848,18 +848,6 @@ pub async fn history(db: &Database, server_id: &str, hours: i64) -> Result<Vec<H
         .map_err(Into::into)
 }
 
-pub async fn clear_history(db: &Database) -> Result<()> {
-    let mut transaction = db.pool().begin().await?;
-    sqlx::query("DELETE FROM metric_history")
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query("DELETE FROM latency_results")
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
-    Ok(())
-}
-
 pub async fn cleanup_database(db: &Database, retention_days: i64) -> Result<()> {
     let current = now();
     let cutoff = current - retention_days.clamp(1, 3650) * 86_400;
@@ -895,24 +883,6 @@ pub async fn cleanup_database(db: &Database, retention_days: i64) -> Result<()> 
         .await?;
     transaction.commit().await?;
     Ok(())
-}
-
-pub async fn database_stats(db: &Database, offline_threshold: i64) -> Result<DatabaseStats> {
-    let cutoff = now() - offline_threshold.clamp(30, 3600);
-    let row = sqlx::query(db.sql(
-        "SELECT (SELECT COUNT(*) FROM servers) AS server_count, \
-         (SELECT COUNT(*) FROM server_latest_state WHERE latest_timestamp>=?) AS online_count, \
-         ((SELECT COUNT(*) FROM metric_history) + (SELECT COUNT(*) FROM latency_results)) \
-         AS history_rows",
-    ))
-    .bind(cutoff)
-    .fetch_one(db.pool())
-    .await?;
-    Ok(DatabaseStats {
-        server_count: row.try_get("server_count")?,
-        online_count: row.try_get("online_count")?,
-        history_rows: row.try_get("history_rows")?,
-    })
 }
 
 pub async fn public_server_exists(db: &Database, server_id: &str) -> Result<bool> {

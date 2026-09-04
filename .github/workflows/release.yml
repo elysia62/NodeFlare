@@ -180,7 +180,10 @@ jobs:
           MONITOR_BASE_URL=http://127.0.0.1:18080 \
             MONITOR_ADMIN_USERNAME=sqlite-smoke \
             MONITOR_ADMIN_PASSWORD=SmokePassword123 \
+            MONITOR_MIGRATION_URL="$POSTGRES_URL" \
+            MONITOR_MIGRATION_KIND=postgresql \
             sh scripts/smoke-test.sh
+          grep -F "database_url = \"$POSTGRES_URL\"" "$sqlite_config"
           kill "$sqlite_pid"
           wait "$sqlite_pid" || true
           sqlite_pid=""
@@ -191,7 +194,7 @@ jobs:
           printf '%s\n' \
             "database_url = \"$POSTGRES_URL\"" \
             'bind_addr = "127.0.0.1:18081"' \
-            'admin_username = "postgres-smoke"' \
+            'admin_username = "sqlite-smoke"' \
             'admin_password = "SmokePassword123"' \
             'turnstile_site_key = ""' \
             'turnstile_secret_key = ""' \
@@ -202,7 +205,7 @@ jobs:
           postgres_pid=$!
           wait_ready http://127.0.0.1:18081 "$postgres_dir/server.log" "$postgres_pid"
           MONITOR_BASE_URL=http://127.0.0.1:18081 \
-            MONITOR_ADMIN_USERNAME=postgres-smoke \
+            MONITOR_ADMIN_USERNAME=sqlite-smoke \
             MONITOR_ADMIN_PASSWORD=SmokePassword123 \
             sh scripts/smoke-test.sh
 
