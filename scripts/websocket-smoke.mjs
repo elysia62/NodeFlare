@@ -9,6 +9,11 @@ const expectTaskAssigned = process.env.MONITOR_EXPECT_TASK_ASSIGNED !== "0";
 const configOnly = process.env.MONITOR_CONFIG_ONLY === "1";
 const expectAgentRejected = process.env.MONITOR_EXPECT_AGENT_REJECTED === "1";
 const rotateAgentToken = process.env.MONITOR_ROTATE_AGENT_TOKEN === "1";
+const agentProtocolHeaders = {
+  "X-NodeFlare-Agent-Protocol": "1",
+  "X-NodeFlare-Agent-Capabilities":
+    "metrics-v1,config-v1,remote-exec-v1,task-ack-v1",
+};
 
 if (!baseUrl || !agentToken || (!expectAgentRejected && (!adminToken || !serverId || !latencyTaskId))) {
   throw new Error(
@@ -24,10 +29,95 @@ function websocketUrl(path) {
   return url.toString();
 }
 
-function openSocket(path, token, headers = {}) {
+function decodeBase32(value) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let buffer = 0;
+  let bits = 0;
+  const bytes = [];
+  for (const character of value.toUpperCase()) {
+    const index = alphabet.indexOf(character);
+    if (index < 0) throw new Error("Invalid TOTP secret");
+    buffer = (buffer << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+async function currentTotp(secret) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    decodeBase32(secret),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"],
+  );
+  const counter = new Uint8Array(8);
+  let value = BigInt(Math.floor(Date.now() / 30_000));
+  for (let index = counter.length - 1; index >= 0; index -= 1) {
+    counter[index] = Number(value & 0xffn);
+    value >>= 8n;
+  }
+  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, counter));
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary =
+    ((digest[offset] & 0x7f) << 24) |
+    (digest[offset + 1] << 16) |
+    (digest[offset + 2] << 8) |
+    digest[offset + 3];
+  return String(binary % 1_000_000).padStart(6, "0");
+}
+
+async function setTotpEnabled(secret, enabled) {
+  const response = await fetch(
+    new URL(`/api/admin/2fa/${enabled ? "enable" : "disable"}`, baseUrl),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ totp_code: await currentTotp(secret) }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `${enabled ? "Enable" : "Disable"} TOTP returned HTTP ${response.status}: ${await response.text()}`,
+    );
+  }
+}
+
+async function waitForRemoteTask(taskId, expectedStatus) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const response = await fetch(
+      new URL(`/api/admin/remote/task/${encodeURIComponent(taskId)}`, baseUrl),
+      { headers: { Authorization: `Bearer ${adminToken}` } },
+    );
+    if (!response.ok) {
+      throw new Error(`Remote task returned HTTP ${response.status}: ${await response.text()}`);
+    }
+    const task = await response.json();
+    if (task.status === expectedStatus) return task;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Remote task ${taskId} did not reach ${expectedStatus}`);
+}
+
+function socketHeaders(path, token, headers = {}, includeAgentProtocol = true) {
+  return {
+    Authorization: `Bearer ${token}`,
+    ...(includeAgentProtocol && path === "/api/agent/ws" ? agentProtocolHeaders : {}),
+    ...headers,
+  };
+}
+
+function openSocket(path, token, headers = {}, includeAgentProtocol = true) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(websocketUrl(path), {
-      headers: { Authorization: `Bearer ${token}`, ...headers },
+      headers: socketHeaders(path, token, headers, includeAgentProtocol),
     });
     const timer = setTimeout(() => {
       socket.terminate();
@@ -48,10 +138,10 @@ function openSocket(path, token, headers = {}) {
   });
 }
 
-function expectSocketStatus(path, token, statusCode) {
+function expectSocketStatus(path, token, statusCode, headers = {}, includeAgentProtocol = true) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(websocketUrl(path), {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: socketHeaders(path, token, headers, includeAgentProtocol),
     });
     const timer = setTimeout(() => {
       socket.terminate();
@@ -187,6 +277,22 @@ function waitForSocketClose(socket, expected) {
   });
 }
 
+await expectSocketStatus("/api/agent/ws", "invalid-agent-token", 426, {}, false);
+await expectSocketStatus(
+  "/api/agent/ws",
+  "invalid-agent-token",
+  426,
+  { "X-NodeFlare-Agent-Protocol": "999" },
+);
+await expectSocketStatus(
+  "/api/agent/ws",
+  "invalid-agent-token",
+  426,
+  {
+    "X-NodeFlare-Agent-Capabilities":
+      "metrics-v1,config-v1,remote-exec-v1",
+  },
+);
 await expectSocketStatus("/api/agent/ws", "invalid-agent-token", 401);
 if (expectAgentRejected) {
   await expectSocketStatus("/api/agent/ws", agentToken, 401);
@@ -195,6 +301,7 @@ if (expectAgentRejected) {
 
 const dashboard = configOnly ? null : await openSocket("/api/ws", adminToken);
 let agent;
+let enabledTotpSecret = "";
 try {
   if (dashboard) {
     const pong = waitForMessage(dashboard, "pong");
@@ -273,6 +380,80 @@ try {
     await closeSocket(rotatedSocket);
     process.stdout.write(`${rotatedToken}\n`);
   } else if (!configOnly) {
+  const setupResponse = await fetch(new URL("/api/admin/2fa/setup", baseUrl), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${adminToken}` },
+  });
+  if (!setupResponse.ok) {
+    throw new Error(`TOTP setup returned HTTP ${setupResponse.status}: ${await setupResponse.text()}`);
+  }
+  const setup = await setupResponse.json();
+  if (!setup.secret) throw new Error("TOTP setup did not return a secret");
+  await setTotpEnabled(setup.secret, true);
+  enabledTotpSecret = setup.secret;
+
+  const command = "printf nodeflare-smoke";
+  const assignedTaskPromise = waitForJsonMessage(
+    agent,
+    "remote task",
+    (message) => message.type === "remote_task" && message.command === command,
+  );
+  const createTaskResponse = await fetch(new URL("/api/admin/remote/task", baseUrl), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      command,
+      server_ids: [serverId],
+      totp_code: await currentTotp(setup.secret),
+    }),
+  });
+  if (!createTaskResponse.ok) {
+    throw new Error(
+      `Remote task creation returned HTTP ${createTaskResponse.status}: ${await createTaskResponse.text()}`,
+    );
+  }
+  const createdTask = await createTaskResponse.json();
+  const taskId = createdTask.tasks?.[0]?.task_id;
+  const assignedTask = await assignedTaskPromise;
+  if (!taskId || assignedTask.task_id !== taskId) {
+    throw new Error(`Invalid remote task assignment: ${JSON.stringify(assignedTask)}`);
+  }
+
+  agent.send(JSON.stringify({ type: "task_received", task_id: taskId }));
+  await waitForRemoteTask(taskId, "sent");
+  const result = {
+    type: "task_result",
+    task_id: taskId,
+    status: "success",
+    result: "nodeflare-smoke",
+    exit_code: 0,
+  };
+  const resultAckPromise = waitForJsonMessage(
+    agent,
+    "remote task result ACK",
+    (message) => message.type === "task_result_ack" && message.task_id === taskId,
+  );
+  agent.send(JSON.stringify(result));
+  await resultAckPromise;
+  const completedTask = await waitForRemoteTask(taskId, "success");
+  if (completedTask.result !== "nodeflare-smoke" || completedTask.exit_code !== 0) {
+    throw new Error(`Invalid remote task result: ${JSON.stringify(completedTask)}`);
+  }
+
+  const duplicateAckPromise = waitForJsonMessage(
+    agent,
+    "duplicate remote task result ACK",
+    (message) => message.type === "task_result_ack" && message.task_id === taskId,
+  );
+  agent.send(JSON.stringify(result));
+  await duplicateAckPromise;
+
+  await setTotpEnabled(setup.secret, false);
+  enabledTotpSecret = "";
+
   const wakeHintPromise = waitForJsonMessage(
     agent,
     "batched overview wake hint",
@@ -460,6 +641,13 @@ try {
   }
   }
 } finally {
+  if (enabledTotpSecret) {
+    try {
+      await setTotpEnabled(enabledTotpSecret, false);
+    } catch (error) {
+      console.error(error);
+    }
+  }
   await Promise.all([
     agent ? closeSocket(agent) : Promise.resolve(),
     dashboard ? closeSocket(dashboard) : Promise.resolve(),

@@ -45,6 +45,10 @@ const REMOTE_TASK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const REMOTE_STREAM_OUTPUT_BYTES: u64 = 512 * 1024;
 const REMOTE_RESULT_OUTPUT_BYTES: usize = 900 * 1024;
 const REMOTE_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const REMOTE_RESULT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const REMOTE_TASK_JOURNAL_VERSION: u32 = 1;
+const MAX_REMOTE_TASK_JOURNAL_ENTRIES: usize = 32;
+const MAX_REMOTE_TASK_JOURNAL_BYTES: u64 = 32 * 1024 * 1024;
 const LATENCY_WORKERS: usize = 4;
 const MAX_PENDING_LATENCY_RESULTS: usize = 4096;
 const MAX_REPORT_AGE_SECONDS: i64 = 7_000;
@@ -72,6 +76,8 @@ const PUBLIC_IP_V6_URL: &str = "https://ipv6.icanhazip.com/";
 const RUNTIME_STATS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CLOCK_CALIBRATION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOCK_CALIBRATION_MIN_CHANGE_MS: i64 = 20_000;
+const AGENT_PROTOCOL_VERSION: &str = "1";
+const AGENT_CAPABILITIES: &str = "metrics-v1,config-v1,remote-exec-v1,task-ack-v1";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -1755,6 +1761,14 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
     request
         .headers_mut()
         .insert("User-Agent", format!("nodeflare-agent/{VERSION}").parse()?);
+    request.headers_mut().insert(
+        "X-NodeFlare-Agent-Protocol",
+        AGENT_PROTOCOL_VERSION.parse()?,
+    );
+    request.headers_mut().insert(
+        "X-NodeFlare-Agent-Capabilities",
+        AGENT_CAPABILITIES.parse()?,
+    );
     let started_ms = unix_timestamp_millis();
     let (socket, response) = connect(request)?;
     let ended_ms = unix_timestamp_millis();
@@ -1813,7 +1827,7 @@ struct RemoteTaskMessage {
     command: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 struct TaskResultMessage {
     #[serde(rename = "type")]
     message_type: String,
@@ -1821,6 +1835,28 @@ struct TaskResultMessage {
     status: String,
     result: String,
     exit_code: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskResultAckMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    task_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteTaskJournal {
+    version: u32,
+    entries: Vec<RemoteTaskJournalEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum RemoteTaskJournalEntry {
+    Active { task_id: String },
+    Completed { result: TaskResultMessage },
 }
 
 #[derive(Default)]
@@ -2039,12 +2075,37 @@ fn execute_remote_task(task: &RemoteTaskMessage) -> TaskResultMessage {
 struct RemoteExecutor {
     task_tx: mpsc::SyncSender<RemoteTaskMessage>,
     result_rx: mpsc::Receiver<TaskResultMessage>,
-    seen: HashSet<String>,
-    seen_order: VecDeque<String>,
+    active: HashSet<String>,
+    completed: HashMap<String, TaskResultMessage>,
+    task_order: VecDeque<String>,
+    last_sent: HashMap<String, Instant>,
+    journal_path: PathBuf,
+    disabled: bool,
 }
 
 impl RemoteExecutor {
     fn new() -> Result<Self> {
+        Self::new_at(remote_task_journal_path()?)
+    }
+
+    fn new_at(journal_path: PathBuf) -> Result<Self> {
+        let journal = load_remote_task_journal(&journal_path)?;
+        let mut active = HashSet::new();
+        let mut completed = HashMap::new();
+        let mut task_order = VecDeque::new();
+        for entry in journal.entries {
+            match entry {
+                RemoteTaskJournalEntry::Active { task_id } => {
+                    active.insert(task_id.clone());
+                    task_order.push_back(task_id);
+                }
+                RemoteTaskJournalEntry::Completed { result } => {
+                    task_order.push_back(result.task_id.clone());
+                    completed.insert(result.task_id.clone(), result);
+                }
+            }
+        }
+
         let (task_tx, task_rx) = mpsc::sync_channel::<RemoteTaskMessage>(16);
         let (result_tx, result_rx) = mpsc::channel::<TaskResultMessage>();
         thread::Builder::new()
@@ -2056,59 +2117,289 @@ impl RemoteExecutor {
                     }
                 }
             })?;
-        Ok(Self {
+        let interrupted = active.drain().collect::<Vec<_>>();
+        for task_id in interrupted {
+            completed.insert(
+                task_id.clone(),
+                TaskResultMessage {
+                    message_type: "task_result".to_string(),
+                    task_id,
+                    status: "failed".to_string(),
+                    result: "Agent 在命令执行期间重启，无法确认原命令状态；为避免重复操作，任务不会再次执行"
+                        .to_string(),
+                    exit_code: Some(-1),
+                },
+            );
+        }
+        let executor = Self {
             task_tx,
             result_rx,
-            seen: HashSet::new(),
-            seen_order: VecDeque::new(),
-        })
+            active,
+            completed,
+            task_order,
+            last_sent: HashMap::new(),
+            journal_path,
+            disabled: false,
+        };
+        if !executor.completed.is_empty() {
+            executor.persist_snapshot(None)?;
+        }
+        Ok(executor)
+    }
+
+    fn disabled() -> Self {
+        let (task_tx, task_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::channel();
+        drop(task_rx);
+        drop(result_tx);
+        Self {
+            task_tx,
+            result_rx,
+            active: HashSet::new(),
+            completed: HashMap::new(),
+            task_order: VecDeque::new(),
+            last_sent: HashMap::new(),
+            journal_path: PathBuf::new(),
+            disabled: true,
+        }
     }
 
     fn enqueue(&mut self, task: RemoteTaskMessage) -> Option<TaskResultMessage> {
-        if self.seen.contains(&task.task_id) {
+        if self.disabled {
+            return Some(remote_task_rejected(
+                task.task_id,
+                "Agent 任务日志异常，远程执行已禁用",
+            ));
+        }
+        if self.completed.contains_key(&task.task_id) {
+            self.last_sent.remove(&task.task_id);
+            return None;
+        }
+        if self.active.contains(&task.task_id) {
             return None;
         }
         let task_id = task.task_id.clone();
-        self.seen.insert(task_id.clone());
-        self.seen_order.push_back(task_id.clone());
-        while self.seen_order.len() > 1024 {
-            if let Some(expired) = self.seen_order.pop_front() {
-                self.seen.remove(&expired);
-            }
+        if self.task_order.len() >= MAX_REMOTE_TASK_JOURNAL_ENTRIES {
+            return Some(remote_task_rejected(
+                task_id,
+                "待确认的远程任务过多，已拒绝执行",
+            ));
+        }
+        self.active.insert(task_id.clone());
+        self.task_order.push_back(task_id.clone());
+        if let Err(error) = self.persist_snapshot(None) {
+            self.active.remove(&task_id);
+            self.task_order.retain(|id| id != &task_id);
+            eprintln!("remote task journal write failed: {error}");
+            return Some(remote_task_rejected(
+                task_id,
+                "Agent 无法持久化任务状态，已拒绝执行",
+            ));
         }
         match self.task_tx.try_send(task) {
             Ok(()) => None,
-            Err(mpsc::TrySendError::Full(_)) => Some(TaskResultMessage {
-                message_type: "task_result".to_string(),
-                task_id,
-                status: "failed".to_string(),
-                result: "远程命令队列已满，请稍后重试".to_string(),
-                exit_code: Some(-1),
-            }),
-            Err(mpsc::TrySendError::Disconnected(_)) => Some(TaskResultMessage {
-                message_type: "task_result".to_string(),
-                task_id,
-                status: "failed".to_string(),
-                result: "远程命令执行线程不可用".to_string(),
-                exit_code: Some(-1),
-            }),
+            Err(error) => {
+                let message = match error {
+                    mpsc::TrySendError::Full(_) => "远程命令队列已满，请稍后重试",
+                    mpsc::TrySendError::Disconnected(_) => "远程命令执行线程不可用",
+                };
+                let result = remote_task_rejected(task_id, message);
+                self.remember_completed(result.clone());
+                None
+            }
         }
     }
 
-    fn drain(&self) -> impl Iterator<Item = TaskResultMessage> + '_ {
-        self.result_rx.try_iter()
+    fn drain_completed(&mut self) {
+        let results = self.result_rx.try_iter().collect::<Vec<_>>();
+        for result in results {
+            self.remember_completed(result);
+        }
+    }
+
+    fn acknowledge(&mut self, task_id: &str) {
+        if !self.completed.contains_key(task_id) {
+            return;
+        }
+        match self.persist_snapshot(Some(task_id)) {
+            Ok(()) => {
+                self.completed.remove(task_id);
+                self.task_order.retain(|id| id != task_id);
+                self.last_sent.remove(task_id);
+            }
+            Err(error) => {
+                eprintln!("remote task ACK persistence failed: {error}");
+            }
+        }
+    }
+
+    fn remember_completed(&mut self, result: TaskResultMessage) {
+        let task_id = result.task_id.clone();
+        let was_active = self.active.remove(&task_id);
+        if !was_active && !self.completed.contains_key(&task_id) {
+            self.task_order.push_back(task_id.clone());
+        }
+        self.completed.insert(task_id.clone(), result);
+        self.last_sent.remove(&task_id);
+        if let Err(error) = self.persist_snapshot(None) {
+            eprintln!("remote task result persistence failed: {error}");
+        }
+    }
+
+    fn due_results(&mut self) -> Vec<TaskResultMessage> {
+        self.drain_completed();
+        let now = Instant::now();
+        self.task_order
+            .iter()
+            .filter_map(|task_id| {
+                let result = self.completed.get(task_id)?;
+                let due = self.last_sent.get(task_id).is_none_or(|sent_at| {
+                    now.duration_since(*sent_at) >= REMOTE_RESULT_RETRY_INTERVAL
+                });
+                due.then(|| result.clone())
+            })
+            .collect()
+    }
+
+    fn mark_sent(&mut self, task_id: &str) {
+        self.last_sent.insert(task_id.to_string(), Instant::now());
+    }
+
+    fn reset_delivery(&mut self) {
+        self.last_sent.clear();
+    }
+
+    fn persist_snapshot(&self, excluded_task_id: Option<&str>) -> Result<()> {
+        let entries = self
+            .task_order
+            .iter()
+            .filter(|task_id| excluded_task_id != Some(task_id.as_str()))
+            .filter_map(|task_id| {
+                if self.active.contains(task_id) {
+                    Some(RemoteTaskJournalEntry::Active {
+                        task_id: task_id.clone(),
+                    })
+                } else {
+                    self.completed
+                        .get(task_id)
+                        .cloned()
+                        .map(|result| RemoteTaskJournalEntry::Completed { result })
+                }
+            })
+            .collect::<Vec<_>>();
+        write_remote_task_journal(&self.journal_path, entries)
     }
 }
 
-fn flush_remote_results(
-    socket: &mut LiveSocket,
-    executor: &RemoteExecutor,
-    pending: &mut VecDeque<TaskResultMessage>,
-) -> Result<()> {
-    pending.extend(executor.drain());
-    while let Some(result) = pending.front() {
-        socket.send(Message::Text(serde_json::to_string(result)?.into()))?;
-        pending.pop_front();
+fn remote_task_rejected(task_id: String, result: &str) -> TaskResultMessage {
+    TaskResultMessage {
+        message_type: "task_result".to_string(),
+        task_id,
+        status: "failed".to_string(),
+        result: result.to_string(),
+        exit_code: Some(-1),
+    }
+}
+
+fn valid_remote_task_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn load_remote_task_journal(path: &Path) -> Result<RemoteTaskJournal> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(RemoteTaskJournal {
+                version: REMOTE_TASK_JOURNAL_VERSION,
+                entries: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if bytes.len() as u64 > MAX_REMOTE_TASK_JOURNAL_BYTES {
+        return Err("remote task journal is too large".into());
+    }
+    let journal = serde_json::from_slice::<RemoteTaskJournal>(&bytes)?;
+    if journal.version != REMOTE_TASK_JOURNAL_VERSION {
+        return Err("unsupported remote task journal version".into());
+    }
+    if journal.entries.len() > MAX_REMOTE_TASK_JOURNAL_ENTRIES {
+        return Err("remote task journal has too many entries".into());
+    }
+    let mut task_ids = HashSet::new();
+    for entry in &journal.entries {
+        let (task_id, valid_result) = match entry {
+            RemoteTaskJournalEntry::Active { task_id } => (task_id, true),
+            RemoteTaskJournalEntry::Completed { result } => (
+                &result.task_id,
+                result.message_type == "task_result"
+                    && matches!(result.status.as_str(), "success" | "failed")
+                    && result.result.len() <= REMOTE_RESULT_OUTPUT_BYTES + 64,
+            ),
+        };
+        if !valid_remote_task_id(task_id) || !valid_result || !task_ids.insert(task_id) {
+            return Err("remote task journal contains an invalid entry".into());
+        }
+    }
+    Ok(journal)
+}
+
+fn write_remote_task_journal(path: &Path, entries: Vec<RemoteTaskJournalEntry>) -> Result<()> {
+    if entries.is_empty() {
+        return match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        };
+    }
+    let journal = RemoteTaskJournal {
+        version: REMOTE_TASK_JOURNAL_VERSION,
+        entries,
+    };
+    let mut encoded = serde_json::to_vec(&journal)?;
+    encoded.push(b'\n');
+    if encoded.len() as u64 > MAX_REMOTE_TASK_JOURNAL_BYTES {
+        return Err("remote task journal is too large".into());
+    }
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("remote-tasks"),
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    #[cfg(unix)]
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    file.write_all(&encoded)?;
+    file.sync_all()?;
+    drop(file);
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn flush_remote_results(socket: &mut LiveSocket, executor: &mut RemoteExecutor) -> Result<()> {
+    for result in executor.due_results() {
+        socket.send(Message::Text(serde_json::to_string(&result)?.into()))?;
+        executor.mark_sent(&result.task_id);
     }
     Ok(())
 }
@@ -2127,6 +2418,7 @@ enum LiveRead {
     Ack(LiveAck),
     Config(RemoteConfig),
     RemoteTask(RemoteTaskMessage),
+    TaskResultAck(String),
     Closed,
     Pending,
 }
@@ -2161,14 +2453,23 @@ fn read_live_ack(socket: &mut LiveSocket) -> Result<LiveRead> {
                         return Ok(LiveRead::Pending);
                     };
                     if task.message_type != "remote_task"
-                        || task.task_id.is_empty()
-                        || task.task_id.len() > 80
+                        || !valid_remote_task_id(&task.task_id)
                         || task.command.trim().is_empty()
                         || task.command.len() > 16_384
                     {
                         return Ok(LiveRead::Pending);
                     }
                     Ok(LiveRead::RemoteTask(task))
+                }
+                Some("task_result_ack") => {
+                    let Ok(ack) = serde_json::from_value::<TaskResultAckMessage>(value) else {
+                        return Ok(LiveRead::Pending);
+                    };
+                    if ack.message_type != "task_result_ack" || !valid_remote_task_id(&ack.task_id)
+                    {
+                        return Ok(LiveRead::Pending);
+                    }
+                    Ok(LiveRead::TaskResultAck(ack.task_id))
                 }
                 _ => Ok(LiveRead::Pending),
             }
@@ -2188,11 +2489,32 @@ fn read_live_ack(socket: &mut LiveSocket) -> Result<LiveRead> {
     }
 }
 
+fn accept_remote_task(
+    socket: &mut LiveSocket,
+    executor: &mut RemoteExecutor,
+    task: RemoteTaskMessage,
+) -> Result<()> {
+    let task_id = task.task_id.clone();
+    let rejected = executor.enqueue(task);
+    socket.send(Message::Text(
+        serde_json::json!({
+            "type": "task_received",
+            "task_id": task_id,
+        })
+        .to_string()
+        .into(),
+    ))?;
+    if let Some(result) = rejected {
+        socket.send(Message::Text(serde_json::to_string(&result)?.into()))?;
+    }
+    flush_remote_results(socket, executor)?;
+    Ok(())
+}
+
 fn wait_for_live_ack(
     socket: &mut LiveSocket,
     remote_config: &Arc<Mutex<Option<RemoteConfig>>>,
     remote_executor: &mut RemoteExecutor,
-    pending_remote_results: &mut VecDeque<TaskResultMessage>,
 ) -> Result<LiveRead> {
     let deadline = Instant::now() + LIVE_ACK_READ_TIMEOUT;
     loop {
@@ -2211,9 +2533,10 @@ fn wait_for_live_ack(
                 }
             }
             LiveRead::RemoteTask(task) => {
-                if let Some(result) = remote_executor.enqueue(task) {
-                    pending_remote_results.push_back(result);
-                }
+                accept_remote_task(socket, remote_executor, task)?;
+            }
+            LiveRead::TaskResultAck(task_id) => {
+                remote_executor.acknowledge(&task_id);
             }
             LiveRead::Closed => return Ok(LiveRead::Closed),
             LiveRead::Ack(_) | LiveRead::Pending => {}
@@ -2282,11 +2605,10 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
     let mut remote_executor = match RemoteExecutor::new() {
         Ok(executor) => executor,
         Err(error) => {
-            eprintln!("remote executor failed to start: {error}");
-            return;
+            eprintln!("remote executor disabled: {error}");
+            RemoteExecutor::disabled()
         }
     };
-    let mut pending_remote_results = VecDeque::new();
     'sender: loop {
         if socket.is_none() {
             match connect_live(endpoint, token) {
@@ -2298,6 +2620,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                         continue;
                     }
                     socket = Some(connected);
+                    remote_executor.reset_delivery();
                     accepted_through = persisted_through.load(Ordering::Acquire);
                     next_send_at = Instant::now();
                     next_probe_at = Instant::now();
@@ -2312,8 +2635,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         }
 
         if let Some(connected) = socket.as_mut()
-            && flush_remote_results(connected, &remote_executor, &mut pending_remote_results)
-                .is_err()
+            && flush_remote_results(connected, &mut remote_executor).is_err()
         {
             socket = None;
             thread::sleep(LIVE_RECONNECT_DELAY);
@@ -2356,8 +2678,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
 
             let mut drop_socket = false;
             if let Some(connected) = socket.as_mut() {
-                if flush_remote_results(connected, &remote_executor, &mut pending_remote_results)
-                    .is_err()
+                if flush_remote_results(connected, &mut remote_executor).is_err()
                     || set_live_read_timeout(connected, Some(LIVE_HINT_READ_TIMEOUT)).is_err()
                 {
                     drop_socket = true;
@@ -2383,9 +2704,12 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                             }
                         }
                         Ok(LiveRead::RemoteTask(task)) => {
-                            if let Some(result) = remote_executor.enqueue(task) {
-                                pending_remote_results.push_back(result);
+                            if accept_remote_task(connected, &mut remote_executor, task).is_err() {
+                                drop_socket = true;
                             }
+                        }
+                        Ok(LiveRead::TaskResultAck(task_id)) => {
+                            remote_executor.acknowledge(&task_id);
                         }
                         Ok(LiveRead::Pending) => {}
                         Err(error) => {
@@ -2437,12 +2761,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
 
         let mut drop_socket = false;
         if let Some(socket) = socket.as_mut() {
-            match wait_for_live_ack(
-                socket,
-                &remote_config,
-                &mut remote_executor,
-                &mut pending_remote_results,
-            ) {
+            match wait_for_live_ack(socket, &remote_config, &mut remote_executor) {
                 Ok(LiveRead::Closed) => drop_socket = true,
                 Ok(LiveRead::Ack(ack)) => {
                     observe_persisted_through(&persisted_through, &ack);
@@ -2467,6 +2786,9 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                     drop_socket = true;
                 }
                 Ok(LiveRead::RemoteTask(_task)) => {
+                    // 在 wait_for_live_ack 中已处理，这里不应该出现
+                }
+                Ok(LiveRead::TaskResultAck(_)) => {
                     // 在 wait_for_live_ack 中已处理，这里不应该出现
                 }
                 Ok(LiveRead::Pending) => {
@@ -2581,25 +2903,31 @@ fn prune_report_samples(samples: &mut Vec<Report>, now: i64) {
     }
 }
 
-fn pending_spool_path() -> Result<PathBuf> {
+fn agent_state_directory() -> Result<PathBuf> {
     if let Some(value) = env::var_os("NODEFLARE_STATE_DIR") {
         let directory = PathBuf::from(value);
         if !directory.is_absolute() {
             return Err("NODEFLARE_STATE_DIR must be an absolute path".into());
         }
         fs::create_dir_all(&directory)?;
-        return Ok(directory.join("pending.jsonl"));
+        return Ok(directory);
     }
     #[cfg(target_os = "windows")]
     {
-        let executable = env::current_exe()?;
-        let directory = executable
-            .parent()
-            .ok_or("agent executable path has no parent directory")?
-            .join("data")
-            .join("agent");
+        let directory = env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .map(|path| path.join("NodeFlare").join("Agent"))
+            .unwrap_or_else(|| {
+                env::current_exe()
+                    .ok()
+                    .and_then(|path| path.parent().map(Path::to_path_buf))
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("data")
+                    .join("agent")
+            });
         fs::create_dir_all(&directory)?;
-        return Ok(directory.join("pending.jsonl"));
+        return Ok(directory);
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -2607,8 +2935,16 @@ fn pending_spool_path() -> Result<PathBuf> {
         let directory = executable
             .parent()
             .ok_or("agent executable path has no parent directory")?;
-        Ok(directory.join("pending.jsonl"))
+        Ok(directory.to_path_buf())
     }
+}
+
+fn pending_spool_path() -> Result<PathBuf> {
+    Ok(agent_state_directory()?.join("pending.jsonl"))
+}
+
+fn remote_task_journal_path() -> Result<PathBuf> {
+    Ok(agent_state_directory()?.join("remote-tasks.json"))
 }
 
 fn load_pending_spool(path: &Path) -> Result<Vec<Report>> {
@@ -3124,20 +3460,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use std::time::{Duration, Instant};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
         CLOCK_CALIBRATION_MAX_AGE, CapturedOutput, CliOptions, ClockCalibration,
         GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, MAX_PENDING_LATENCY_RESULTS,
-        PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES, RemoteTaskMessage,
-        Report, UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval, ack_wss_interval,
-        advance_deadline, clock_offset_from_http_date, corrected_timestamp,
-        execute_remote_task_with_timeout, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
-        live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
+        PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES, RemoteExecutor,
+        RemoteTaskJournalEntry, RemoteTaskMessage, Report, TaskResultMessage,
+        UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval, ack_wss_interval, advance_deadline,
+        clock_offset_from_http_date, corrected_timestamp, execute_remote_task_with_timeout,
+        gpu_name_from_uevent, is_public_probe_ip, live_endpoint, live_update_payload,
+        monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
         parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
         parse_system_profiler_gpu_names, ping_latencies, ping_latency, prune_report_samples,
         release_asset_sha256, remote_result_text, sanitize_latency_tasks, update_check_jitter,
-        valid_endpoint, version_triplet,
+        valid_endpoint, version_triplet, write_remote_task_journal,
     };
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
@@ -3346,6 +3685,89 @@ mod tests {
         );
         assert!(result.len() < REMOTE_RESULT_OUTPUT_BYTES + 64);
         assert!(result.ends_with("[输出已截断]"));
+    }
+
+    fn temporary_remote_task_journal(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "nodeflare-agent-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory.join("remote-tasks.json")
+    }
+
+    #[test]
+    fn interrupted_remote_tasks_are_failed_without_reexecution() {
+        let path = temporary_remote_task_journal("interrupted-task");
+        let task_id = "8dd70536-f721-4d47-af63-e2f17c83de25";
+        write_remote_task_journal(
+            &path,
+            vec![RemoteTaskJournalEntry::Active {
+                task_id: task_id.to_string(),
+            }],
+        )
+        .unwrap();
+
+        let mut executor = RemoteExecutor::new_at(path.clone()).unwrap();
+        assert!(executor.active.is_empty());
+        let due = executor.due_results();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].task_id, task_id);
+        assert_eq!(due[0].status, "failed");
+        assert!(due[0].result.contains("不会再次执行"));
+
+        executor.mark_sent(task_id);
+        assert!(executor.due_results().is_empty());
+        executor.reset_delivery();
+        assert_eq!(executor.due_results().len(), 1);
+        executor.acknowledge(task_id);
+        assert!(!path.exists());
+
+        let directory = path.parent().unwrap().to_path_buf();
+        drop(executor);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn completed_remote_tasks_return_the_cached_result() {
+        let path = temporary_remote_task_journal("completed-task");
+        let task_id = "6cbf4d36-f33a-40ef-b952-6af1b8491820";
+        let result = TaskResultMessage {
+            message_type: "task_result".to_string(),
+            task_id: task_id.to_string(),
+            status: "success".to_string(),
+            result: "already finished".to_string(),
+            exit_code: Some(0),
+        };
+        write_remote_task_journal(
+            &path,
+            vec![RemoteTaskJournalEntry::Completed {
+                result: result.clone(),
+            }],
+        )
+        .unwrap();
+
+        let mut executor = RemoteExecutor::new_at(path.clone()).unwrap();
+        assert!(
+            executor
+                .enqueue(RemoteTaskMessage {
+                    message_type: "remote_task".to_string(),
+                    task_id: task_id.to_string(),
+                    command: "this command must not run".to_string(),
+                })
+                .is_none()
+        );
+        assert!(executor.active.is_empty());
+        assert_eq!(executor.due_results(), [result]);
+        executor.acknowledge(task_id);
+
+        let directory = path.parent().unwrap().to_path_buf();
+        drop(executor);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -47,7 +47,7 @@ theme_dir = "/etc/nodeflare/themes"
 session_ttl_hours = 168
 ```
 
-PostgreSQL 可将 `database_url` 改为 `postgres://user:password@host:5432/database?sslmode=prefer`。相对 SQLite 路径和静态资源路径均相对于配置文件目录解析；URL 中的特殊字符需要进行百分号编码。安装脚本询问管理员用户名、密码和数据库 URL，其他项直接编辑 `/etc/nodeflare/config.toml`。面板服务不创建额外的系统用户。
+PostgreSQL 可将 `database_url` 改为 `postgres://user:password@host:5432/database?sslmode=prefer`。相对 SQLite 路径和静态资源路径均相对于配置文件目录解析；URL 中的特殊字符需要进行百分号编码。安装脚本询问管理员用户名、首次初始化密码和数据库 URL；初始化成功后密码会从配置中自动清空，其他项直接编辑 `/etc/nodeflare/config.toml`。面板服务不创建额外的系统用户。
 
 ## 主要端点
 

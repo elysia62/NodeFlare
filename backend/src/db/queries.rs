@@ -1543,7 +1543,7 @@ pub async fn pending_remote_tasks(db: &Database, server_id: &str) -> Result<Vec<
     sqlx::query(db.sql(
         "UPDATE remote_tasks SET status='failed', completed_at=?, \
          result=CASE WHEN result='' THEN '任务等待超过 24 小时，已自动取消' ELSE result END \
-         WHERE server_id=? AND status='pending' AND requested_at<?",
+         WHERE server_id=? AND status IN ('pending','sent') AND requested_at<?",
     ))
     .bind(current)
     .bind(server_id)
@@ -1552,7 +1552,8 @@ pub async fn pending_remote_tasks(db: &Database, server_id: &str) -> Result<Vec<
     .await?;
     let rows = sqlx::query(db.sql(
         "SELECT id, server_id, command, status, requested_by, requested_at, started_at, \
-         completed_at, result, exit_code FROM remote_tasks WHERE server_id=? AND status='pending' \
+         completed_at, result, exit_code FROM remote_tasks \
+         WHERE server_id=? AND status IN ('pending','sent') \
          ORDER BY requested_at LIMIT 50",
     ))
     .bind(server_id)
@@ -1615,7 +1616,18 @@ pub async fn update_remote_task_result(
     .bind(server_id)
     .execute(db.pool())
     .await?;
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() > 0 {
+        return Ok(true);
+    }
+    let completed = sqlx::query_scalar::<_, i64>(db.sql(
+        "SELECT COUNT(*) FROM remote_tasks \
+         WHERE id=? AND server_id=? AND status IN ('success','failed')",
+    ))
+    .bind(id)
+    .bind(server_id)
+    .fetch_one(db.pool())
+    .await?;
+    Ok(completed > 0)
 }
 
 pub async fn telegram_settings(db: &Database) -> Result<Option<TelegramSettingsView>> {
@@ -2066,6 +2078,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_task_delivery_and_results_are_idempotent() {
+        let db = super::super::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let (server_id, _) = create_server(&db, &server_input(0)).await.unwrap();
+        let task = create_remote_task(&db, &server_id, "uptime", "admin")
+            .await
+            .unwrap();
+
+        mark_remote_task_sent(&db, &task.id, &server_id)
+            .await
+            .unwrap();
+        mark_remote_task_sent(&db, &task.id, &server_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            remote_task(&db, &task.id).await.unwrap().unwrap().status,
+            "sent"
+        );
+
+        assert!(
+            update_remote_task_result(&db, &server_id, &task.id, "success", "done", Some(0))
+                .await
+                .unwrap()
+        );
+        assert!(
+            update_remote_task_result(&db, &server_id, &task.id, "success", "done", Some(0))
+                .await
+                .unwrap()
+        );
+        let completed = remote_task(&db, &task.id).await.unwrap().unwrap();
+        assert_eq!(completed.status, "success");
+        assert_eq!(completed.result, "done");
+        assert_eq!(completed.exit_code, Some(0));
+    }
+
+    #[tokio::test]
     async fn sqlite_migration_contains_optimized_indexes() {
         let db = super::super::connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();
@@ -2073,14 +2121,30 @@ mod tests {
             "SELECT name FROM sqlite_master WHERE type='index' AND name IN (\
              'metric_history_time',\
              'latency_results_time',\
-             'remote_tasks_server_status_time')",
+             'remote_tasks_server_status_time',\
+             'servers_public_sort')",
         )
         .fetch_all(db.pool())
         .await
         .unwrap()
         .into_iter()
         .collect::<HashSet<_>>();
-        assert_eq!(indexes.len(), 3);
+        assert_eq!(indexes.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn sqlite_migration_rejects_invalid_server_configuration() {
+        let db = super::super::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let result = sqlx::query(
+            "INSERT INTO servers(\
+             id, name, hidden, traffic_limit_type, currency, reset_day, report_interval, \
+             collect_interval, token_hash, created_at, updated_at\
+             ) VALUES ('invalid', 'Invalid', 2, 'sum', 'CNY', 1, 60, 5, 'token', 1, 1)",
+        )
+        .execute(db.pool())
+        .await;
+        assert!(result.is_err());
     }
 
     #[test]

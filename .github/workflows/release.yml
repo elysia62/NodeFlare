@@ -45,6 +45,29 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release=$RELEASE_BUILD" >> "$GITHUB_OUTPUT"
 
+  security:
+    name: Dependency security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+      - name: Audit web dependencies
+        timeout-minutes: 5
+        run: bun audit
+      - name: Install Rust dependency auditor
+        timeout-minutes: 10
+        run: cargo install cargo-audit --version 0.22.2 --locked --no-default-features
+      - name: Audit backend dependencies
+        run: cargo audit --file backend/Cargo.lock
+      - name: Audit Agent dependencies
+        run: cargo audit --file agent/Cargo.lock
+
   quality:
     name: Quality checks
     needs: metadata
@@ -420,7 +443,7 @@ jobs:
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [metadata, quality, server, agent, frontend]
+    needs: [metadata, security, quality, server, agent, frontend]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

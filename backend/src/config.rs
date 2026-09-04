@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,7 @@ pub struct Config {
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
     pub admin_username: String,
+    #[serde(default)]
     pub admin_password: String,
     #[serde(default)]
     pub turnstile_site_key: String,
@@ -99,16 +101,58 @@ impl Config {
         {
             anyhow::bail!("admin_username must be 1-64 characters without whitespace");
         }
-        if !(8..=128).contains(&config.admin_password.chars().count()) {
+        if !config.admin_password.is_empty()
+            && !(8..=128).contains(&config.admin_password.chars().count())
+        {
             anyhow::bail!("admin_password must be 8-128 characters");
         }
-        if is_example_password(&config.admin_password) {
+        if !config.admin_password.is_empty() && is_example_password(&config.admin_password) {
             anyhow::bail!(
                 "admin_password still contains the example placeholder; replace it before starting NodeFlare"
             );
         }
         Ok(config)
     }
+}
+
+pub fn clear_bootstrap_password(path: &Path) -> Result<bool> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read configuration {}", path.display()))?;
+    let mut output = String::with_capacity(content.len());
+    let mut replaced = false;
+    for segment in content.split_inclusive('\n') {
+        let (line, newline) = segment
+            .strip_suffix('\n')
+            .map_or((segment, ""), |line| (line, "\n"));
+        let trimmed = line.trim_start();
+        let is_password = !trimmed.starts_with('#')
+            && trimmed
+                .strip_prefix("admin_password")
+                .is_some_and(|rest| rest.trim_start().starts_with('='));
+        if is_password {
+            let indentation = &line[..line.len() - trimmed.len()];
+            output.push_str(indentation);
+            output.push_str("admin_password = \"\"");
+            output.push_str(newline);
+            replaced = true;
+        } else {
+            output.push_str(segment);
+        }
+    }
+    if !replaced || output == content {
+        return Ok(false);
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let permissions = std::fs::metadata(path)?.permissions();
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(output.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    std::fs::set_permissions(temporary.path(), permissions)?;
+    temporary
+        .persist(path)
+        .map_err(|error| anyhow::anyhow!(error.error))?;
+    Ok(true)
 }
 
 fn is_example_password(value: &str) -> bool {
@@ -158,9 +202,9 @@ fn resolve_database_url(base: &Path, value: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, default_admin_frontend_dir, default_agent_dir, default_bind_addr,
-        default_database_url, default_public_frontend_dir, default_theme_dir, is_example_password,
-        resolve_database_url,
+        Args, clear_bootstrap_password, default_admin_frontend_dir, default_agent_dir,
+        default_bind_addr, default_database_url, default_public_frontend_dir, default_theme_dir,
+        is_example_password, resolve_database_url,
     };
     use clap::Parser;
     use std::path::Path;
@@ -215,5 +259,22 @@ mod tests {
     fn detects_example_password_placeholders() {
         assert!(is_example_password("CHANGE_ME_WITH_A_STRONG_PASSWORD"));
         assert!(!is_example_password("a-real-password-123"));
+    }
+
+    #[test]
+    fn clears_only_the_bootstrap_password() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "admin_username = \"admin\"\nadmin_password = \"secret-value\"\n# admin_password = \"comment\"\ndatabase_url = \"sqlite::memory:\"\n",
+        )
+        .unwrap();
+        assert!(clear_bootstrap_password(&path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "admin_username = \"admin\"\nadmin_password = \"\"\n# admin_password = \"comment\"\ndatabase_url = \"sqlite::memory:\"\n"
+        );
+        assert!(!clear_bootstrap_password(&path).unwrap());
     }
 }

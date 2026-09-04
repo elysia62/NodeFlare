@@ -5,8 +5,8 @@ SERVICE_NAME="nodeflare-agent"
 RC_NAME="nodeflare_agent"
 INSTALL_DIR="/usr/local/libexec/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
-DATA_DIR="$INSTALL_DIR/data"
-STATE_DIR="$DATA_DIR/agent"
+STATE_ROOT="/var/db/nodeflare"
+STATE_DIR="$STATE_ROOT/agent"
 SERVICE_FILE="/usr/local/etc/rc.d/$SERVICE_NAME"
 
 log() {
@@ -68,7 +68,7 @@ if [ "${1:-}" = "--uninstall" ]; then
   sysrc -x "${RC_NAME}_enable" >/dev/null 2>&1 || true
   rm -f "$SERVICE_FILE" "$AGENT_FILE"
   rm -rf "$STATE_DIR"
-  rmdir "$DATA_DIR" 2>/dev/null || true
+  rmdir "$STATE_ROOT" 2>/dev/null || true
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "NodeFlare Agent 已卸载"
   exit 0
@@ -141,9 +141,9 @@ if [ -n "$mirror" ]; then
   case "$mirror" in *@*) fail "下载加速前缀不能包含用户信息" ;; esac
 fi
 
-mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$STATE_DIR"
+mkdir -p "$INSTALL_DIR" "$STATE_ROOT" "$STATE_DIR"
 chmod 755 "$INSTALL_DIR"
-chmod 750 "$DATA_DIR"
+chmod 750 "$STATE_ROOT"
 chmod 750 "$STATE_DIR"
 temporary="$INSTALL_DIR/.agent.$$.download"
 trap 'rm -f "$temporary"' EXIT HUP INT TERM

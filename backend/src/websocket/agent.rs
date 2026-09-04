@@ -16,6 +16,11 @@ use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TASK_RESULT_BYTES: usize = 1024 * 1024;
+const AGENT_PROTOCOL_VERSION: &str = "1";
+const AGENT_PROTOCOL_HEADER: &str = "x-nodeflare-agent-protocol";
+const AGENT_CAPABILITIES_HEADER: &str = "x-nodeflare-agent-capabilities";
+const REQUIRED_AGENT_CAPABILITIES: [&str; 4] =
+    ["metrics-v1", "config-v1", "remote-exec-v1", "task-ack-v1"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +43,14 @@ struct TaskResultMessage {
     exit_code: Option<i64>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskReceivedMessage {
+    #[serde(rename = "type")]
+    _message_type: String,
+    task_id: String,
+}
+
 pub async fn handle(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -48,6 +61,13 @@ pub async fn handle(
         return ApiResponse::error(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "数据库正在恢复，请稍后重试",
+        )
+        .into_response();
+    }
+    if !agent_protocol_supported(&headers) {
+        return ApiResponse::error(
+            axum::http::StatusCode::UPGRADE_REQUIRED,
+            format!("Agent 协议不兼容，需要协议版本 {AGENT_PROTOCOL_VERSION}"),
         )
         .into_response();
     }
@@ -131,14 +151,7 @@ async fn run(
         crate::db::queries::pending_remote_tasks(&state.db, &identity.server_id).await
     {
         for task in tasks {
-            if send_task(&outbound_tx, &task) {
-                let _ = crate::db::queries::mark_remote_task_sent(
-                    &state.db,
-                    &task.id,
-                    &identity.server_id,
-                )
-                .await;
-            }
+            send_task(&outbound_tx, &task);
         }
     }
 
@@ -272,14 +285,13 @@ async fn handle_text(
             let Ok(result) = serde_json::from_value::<TaskResultMessage>(value) else {
                 return;
             };
-            if result.task_id.is_empty()
-                || result.task_id.len() > 80
+            if !valid_task_id(&result.task_id)
                 || !matches!(result.status.as_str(), "success" | "failed")
                 || result.result.len() > MAX_TASK_RESULT_BYTES
             {
                 return;
             }
-            if let Err(error) = crate::db::queries::update_remote_task_result(
+            match crate::db::queries::update_remote_task_result(
                 &state.db,
                 &identity.server_id,
                 &result.task_id,
@@ -289,7 +301,36 @@ async fn handle_text(
             )
             .await
             {
-                tracing::error!(%error, server_id = %identity.server_id, "task result persistence failed");
+                Ok(true) => {
+                    let _ = outbound.try_send(AgentCommand::Text(
+                        serde_json::json!({
+                            "type": "task_result_ack",
+                            "task_id": result.task_id,
+                        })
+                        .to_string(),
+                    ));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(%error, server_id = %identity.server_id, "task result persistence failed");
+                }
+            }
+        }
+        Some("task_received") => {
+            let Ok(receipt) = serde_json::from_value::<TaskReceivedMessage>(value) else {
+                return;
+            };
+            if !valid_task_id(&receipt.task_id) {
+                return;
+            }
+            if let Err(error) = crate::db::queries::mark_remote_task_sent(
+                &state.db,
+                &receipt.task_id,
+                &identity.server_id,
+            )
+            .await
+            {
+                tracing::error!(%error, server_id = %identity.server_id, "task receipt persistence failed");
             }
         }
         _ => {}
@@ -394,6 +435,53 @@ fn valid_batch_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
+fn valid_task_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 80 && uuid::Uuid::parse_str(value).is_ok()
+}
+
+fn agent_protocol_supported(headers: &HeaderMap) -> bool {
+    let protocol = headers
+        .get(AGENT_PROTOCOL_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    if protocol != Some(AGENT_PROTOCOL_VERSION) {
+        return false;
+    }
+    let capabilities = headers
+        .get(AGENT_CAPABILITIES_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .collect::<std::collections::HashSet<_>>();
+    REQUIRED_AGENT_CAPABILITIES
+        .iter()
+        .all(|capability| capabilities.contains(capability))
+}
+
 pub fn queue_remote_task(connection: &AgentConnection, task: &RemoteTaskInfo) -> bool {
     send_task(&connection.sender, task)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn requires_the_current_agent_protocol_and_capabilities() {
+        let mut headers = HeaderMap::new();
+        assert!(!agent_protocol_supported(&headers));
+        headers.insert(
+            AGENT_PROTOCOL_HEADER,
+            HeaderValue::from_static(AGENT_PROTOCOL_VERSION),
+        );
+        headers.insert(
+            AGENT_CAPABILITIES_HEADER,
+            HeaderValue::from_static("metrics-v1,config-v1,remote-exec-v1,task-ack-v1"),
+        );
+        assert!(agent_protocol_supported(&headers));
+        headers.insert(AGENT_PROTOCOL_HEADER, HeaderValue::from_static("999"));
+        assert!(!agent_protocol_supported(&headers));
+    }
 }

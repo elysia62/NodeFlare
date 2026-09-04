@@ -12,7 +12,7 @@ bind_addr = "127.0.0.1:8080"
 # 管理员用户名
 admin_username = "admin"
 
-# 管理员密码（8-128 个字符；启动前必须替换此占位值）
+# 管理员密码（8-128 个字符；仅首次初始化数据库需要，成功后自动清空）
 admin_password = "CHANGE_ME_WITH_A_STRONG_PASSWORD"
 
 # Cloudflare Turnstile 站点密钥（公开）

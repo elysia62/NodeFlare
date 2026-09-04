@@ -101,11 +101,7 @@ pub async fn create_task(
             crate::db::queries::create_remote_task(&state.db, &server_id, command, &user.username)
                 .await
                 .map_err(ApiResponse::internal)?;
-        if state.send_remote_task(&task).await {
-            crate::db::queries::mark_remote_task_sent(&state.db, &task.id, &task.server_id)
-                .await
-                .map_err(ApiResponse::internal)?;
-        }
+        state.send_remote_task(&task).await;
         tasks.push(CreatedRemoteTask {
             server_id,
             task_id: task.id,

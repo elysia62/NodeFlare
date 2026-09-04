@@ -125,6 +125,18 @@ async fn main() -> Result<()> {
     tracing::info!(database = ?database.kind(), "connected to database");
     database.migrate().await?;
     db::initialize(&database, &config).await?;
+    if !config.admin_password.is_empty() {
+        match config::clear_bootstrap_password(&args.config) {
+            Ok(true) => {
+                tracing::info!(path = %args.config.display(), "cleared bootstrap password from configuration")
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, path = %args.config.display(), "failed to clear bootstrap password from configuration")
+            }
+        }
+        config.admin_password.clear();
+    }
     database.optimize().await?;
 
     for (label, path) in [

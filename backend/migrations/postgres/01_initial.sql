@@ -5,37 +5,41 @@ CREATE TABLE settings (
 
 CREATE TABLE servers (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
+  name TEXT NOT NULL CHECK(char_length(btrim(name)) BETWEEN 1 AND 80),
   region TEXT NOT NULL DEFAULT '',
   group_name TEXT NOT NULL DEFAULT '默认',
   tags TEXT NOT NULL DEFAULT '',
-  hidden BIGINT NOT NULL DEFAULT 0,
+  hidden BIGINT NOT NULL DEFAULT 0 CHECK(hidden IN (0, 1)),
   sort_order BIGINT NOT NULL DEFAULT 0,
   expires_at BIGINT,
-  traffic_limit BIGINT NOT NULL DEFAULT 0,
-  traffic_limit_type TEXT NOT NULL DEFAULT 'sum',
-  price DOUBLE PRECISION NOT NULL DEFAULT 0,
-  billing_cycle BIGINT NOT NULL DEFAULT 30,
-  currency TEXT NOT NULL DEFAULT 'CNY',
-  auto_renewal BIGINT NOT NULL DEFAULT 0,
+  traffic_limit BIGINT NOT NULL DEFAULT 0 CHECK(traffic_limit >= 0),
+  traffic_limit_type TEXT NOT NULL DEFAULT 'sum'
+    CHECK(traffic_limit_type IN ('sum', 'max', 'min', 'up', 'down')),
+  price DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK(price BETWEEN -1 AND 1000000000),
+  billing_cycle BIGINT NOT NULL DEFAULT 30 CHECK(billing_cycle BETWEEN 0 AND 3650),
+  currency TEXT NOT NULL DEFAULT 'CNY' CHECK(currency ~ '^[A-Z]{3}$'),
+  auto_renewal BIGINT NOT NULL DEFAULT 0 CHECK(auto_renewal IN (0, 1)),
   last_ip TEXT NOT NULL DEFAULT '',
   ip_v4 TEXT NOT NULL DEFAULT '',
   ip_v6 TEXT NOT NULL DEFAULT '',
   network_interface TEXT NOT NULL DEFAULT '',
-  reset_day BIGINT NOT NULL DEFAULT 1,
-  report_interval BIGINT NOT NULL DEFAULT 60,
-  collect_interval BIGINT NOT NULL DEFAULT 1,
+  reset_day BIGINT NOT NULL DEFAULT 1 CHECK(reset_day BETWEEN 1 AND 31),
+  report_interval BIGINT NOT NULL DEFAULT 60 CHECK(report_interval BETWEEN 15 AND 3600),
+  collect_interval BIGINT NOT NULL DEFAULT 1 CHECK(collect_interval BETWEEN 1 AND 60),
   rx_correction BIGINT NOT NULL DEFAULT 0,
   tx_correction BIGINT NOT NULL DEFAULT 0,
   agent_mirror TEXT NOT NULL DEFAULT '',
-  offline_notify_disabled BIGINT NOT NULL DEFAULT 0,
-  auto_update BIGINT NOT NULL DEFAULT 1,
+  offline_notify_disabled BIGINT NOT NULL DEFAULT 0 CHECK(offline_notify_disabled IN (0, 1)),
+  auto_update BIGINT NOT NULL DEFAULT 1 CHECK(auto_update IN (0, 1)),
   token_hash TEXT NOT NULL UNIQUE,
   created_at BIGINT NOT NULL,
-  updated_at BIGINT NOT NULL
+  updated_at BIGINT NOT NULL,
+  CHECK(collect_interval <= report_interval),
+  CHECK((report_interval + collect_interval - 1) / collect_interval <= 720)
 );
 
 CREATE INDEX servers_sort ON servers(sort_order, created_at);
+CREATE INDEX servers_public_sort ON servers(hidden, sort_order, created_at);
 
 CREATE TABLE metric_history (
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -90,7 +94,7 @@ CREATE INDEX server_latest_state_time ON server_latest_state(latest_timestamp);
 CREATE TABLE admin_2fa (
   username TEXT PRIMARY KEY,
   totp_secret TEXT NOT NULL,
-  enabled BIGINT NOT NULL DEFAULT 1,
+  enabled BIGINT NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
   created_at BIGINT NOT NULL
 );
 
@@ -133,7 +137,9 @@ CREATE TABLE sessions (
   user_agent TEXT NOT NULL DEFAULT '',
   created_at BIGINT NOT NULL,
   last_seen_at BIGINT NOT NULL,
-  expires_at BIGINT NOT NULL
+  expires_at BIGINT NOT NULL,
+  CHECK(last_seen_at >= created_at),
+  CHECK(expires_at > created_at)
 );
 
 CREATE INDEX sessions_expires_at ON sessions(expires_at);
@@ -142,7 +148,7 @@ CREATE INDEX sessions_user_activity ON sessions(username, last_seen_at DESC);
 CREATE TABLE dashboard_proofs (
   token_hash TEXT PRIMARY KEY,
   created_at BIGINT NOT NULL,
-  expires_at BIGINT NOT NULL
+  expires_at BIGINT NOT NULL CHECK(expires_at > created_at)
 );
 
 CREATE INDEX dashboard_proofs_expires_at ON dashboard_proofs(expires_at);
@@ -150,12 +156,12 @@ CREATE INDEX dashboard_proofs_expires_at ON dashboard_proofs(expires_at);
 CREATE TABLE server_traffic_state (
   server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
   cycle_key BIGINT NOT NULL DEFAULT 0,
-  reset_day BIGINT NOT NULL DEFAULT 1,
+  reset_day BIGINT NOT NULL DEFAULT 1 CHECK(reset_day BETWEEN 1 AND 31),
   timestamp BIGINT NOT NULL DEFAULT 0,
-  raw_rx BIGINT NOT NULL DEFAULT 0,
-  raw_tx BIGINT NOT NULL DEFAULT 0,
-  used_rx BIGINT NOT NULL DEFAULT 0,
-  used_tx BIGINT NOT NULL DEFAULT 0
+  raw_rx BIGINT NOT NULL DEFAULT 0 CHECK(raw_rx >= 0),
+  raw_tx BIGINT NOT NULL DEFAULT 0 CHECK(raw_tx >= 0),
+  used_rx BIGINT NOT NULL DEFAULT 0 CHECK(used_rx >= 0),
+  used_tx BIGINT NOT NULL DEFAULT 0 CHECK(used_tx >= 0)
 );
 
 CREATE TABLE latency_tasks (
@@ -165,7 +171,7 @@ CREATE TABLE latency_tasks (
   target TEXT NOT NULL,
   port BIGINT CHECK(port IS NULL OR port BETWEEN 1 AND 65535),
   interval_seconds BIGINT NOT NULL CHECK(interval_seconds BETWEEN 30 AND 3600),
-  default_enabled BIGINT NOT NULL DEFAULT 0,
+  default_enabled BIGINT NOT NULL DEFAULT 0 CHECK(default_enabled IN (0, 1)),
   sort_order BIGINT NOT NULL DEFAULT 0,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
@@ -187,8 +193,8 @@ CREATE TABLE latency_results (
   task_id TEXT NOT NULL REFERENCES latency_tasks(id) ON DELETE CASCADE,
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
   timestamp BIGINT NOT NULL,
-  latency_ms DOUBLE PRECISION NOT NULL,
-  packet_loss DOUBLE PRECISION NOT NULL,
+  latency_ms DOUBLE PRECISION NOT NULL CHECK(latency_ms >= 0),
+  packet_loss DOUBLE PRECISION NOT NULL CHECK(packet_loss BETWEEN 0 AND 100),
   PRIMARY KEY(task_id, server_id, timestamp)
 );
 
@@ -202,7 +208,7 @@ CREATE TABLE alert_rules (
   threshold DOUBLE PRECISION NOT NULL CHECK(threshold > 0),
   duration_minutes BIGINT NOT NULL CHECK(duration_minutes BETWEEN 1 AND 1440),
   aggregation TEXT NOT NULL CHECK(aggregation IN ('average', 'continuous')),
-  enabled BIGINT NOT NULL DEFAULT 1,
+  enabled BIGINT NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL
 );
@@ -219,7 +225,7 @@ CREATE INDEX alert_rule_servers_server ON alert_rule_servers(server_id, rule_id)
 
 CREATE TABLE alert_states (
   state_key TEXT PRIMARY KEY,
-  active BIGINT NOT NULL DEFAULT 0,
+  active BIGINT NOT NULL DEFAULT 0 CHECK(active IN (0, 1)),
   updated_at BIGINT NOT NULL,
   details_json TEXT NOT NULL DEFAULT '{}'
 );

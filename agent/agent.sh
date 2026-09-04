@@ -4,8 +4,8 @@ set -eu
 SERVICE_NAME="nodeflare-agent"
 INSTALL_DIR="/opt/nodeflare"
 AGENT_FILE="$INSTALL_DIR/agent"
-DATA_DIR="$INSTALL_DIR/data"
-STATE_DIR="$DATA_DIR/agent"
+STATE_ROOT="/etc/nodeflare"
+STATE_DIR="$STATE_ROOT/agent"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 OPENRC_FILE="/etc/init.d/$SERVICE_NAME"
 
@@ -136,9 +136,9 @@ install_agent() {
   init_system=$(detect_init_system)
   [ "$init_system" != "unknown" ] || fail "未检测到正在运行的 systemd 或 OpenRC"
 
-  mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$STATE_DIR"
+  mkdir -p "$INSTALL_DIR" "$STATE_ROOT" "$STATE_DIR"
   chmod 755 "$INSTALL_DIR"
-  chmod 750 "$DATA_DIR"
+  chmod 700 "$STATE_ROOT"
   chmod 750 "$STATE_DIR"
   temporary="$INSTALL_DIR/.agent.$$.download"
   trap 'rm -f "$temporary"' EXIT HUP INT TERM
@@ -289,7 +289,7 @@ uninstall_agent() {
   [ "$init_system" != "systemd" ] || systemctl daemon-reload 2>/dev/null || true
   rm -f "$AGENT_FILE"
   rm -rf "$STATE_DIR"
-  rmdir "$DATA_DIR" 2>/dev/null || true
+  rmdir "$STATE_ROOT" 2>/dev/null || true
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "NodeFlare Agent 已卸载"
 }

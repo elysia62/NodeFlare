@@ -11,8 +11,8 @@ param(
 $ErrorActionPreference = "Stop"
 $TaskName = "nodeflare-agent"
 $InstallDir = Join-Path $env:ProgramFiles "NodeFlare"
-$DataDir = Join-Path $InstallDir "data"
-$StateDir = Join-Path $DataDir "agent"
+$DataDir = Join-Path $env:ProgramData "NodeFlare"
+$StateDir = Join-Path $DataDir "Agent"
 $AgentFile = Join-Path $InstallDir "agent.exe"
 
 function Write-Step([string]$Message) {

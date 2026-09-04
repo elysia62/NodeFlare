@@ -330,12 +330,20 @@ pub async fn initialize(pool: &Database, config: &Config) -> Result<()> {
         .await?;
     }
 
+    let password_hash =
+        sqlx::query_scalar::<_, String>(pool.sql("SELECT value FROM settings WHERE key = ?"))
+            .bind("admin_password_hash")
+            .fetch_optional(&mut *transaction)
+            .await?;
     let scheme =
         sqlx::query_scalar::<_, String>(pool.sql("SELECT value FROM settings WHERE key = ?"))
             .bind("password_scheme")
             .fetch_optional(&mut *transaction)
             .await?;
-    if scheme.as_deref() != Some(PASSWORD_SCHEME) {
+    if password_hash.is_none() {
+        if !(8..=128).contains(&config.admin_password.chars().count()) {
+            anyhow::bail!("admin_password is required when initializing a new database");
+        }
         let derived = auth::derive_client_password(&config.admin_password, &salt);
         let password_hash = auth::hash_password(&derived)?;
         for (key, value) in [
@@ -360,6 +368,8 @@ pub async fn initialize(pool: &Database, config: &Config) -> Result<()> {
             .execute(&mut *transaction)
             .await?;
         tracing::info!(timestamp = now, "initialized password scheme");
+    } else if scheme.as_deref() != Some(PASSWORD_SCHEME) {
+        anyhow::bail!("database uses an unsupported administrator password scheme");
     }
     transaction.commit().await?;
     Ok(())
