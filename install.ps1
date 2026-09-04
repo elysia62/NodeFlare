@@ -102,21 +102,24 @@ if ($NativeArchitecture -ne "AMD64") {
 }
 
 $Asset = "nodeflare-server-windows-x64.zip"
-$ReleaseBase = "https://github.com/$Repository/releases/latest/download"
+$ReleaseApi = "https://api.github.com/repos/$Repository/releases/latest"
 $TemporaryDir = Join-Path $env:TEMP "nodeflare-install-$PID"
 $Archive = Join-Path $TemporaryDir $Asset
-$Checksum = "$Archive.sha256"
 $PackageDir = Join-Path $TemporaryDir "package"
 
 try {
   New-Item -ItemType Directory -Path $TemporaryDir -Force | Out-Null
-  Write-Step "下载 latest Release（Windows x64）"
-  Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseBase/$Asset" -OutFile $Archive -TimeoutSec 120
-  Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseBase/$Asset.sha256" -OutFile $Checksum -TimeoutSec 30
-  $Expected = ((Get-Content -LiteralPath $Checksum -Raw).Trim() -split '\s+')[0]
-  if ($Expected -notmatch '^[0-9a-fA-F]{64}$') {
-    Stop-Install "Release 校验文件无效"
+  Write-Step "获取 latest Release（Windows x64）"
+  $Release = Invoke-RestMethod -Uri $ReleaseApi -Headers @{ Accept = "application/vnd.github+json"; "User-Agent" = "nodeflare-installer" } -TimeoutSec 30
+  $ReleaseAsset = $Release.assets | Where-Object { $_.name -eq $Asset } | Select-Object -First 1
+  if ($Release.tag_name -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or $null -eq $ReleaseAsset) {
+    Stop-Install "GitHub 最新 Release 无效，或缺少 $Asset"
   }
+  $DigestMatch = [regex]::Match([string]$ReleaseAsset.digest, '^sha256:([0-9a-fA-F]{64})$')
+  if (-not $DigestMatch.Success) { Stop-Install "Release 缺少 $Asset 的 SHA-256 摘要" }
+  $Expected = $DigestMatch.Groups[1].Value
+  Write-Step "下载 NodeFlare $($Release.tag_name)（Windows x64）"
+  Invoke-WebRequest -UseBasicParsing -Uri $ReleaseAsset.browser_download_url -OutFile $Archive -TimeoutSec 120
   $Actual = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash
   if ($Actual -ne $Expected) {
     Stop-Install "Release SHA-256 校验失败"
@@ -141,6 +144,9 @@ try {
   $Version = ($VersionOutput -split '\s+')[-1]
   if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     Stop-Install "服务端返回了无效版本号"
+  }
+  if ($Version -ne $Release.tag_name.Substring(1)) {
+    Stop-Install "Release $($Release.tag_name) 与服务端版本 $Version 不一致"
   }
 
   $NewConfig = -not (Test-Path -LiteralPath $ConfigFile)

@@ -237,10 +237,20 @@ download_file() {
   fi
 }
 
+download_stdout() {
+  url=$1
+  if command -v curl >/dev/null 2>&1; then
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --fail --location --silent --show-error --max-time 30 \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'User-Agent: nodeflare-installer' \
+      "$url"
+  else
+    fetch -q -T 30 -o - "$url"
+  fi
+}
+
 verify_checksum() {
-  expected=$(sed -n '1{s/[[:space:]].*//;p;q;}' "$checksum" | tr '[:upper:]' '[:lower:]')
-  [ "${#expected}" -eq 64 ] || fail "Release 校验文件无效"
-  case "$expected" in *[!0-9a-f]*) fail "Release 校验文件无效" ;; esac
   case "$platform" in
     linux) actual=$(sha256sum "$archive" | sed 's/[[:space:]].*//') ;;
     macos) actual=$(shasum -a 256 "$archive" | sed 's/[[:space:]].*//') ;;
@@ -281,11 +291,34 @@ download_release() {
 
   download_dir=$(mktemp -d "${TMPDIR:-/tmp}/nodeflare-install.XXXXXX")
   archive=$download_dir/$asset
-  checksum=$download_dir/$asset.sha256
-  release_base="https://github.com/$repository/releases/latest/download"
-  log "下载 latest Release ($release_label)"
+  release_api="https://api.github.com/repos/$repository/releases/latest"
+  log "获取 latest Release ($release_label)"
+  release_json=$(download_stdout "$release_api")
+  release_tag=$(printf '%s\n' "$release_json" | tr ',' '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+  printf '%s\n' "$release_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+    || fail "GitHub 最新 Release 标签无效"
+  expected=$(printf '%s\n' "$release_json" | tr '{' '\n' | awk -v name="$asset" '
+    {
+      compact = $0
+      gsub(/[[:space:]]/, "", compact)
+      if (index(compact, "\"name\":\"" name "\"") > 0) selected = 1
+      else if (index(compact, "\"name\":") > 0) selected = 0
+    }
+    selected {
+      marker = "\"digest\":\"sha256:"
+      position = index(compact, marker)
+      if (position == 0) next
+      digest = substr(compact, position + length(marker), 64)
+      if (length(digest) == 64 && digest !~ /[^0-9a-fA-F]/) {
+        print tolower(digest)
+        exit
+      }
+    }
+  ')
+  [ -n "$expected" ] || fail "Release 缺少 $asset 的 SHA-256 摘要"
+  release_base="https://github.com/$repository/releases/download/$release_tag"
+  log "下载 NodeFlare $release_tag ($release_label)"
   download_file "$release_base/$asset" "$archive" 120
-  download_file "$release_base/$asset.sha256" "$checksum" 30
   verify_checksum
 
   package_dir=$download_dir/package
@@ -301,6 +334,8 @@ download_release() {
   release_version=${binary_version##* }
   printf '%s\n' "$release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
     || fail "服务端返回了无效版本号"
+  [ "$release_version" = "${release_tag#v}" ] \
+    || fail "Release $release_tag 与服务端版本 $release_version 不一致"
 }
 
 write_openrc_service() {

@@ -11,19 +11,19 @@ NodeFlare 是一个自部署的服务器监控面板，支持 SQLite、PostgreSQ
 Linux 或 macOS：
 
 ```bash
-curl -fsSL https://github.com/imengying/NodeFlare/releases/latest/download/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh
 ```
 
 FreeBSD：
 
 ```sh
-fetch -qo - https://github.com/imengying/NodeFlare/releases/latest/download/install.sh | sudo sh
+fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh
 ```
 
 Windows PowerShell（管理员）：
 
 ```powershell
-Invoke-WebRequest https://github.com/imengying/NodeFlare/releases/latest/download/install.ps1 -OutFile "$env:TEMP\nodeflare-install.ps1"
+Invoke-WebRequest https://raw.githubusercontent.com/imengying/NodeFlare/main/install.ps1 -OutFile "$env:TEMP\nodeflare-install.ps1"
 Unblock-File "$env:TEMP\nodeflare-install.ps1"
 & "$env:TEMP\nodeflare-install.ps1"
 ```
@@ -53,19 +53,19 @@ journalctl -u nodeflare -f
 重新执行安装命令即可更新。Linux 和 macOS 卸载时默认保留配置和数据库：
 
 ```bash
-curl -fsSL https://github.com/imengying/NodeFlare/releases/latest/download/install.sh | sudo sh -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
 ```
 
 同时删除配置和数据：
 
 ```bash
-curl -fsSL https://github.com/imengying/NodeFlare/releases/latest/download/install.sh | sudo sh -s -- --uninstall --purge
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall --purge
 ```
 
 FreeBSD：
 
 ```sh
-fetch -qo - https://github.com/imengying/NodeFlare/releases/latest/download/install.sh | sudo sh -s -- --uninstall
+fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
 ```
 
 彻底删除时在末尾添加 `--purge`。
