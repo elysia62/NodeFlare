@@ -404,7 +404,7 @@ jobs:
           scripts/check-glibc-version.sh "release/${{ matrix.asset }}" 2.28
       - name: Verify FreeBSD server
         if: matrix.freebsd_vm || matrix.freebsd_arm
-        uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
+        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
         with:
           release: "15"
           arch: ${{ matrix.freebsd_arm && 'aarch64' || 'x86_64' }}
@@ -606,7 +606,7 @@ jobs:
           scripts/check-glibc-version.sh "release/${{ matrix.asset }}" 2.28
       - name: Verify FreeBSD Agent in FreeBSD
         if: endsWith(matrix.target, '-unknown-freebsd')
-        uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
+        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
         with:
           release: "15"
           arch: ${{ matrix.target == 'aarch64-unknown-freebsd' && 'aarch64' || 'x86_64' }}
@@ -808,7 +808,7 @@ jobs:
           merge-multiple: true
       - name: Include installer
         run: cp install.sh install.ps1 release-assets/
-      - uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.3
         with:
           body_path: CHANGELOG.md
           files: release-assets/*
