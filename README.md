@@ -12,7 +12,7 @@ NodeFlare 是一个自部署的服务器监控面板。服务端使用 Rust/Axum
 sudo ./install.sh
 ```
 
-首次安装会在终端询问管理员用户名，并隐藏输入、二次确认管理员密码。脚本会构建 NodeFlare，将后端安装为 `/opt/nodeflare/nodeflare`、静态资源安装到 `/opt/nodeflare/share`、systemd 服务安装为 `nodeflare.service`，并将配置写入 `/etc/nodeflare/config.toml`。重复运行安装脚本会保留已有配置和数据库。
+首次安装会在终端询问管理员用户名，并隐藏输入、二次确认管理员密码；随后可直接填写 SQLite 或 PostgreSQL URL，回车则使用 `/etc/nodeflare/nodeflare.db`。脚本会构建 NodeFlare，将后端安装为 `/opt/nodeflare/nodeflare`、静态资源安装到 `/opt/nodeflare/share`、systemd 服务安装为 `nodeflare.service`，并将配置和服务端持久数据统一放在 `/etc/nodeflare`。重复运行安装脚本会保留已有配置和数据库。
 面板不会创建额外的 Linux 系统用户，systemd 服务的运行方式与 Agent 一致。
 
 Linux 默认目录结构：
@@ -21,12 +21,13 @@ Linux 默认目录结构：
 /opt/nodeflare/nodeflare              # 后端
 /opt/nodeflare/agent                  # Agent（安装时才存在）
 /opt/nodeflare/share/                 # 前端与安装脚本
-/opt/nodeflare/data/server/           # 数据库与主题
 /opt/nodeflare/data/agent/            # Agent 暂存数据
 /etc/nodeflare/config.toml            # 后端配置
+/etc/nodeflare/nodeflare.db           # 默认 SQLite 数据库
+/etc/nodeflare/themes/                # 已安装主题
 ```
 
-默认可从 `http://127.0.0.1:8080` 访问公开面板，管理页位于 `/admin`。首次登录后可在“登录与安全”中启用 TOTP 两步验证；远程执行使用一次性命令，可同时选择多台服务器，每次下发都必须提交当前 TOTP 验证码。
+默认可从 `http://127.0.0.1:8080` 访问公开面板，管理页位于 `/admin`。“登录与安全”可启用 TOTP、查看登录设备并将指定设备踢下线；远程执行使用一次性命令，可同时选择多台服务器，每次下发都必须提交当前 TOTP 验证码。等待超过 24 小时的命令会自动取消，已完成结果随历史保留周期清理。
 
 后台每个侧边栏入口都有独立地址，例如远程执行为 `/admin/remote`、主题商店为 `/admin/themes`、关于为 `/admin/about`。刷新页面或使用浏览器前进、后退时会保留当前栏目。
 
@@ -44,7 +45,7 @@ journalctl -u nodeflare -f
 sudo ./install.sh --uninstall
 ```
 
-连同 `/etc/nodeflare` 和 `/opt/nodeflare/data/server` 中的服务端数据彻底删除：
+连同 `/etc/nodeflare` 中的配置和服务端持久数据彻底删除：
 
 ```bash
 sudo ./install.sh --uninstall --purge
@@ -52,26 +53,26 @@ sudo ./install.sh --uninstall --purge
 
 ## 配置
 
-正式安装的配置文件是 `/etc/nodeflare/config.toml`。安装时只交互式询问用户名和密码；监听地址、数据库、Turnstile、静态资源与会话时长等均保留在该 TOML 文件中。相对路径以配置文件所在目录为基准解析。
+正式安装的配置文件是 `/etc/nodeflare/config.toml`。安装时会交互式询问用户名、密码和可跳过的数据库 URL；监听地址、数据库、Turnstile、静态资源与会话时长等均可在该 TOML 文件中修改。相对路径以配置文件所在目录为基准解析。
 
 SQLite 示例：
 
 ```toml
-database_url = "sqlite:///opt/nodeflare/data/server/nodeflare.db"
+database_url = "sqlite:///etc/nodeflare/nodeflare.db"
 bind_addr = "127.0.0.1:8080"
 admin_username = "admin"
 admin_password = "replace-with-a-long-random-password"
 frontend_dir = "/opt/nodeflare/share/frontend"
 admin_frontend_dir = "/opt/nodeflare/share/admin"
 agent_dir = "/opt/nodeflare/share/agent"
-theme_dir = "/opt/nodeflare/data/server/themes"
+theme_dir = "/etc/nodeflare/themes"
 session_ttl_hours = 168
 ```
 
 PostgreSQL 示例：
 
 ```toml
-database_url = "postgres://nodeflare:password@127.0.0.1/nodeflare"
+database_url = "postgres://nodeflare:password@127.0.0.1:5432/nodeflare?sslmode=prefer"
 bind_addr = "127.0.0.1:8080"
 admin_username = "admin"
 admin_password = "replace-with-a-long-random-password"
@@ -92,9 +93,11 @@ curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agen
 
 Agent 通过 `/api/agent/ws` 建立 WebSocket 连接。除 localhost 调试外，安装脚本要求 HTTPS。
 
-Agent Token 由面板生成，安装脚本将可执行文件安装为 `agent`（Windows 为 `agent.exe`），服务名为 `nodeflare-agent`。Linux 使用 `/opt/nodeflare`；macOS 与 FreeBSD 使用 `/usr/local/libexec/nodeflare`；Windows 使用 `%ProgramFiles%\NodeFlare`。程序、静态资源和持久数据均收拢在各平台的 NodeFlare 目录中，Agent 暂存数据位于其中的 `data/agent`。Token 只作为 systemd、OpenRC、launchd 或 Windows 计划任务的启动参数保存，不会另行生成 token 或 Agent 配置文件。
+Agent Token 由面板生成，安装脚本将可执行文件安装为 `agent`（Windows 为 `agent.exe`），服务名为 `nodeflare-agent`。Linux 使用 `/opt/nodeflare`；macOS 与 FreeBSD 使用 `/usr/local/libexec/nodeflare`；Windows 使用 `%ProgramFiles%\NodeFlare`。程序、静态资源和持久数据均收拢在各平台的 NodeFlare 目录中，Agent 暂存数据位于其中的 `data/agent`。服务端只保存 Token 哈希，Token 仅在创建节点或主动重置时显示；重置会使旧 Agent 立即离线。Unix 服务通过受保护的服务环境传入 Token，避免出现在进程命令行；Windows 计划任务仍保存为 SYSTEM 任务参数。安装过程不会额外生成 Agent 配置文件。
 
-主题商店支持直接上传 ZIP，也支持填写 GitHub 仓库主页地址并安装该仓库 latest Release 中的 ZIP。主题解压后保存在 `theme_dir`，ZIP 根目录必须包含 `index.html`，也允许外层仅有一个打包目录。
+远程执行由系统级 Agent 服务直接运行：Linux、macOS、FreeBSD 默认是 `root`，Windows 是 `SYSTEM`，因此等同于服务器控制权。请只通过 HTTPS 暴露 NodeFlare、启用 TOTP、保护管理员会话，并仅安装可信主题；Linux Agent 不启用文件系统隔离，否则运维命令无法管理宿主机。
+
+主题商店支持直接上传 ZIP，也支持填写 GitHub 仓库主页地址并安装该仓库 latest Release 中的 ZIP。主题解压后保存在 `theme_dir`，ZIP 根目录必须包含 `index.html`，也允许外层仅有一个打包目录。第三方主题包含可执行前端代码，应按插件对待并只安装可信来源。
 
 ## 开发与构建
 
@@ -163,21 +166,21 @@ server {
 }
 ```
 
-`X-Forwarded-Proto: https` 也用于给管理员会话 Cookie 添加 `Secure`。NodeFlare 自身会为 API 和静态资源添加 CSP、禁止 iframe、MIME 嗅探限制等安全响应头。
+NodeFlare 只在直接连接来自回环地址时信任代理 IP 头，并优先采用 `X-Real-IP`；反向代理必须像上例一样覆盖这些头，不能透传客户端自带值。`X-Forwarded-Proto: https` 也用于给管理员会话 Cookie 添加 `Secure`。NodeFlare 自身会为 API 和静态资源添加 CSP、禁止 iframe、MIME 嗅探限制等安全响应头。
 
 ## 备份
 
-SQLite 正式安装的默认文件是 `/opt/nodeflare/data/server/nodeflare.db`。可在服务运行时使用 SQLite 的一致性备份命令：
+SQLite 正式安装的默认文件是 `/etc/nodeflare/nodeflare.db`。管理后台的“数据库”页面可直接导出和恢复 ZIP；也可使用 SQLite 的一致性备份命令：
 
 ```bash
-sqlite3 /opt/nodeflare/data/server/nodeflare.db ".backup '/var/backups/nodeflare.db'"
+sqlite3 /etc/nodeflare/nodeflare.db ".backup '/var/backups/nodeflare.db'"
 ```
 
 PostgreSQL 使用标准工具：
 
 ```bash
 pg_dump --format=custom --file=/var/backups/nodeflare.dump \
-  'postgres://nodeflare:password@127.0.0.1/nodeflare'
+  'postgres://nodeflare:password@127.0.0.1:5432/nodeflare?sslmode=prefer'
 ```
 
 恢复前请停止 NodeFlare，并先在独立环境验证备份。配置文件包含管理员初始凭据和可选的 Turnstile 密钥，也应通过权限受控的方式单独备份。

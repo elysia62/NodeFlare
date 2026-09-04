@@ -53,6 +53,12 @@ pub async fn create_task(
     Extension(user): Extension<AuthenticatedUser>,
     Json(input): Json<CreateRemoteTaskRequest>,
 ) -> Result<Response, ApiResponse> {
+    if let Some(seconds) = state.remote_totp_attempts.retry_after(&user.session_id) {
+        return Err(ApiResponse::error(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("验证码尝试过多，请在 {seconds} 秒后重试"),
+        ));
+    }
     let command = input.command.trim();
     let server_ids = remote_server_ids(&input);
     if server_ids.is_empty()
@@ -66,11 +72,17 @@ pub async fn create_task(
     let totp = crate::db::queries::get_totp_secret(&state.db, &user.username)
         .await
         .map_err(ApiResponse::internal)?;
-    validate_remote_totp(
+    if let Err(error) = validate_remote_totp(
         totp.as_ref()
             .map(|(secret, enabled)| (secret.as_str(), *enabled)),
         &input.totp_code,
-    )?;
+    ) {
+        if error.status == StatusCode::UNPROCESSABLE_ENTITY {
+            state.remote_totp_attempts.record_failure(&user.session_id);
+        }
+        return Err(error);
+    }
+    state.remote_totp_attempts.clear(&user.session_id);
     let known_server_ids = crate::db::queries::all_server_ids(&state.db)
         .await
         .map_err(ApiResponse::internal)?

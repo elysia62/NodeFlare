@@ -182,7 +182,7 @@ export default function App() {
           <div className="brand"><SiteLogo src={config.logo_url} alt="" width="36" height="36" /><strong>{config.site_name}</strong></div>
           <div className="header-actions">
             <button className="icon-btn" onClick={toggleTheme} title={dark ? ui(locale, "浅色主题", "Light theme") : ui(locale, "深色主题", "Dark theme")}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
-            <a className="icon-btn" href="/admin" target="_blank" rel="noopener noreferrer" title={ui(locale, "进入后台", "Administration")} aria-label={ui(locale, "进入后台", "Administration")}><UserCircle size={18} /></a>
+            <a className="icon-btn" href="/admin/login" target="_blank" rel="noopener noreferrer" title={ui(locale, "进入后台", "Administration")} aria-label={ui(locale, "进入后台", "Administration")}><UserCircle size={18} /></a>
           </div>
         </div>
       </header>

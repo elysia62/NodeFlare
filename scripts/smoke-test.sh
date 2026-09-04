@@ -21,6 +21,32 @@ step() {
   printf 'smoke: %s\n' "$1" >&2
 }
 
+admin_token=
+server_id=
+latency_task_id=
+alert_rule_id=
+cleanup() {
+  if [ "${MONITOR_KEEP_RESOURCES:-0}" != "1" ] && [ -n "$admin_token" ]; then
+    if [ -n "$alert_rule_id" ]; then
+      monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
+        -X DELETE "$MONITOR_BASE_URL/api/admin/alert-rules/$alert_rule_id" >/dev/null || true
+    fi
+    if [ -n "$latency_task_id" ]; then
+      monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
+        -X DELETE "$MONITOR_BASE_URL/api/admin/latency-tasks/$latency_task_id" >/dev/null || true
+    fi
+    if [ -n "$server_id" ]; then
+      monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
+        -X DELETE "$MONITOR_BASE_URL/api/admin/servers/$server_id" >/dev/null || true
+    fi
+  fi
+  if [ -n "$admin_token" ]; then
+    monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
+      -X POST "$MONITOR_BASE_URL/api/admin/logout" >/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
 step "bootstrap"
 bootstrap_json=$(request "$MONITOR_BASE_URL/api/bootstrap")
 printf '%s' "$bootstrap_json" | jq -e '.access == "ok" and (.servers | type == "array")' >/dev/null
@@ -33,12 +59,27 @@ const key = await crypto.subtle.importKey("raw", encoder.encode(process.env.NODE
 const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", iterations: 600000, salt: encoder.encode(`nodeflare:${process.env.NODEFLARE_SALT}`) }, key, 256);
 console.log(Array.from(new Uint8Array(bits), byte => byte.toString(16).padStart(2, "0")).join(""));
 ')
+step "login throttling"
+invalid_login_payload=$(jq -nc --arg username "$MONITOR_ADMIN_USERNAME" --arg password_derived "0000000000000000000000000000000000000000000000000000000000000000" '{username:$username,password_derived:$password_derived,turnstile_token:""}')
+attempt=1
+while [ "$attempt" -le 5 ]; do
+  invalid_login_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+    -H 'Content-Type: application/json' -H 'X-Real-IP: 203.0.113.10' \
+    --data "$invalid_login_payload" "$MONITOR_BASE_URL/api/admin/login")
+  [ "$invalid_login_status" = "401" ]
+  attempt=$((attempt + 1))
+done
+throttled_login_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' -H 'X-Real-IP: 203.0.113.10' \
+  --data "$invalid_login_payload" "$MONITOR_BASE_URL/api/admin/login")
+[ "$throttled_login_status" = "429" ]
 step "static assets"
 security_headers=$(monitor_curl --silent --show-error --dump-header - --output /dev/null "$MONITOR_BASE_URL/")
 printf '%s' "$security_headers" | grep -qi '^x-content-type-options: nosniff'
 printf '%s' "$security_headers" | grep -qi '^x-frame-options: DENY'
 printf '%s' "$security_headers" | grep -qi "^content-security-policy:.*frame-ancestors 'none'"
-admin_html=$(request "$MONITOR_BASE_URL/admin")
+admin_html=$(request "$MONITOR_BASE_URL/admin/login")
+request "$MONITOR_BASE_URL/admin/servers" | grep -q '/admin-assets/'
 request "$MONITOR_BASE_URL/admin/about" | grep -q '/admin-assets/'
 admin_script=$(printf '%s' "$admin_html" | sed -n 's/.*src="\([^"]*\.js\)".*/\1/p' | head -n 1)
 admin_stylesheet=$(printf '%s' "$admin_html" | sed -n 's/.*href="\([^"]*\.css\)".*/\1/p' | head -n 1)
@@ -50,10 +91,32 @@ admin_headers=$(monitor_curl --silent --show-error --dump-header - --output /dev
 printf '%s' "$admin_headers" | grep -qi '^cache-control:.*no-store'
 
 step "login and settings"
+login_payload=$(jq -nc --arg username "$MONITOR_ADMIN_USERNAME" --arg password_derived "$password_derived" --arg turnstile_token "$MONITOR_TURNSTILE_TOKEN" '{username:$username,password_derived:$password_derived,turnstile_token:$turnstile_token}')
 login_json=$(request -H 'Content-Type: application/json' \
-  --data "$(jq -nc --arg username "$MONITOR_ADMIN_USERNAME" --arg password "$MONITOR_ADMIN_PASSWORD" --arg password_derived "$password_derived" --arg turnstile_token "$MONITOR_TURNSTILE_TOKEN" '{username:$username,password:$password,password_derived:$password_derived,turnstile_token:$turnstile_token}')" \
+  --data "$login_payload" \
   "$MONITOR_BASE_URL/api/admin/login")
 admin_token=$(printf '%s' "$login_json" | jq -er '.token')
+
+step "login devices"
+second_login_json=$(request -H 'Content-Type: application/json' \
+  --data "$login_payload" \
+  "$MONITOR_BASE_URL/api/admin/login")
+second_admin_token=$(printf '%s' "$second_login_json" | jq -er '.token')
+sessions_json=$(request -H "Authorization: Bearer $admin_token" \
+  "$MONITOR_BASE_URL/api/admin/sessions")
+printf '%s' "$sessions_json" | jq -e '
+  (.sessions | length) >= 2 and
+  ([.sessions[] | select(.current == true)] | length) == 1 and
+  ([.sessions[] | select(.current == false)] | length) >= 1 and
+  (.sessions | all((.ip_address | length) > 0 and (.user_agent | length) > 0))
+' >/dev/null
+second_session_id=$(request -H "Authorization: Bearer $second_admin_token" \
+  "$MONITOR_BASE_URL/api/admin/sessions" | jq -er '.sessions[] | select(.current == true) | .id')
+request -H "Authorization: Bearer $admin_token" -X DELETE \
+  "$MONITOR_BASE_URL/api/admin/sessions/$second_session_id" >/dev/null
+revoked_session_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H "Authorization: Bearer $second_admin_token" "$MONITOR_BASE_URL/api/admin/settings")
+[ "$revoked_session_status" = "401" ]
 
 # Login protection defaults to enabled, but without a complete Turnstile pair it
 # remains inactive so the first admin settings save must still work.
@@ -73,28 +136,6 @@ request -H "Authorization: Bearer $admin_token" \
   jq -e '.themes | any(.builtin == true and .id == "builtin-nodeflare-glass" and .name == "NodeFlare Glass" and .active == true)' >/dev/null
 
 server_input='{"name":"Smoke Test Node","region":"JP","group_name":"Test","tags":"smoke","hidden":false,"expires_at":1893456000,"traffic_limit":107374182400,"traffic_limit_type":"max","price":9.9,"billing_cycle":30,"currency":"USD","auto_renewal":true,"network_interface":"","reset_day":1,"report_interval":60,"collect_interval":5,"rx_correction":0,"tx_correction":0,"agent_mirror":"https://mirror.example.com","offline_notify_disabled":false,"auto_update":true}'
-
-server_id=
-latency_task_id=
-alert_rule_id=
-cleanup() {
-  if [ "${MONITOR_KEEP_RESOURCES:-0}" = "1" ]; then
-    return
-  fi
-  if [ -n "$alert_rule_id" ]; then
-    monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
-      -X DELETE "$MONITOR_BASE_URL/api/admin/alert-rules/$alert_rule_id" >/dev/null || true
-  fi
-  if [ -n "$latency_task_id" ]; then
-    monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
-      -X DELETE "$MONITOR_BASE_URL/api/admin/latency-tasks/$latency_task_id" >/dev/null || true
-  fi
-  if [ -n "$server_id" ]; then
-    monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
-      -X DELETE "$MONITOR_BASE_URL/api/admin/servers/$server_id" >/dev/null || true
-  fi
-}
-trap cleanup EXIT
 
 step "admin resources"
 request -H "Authorization: Bearer $admin_token" \
@@ -123,11 +164,15 @@ MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
   MONITOR_LATENCY_TASK_ID="$latency_task_id" \
   node scripts/websocket-smoke.mjs
 token_without_admin_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X POST \
   "$MONITOR_BASE_URL/api/admin/servers/$server_id/token")
 [ "$token_without_admin_status" = "401" ]
-request -H "Authorization: Bearer $admin_token" \
-  "$MONITOR_BASE_URL/api/admin/servers/$server_id/token" | \
-  jq -e --arg token "$agent_token" '.agent_token == $token' >/dev/null
+rotated_agent_token=$(MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
+  MONITOR_AGENT_TOKEN="$agent_token" MONITOR_SERVER_ID="$server_id" \
+  MONITOR_LATENCY_TASK_ID="$latency_task_id" MONITOR_CONFIG_ONLY=1 \
+  MONITOR_ROTATE_AGENT_TOKEN=1 node scripts/websocket-smoke.mjs)
+[ "$rotated_agent_token" != "$agent_token" ]
+agent_token=$rotated_agent_token
 
 step "persisted metrics"
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/servers" | \

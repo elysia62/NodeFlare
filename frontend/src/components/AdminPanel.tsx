@@ -14,6 +14,7 @@ import {
   GripVertical,
   KeyRound,
   LogOut,
+  MonitorSmartphone,
   Moon,
   Palette,
   Pencil,
@@ -34,11 +35,11 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError, getToken, setToken } from "../api";
-import { adminTabFromPath, adminTabPaths, type AdminTab } from "../adminRoutes";
+import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } from "../adminRoutes";
 import { formatByteSize, isOnline, parseByteSize } from "../format";
 import { derivePassword } from "../password";
 import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS } from "../refresh";
-import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseStats, type ExchangeRates, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
+import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseStats, type ExchangeRates, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
 import { Checkbox } from "./Checkbox";
 import { TurnstileWidget } from "./TurnstileWidget";
 import { useDialog } from "./useDialog";
@@ -66,9 +67,9 @@ const adminPages: Record<AdminTab, { title: string; description: string }> = {
   themes: { title: "主题商店", description: "选择内置主题或安装本地主题包" },
   themeSettings: { title: "主题设置", description: "调整当前前端主题提供的显示选项" },
   alerts: { title: "通知", description: "配置 Telegram 通知和资源告警阈值" },
-  security: { title: "登录与安全", description: "管理管理员账号和 Cloudflare Turnstile 防护" },
-  data: { title: "监控数据库", description: "查看数据库统计、汇率状态并维护历史数据" },
-  remote: { title: "远程执行", description: "输入一次性命令，选择服务器并通过 TOTP 验证后下发" },
+  security: { title: "登录与安全", description: "管理管理员账号、登录设备和安全验证" },
+  data: { title: "数据库", description: "查看状态、备份恢复并维护历史数据" },
+  remote: { title: "远程执行", description: "输入命令并执行" },
   about: { title: "关于", description: "版本信息与项目地址" },
 };
 
@@ -81,7 +82,7 @@ const adminNavigation = [
   { tab: "themeSettings" as const, label: "主题设置", icon: SlidersHorizontal },
   { tab: "appearance" as const, label: "站点设置", icon: Eye },
   { tab: "security" as const, label: "登录与安全", icon: ShieldCheck },
-  { tab: "data" as const, label: "监控数据库", icon: Database },
+  { tab: "data" as const, label: "数据库", icon: Database },
   { tab: "about" as const, label: "关于", icon: Info },
 ];
 
@@ -177,6 +178,25 @@ function formatDate(value: number | null) {
   return value ? new Date(value * 1000).toISOString().slice(0, 10) : "";
 }
 
+function formatSessionTime(value: number) {
+  return new Date(value * 1000).toLocaleString();
+}
+
+function describeLoginDevice(userAgent: string) {
+  const browser = userAgent.includes("Edg/") ? "Edge"
+    : userAgent.includes("Firefox/") ? "Firefox"
+      : userAgent.includes("Chrome/") ? "Chrome"
+        : userAgent.includes("Safari/") ? "Safari"
+          : "其他客户端";
+  const system = userAgent.includes("Android") ? "Android"
+    : /iPhone|iPad/.test(userAgent) ? "iOS"
+      : userAgent.includes("Windows") ? "Windows"
+        : userAgent.includes("Mac OS") ? "macOS"
+          : userAgent.includes("Linux") ? "Linux"
+            : "";
+  return system ? `${browser} · ${system}` : browser;
+}
+
 function settingPatch(settings: Settings, key: keyof Settings, value: unknown) {
   return { ...settings, [key]: value } as Settings;
 }
@@ -239,6 +259,7 @@ export function AdminPanel({
   const [settings, setSettings] = useState<Settings | null>(null);
   const [database, setDatabase] = useState<DatabaseStats | null>(null);
   const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
+  const [exchangeRatesExpanded, setExchangeRatesExpanded] = useState(false);
   const [themes, setThemes] = useState<Theme[]>([]);
   const [themeName, setThemeName] = useState("");
   const [themeDescription, setThemeDescription] = useState("");
@@ -267,7 +288,11 @@ export function AdminPanel({
   const [twoFactorSetup, setTwoFactorSetup] = useState<TotpSetup | null>(null);
   const [twoFactorCode, setTwoFactorCode] = useState("");
   const [twoFactorSecretCopied, setTwoFactorSecretCopied] = useState(false);
+  const [loginSessions, setLoginSessions] = useState<LoginSession[]>([]);
+  const [loginSessionsLoaded, setLoginSessionsLoaded] = useState(false);
+  const [revokingSessionId, setRevokingSessionId] = useState("");
   const themeFileInputRef = useRef<HTMLInputElement>(null);
+  const databaseRestoreInputRef = useRef<HTMLInputElement>(null);
   const remoteTasksRef = useRef<RemoteTask[]>([]);
   const remoteTasksRequestRef = useRef(0);
   const remoteTasksActive = useMemo(() => hasActiveRemoteTasks(remoteTasks), [remoteTasks]);
@@ -311,23 +336,26 @@ export function AdminPanel({
   useEffect(() => { void load(); }, [load]);
 
   useEffect(() => {
-    const canonicalPath = adminTabPaths[adminTabFromPath(window.location.pathname)];
-    if (window.location.pathname !== canonicalPath) {
-      window.history.replaceState(null, "", canonicalPath);
-    }
-    const handlePopState = () => {
-      setTab(adminTabFromPath(window.location.pathname));
+    const syncAdminPath = () => {
+      const canonicalPath = canonicalAdminPath(window.location.pathname, authenticated);
+      if (window.location.pathname !== canonicalPath) {
+        window.history.replaceState(null, "", canonicalPath);
+      }
+      setTab(adminTabFromPath(canonicalPath));
       setNotice("");
       setError("");
     };
+    syncAdminPath();
+    const handlePopState = () => syncAdminPath();
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
+  }, [authenticated]);
 
   useEffect(() => {
     if (!authenticated) return;
     if (tab === "themeSettings") void loadThemeSettings();
     if (tab === "data" && !database) void loadDatabase();
+    if (tab === "security") void loadLoginSessions();
   }, [authenticated, tab]);
 
   useEffect(() => {
@@ -364,7 +392,7 @@ export function AdminPanel({
     setError("");
     try {
       const passwordDerived = await derivePassword(password, config.password_client_salt);
-      const result = await api.login(username.trim(), password, passwordDerived, turnstileToken, loginTotpCode);
+      const result = await api.login(username.trim(), passwordDerived, turnstileToken, loginTotpCode);
       setToken(result.token);
       setPassword("");
       setTurnstileToken("");
@@ -463,13 +491,14 @@ export function AdminPanel({
   }
 
   async function showInstallCommand(server: AdminServer) {
+    if (!window.confirm(`重新生成“${server.name}”的 Agent Token？当前 Agent 会立即离线，需使用新安装命令重新连接。`)) return;
     setBusy(true);
     setError("");
     try {
-      const { agent_token } = await api.serverToken(server.id);
+      const { agent_token } = await api.rotateServerToken(server.id);
       setInstall({ agent_token, agent_mirror: server.agent_mirror });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "读取 Agent Token 失败");
+      setError(reason instanceof Error ? reason.message : "重置 Agent Token 失败");
     } finally {
       setBusy(false);
     }
@@ -538,6 +567,7 @@ export function AdminPanel({
     try {
       if (payload.new_password) {
         payload.new_password_derived = await derivePassword(payload.new_password, config.password_client_salt);
+        delete payload.new_password;
       } else {
         delete payload.new_password;
         delete payload.new_password_derived;
@@ -545,6 +575,7 @@ export function AdminPanel({
       const result = await api.saveSettings(payload);
       if (result.token) setToken(result.token);
       setSettings(result.settings);
+      if (tab === "security") await loadLoginSessions();
       setNotice("设置已保存");
       onChanged();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "保存设置失败"); }
@@ -569,6 +600,39 @@ export function AdminPanel({
       setExchangeRates(rates);
       setNotice(`汇率已更新 · ${rates.source} · ${rates.date}`);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "汇率更新失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function exportDatabaseBackup() {
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const { blob, filename } = await api.databaseBackup();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice("数据库备份已导出");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "导出数据库备份失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function restoreDatabaseBackup(file: File) {
+    if (file.size > 512 * 1024 * 1024) {
+      setError("数据库备份 ZIP 不能超过 512 MiB");
+      return;
+    }
+    if (!window.confirm("恢复将覆盖当前数据库，并使现有登录会话失效。确认继续？")) return;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const result = await api.restoreDatabaseBackup(file);
+      setToken("");
+      window.alert(`数据库已恢复 ${result.restored_rows.toLocaleString()} 行，请使用备份中的管理员账号重新登录。`);
+      window.location.reload();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "恢复数据库备份失败"); }
     finally { setBusy(false); }
   }
 
@@ -654,12 +718,37 @@ export function AdminPanel({
     finally { setBusy(false); }
   }
 
+  async function loadLoginSessions() {
+    try {
+      const result = await api.loginSessions();
+      setLoginSessions(result.sessions);
+      setLoginSessionsLoaded(true);
+    } catch (reason) {
+      if (!(reason instanceof ApiError && reason.status === 401)) {
+        setError(reason instanceof Error ? reason.message : "读取登录设备失败");
+      }
+    }
+  }
+
+  async function revokeLoginSession(session: LoginSession) {
+    if (session.current || !window.confirm(`确认让“${describeLoginDevice(session.user_agent)}”下线？`)) return;
+    setRevokingSessionId(session.id); setError(""); setNotice("");
+    try {
+      await api.revokeLoginSession(session.id);
+      setLoginSessions((current) => current.filter((item) => item.id !== session.id));
+      setNotice("设备已踢下线");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "设备下线失败");
+    } finally { setRevokingSessionId(""); }
+  }
+
   async function logout() {
     try { await api.logout(); }
     finally {
       setToken(""); setAuthenticated(false); setServers([]); setSettings(null); setSelectedIds([]);
       setTwoFactorStatus(null); setTwoFactorSetup(null); setTwoFactorCode(""); setRemoteTotpCode("");
       setTwoFactorSecretCopied(false);
+      setLoginSessions([]); setLoginSessionsLoaded(false); setRevokingSessionId("");
       setRemoteSelectedIds([]); setRemoteCommand(""); setRemoteTasks([]); setRemoteQuery("");
     }
   }
@@ -928,13 +1017,10 @@ export function AdminPanel({
 
           <div className="admin-body">
             <aside className="admin-sidebar">
-              {/* 这个 span 在窄屏是 display:none，但被 aria-labelledby 直接引用的节点即使隐藏也参与名称计算，
-                  所以地标名在所有断点都在，不用另写一份 aria-label。 */}
-              <span className="admin-nav-label" id="admin-nav-label">管理</span>
               {/* 用 nav + aria-current 而不是 role="tablist"：tablist 会盖掉 nav 的导航地标，
-                  且 APG 的 tab 模式要求方向键 + roving tabindex，而主题设置和监控数据库点了要发请求，
+                  且 APG 的 tab 模式要求方向键 + roving tabindex，而主题设置和数据库点了要发请求，
                   方向键扫过就会连带触发。每项换的是整块内容和它自己的 h1，本质是页内导航，不是 tab 面板。 */}
-              <nav className="admin-tabs" aria-labelledby="admin-nav-label">
+              <nav className="admin-tabs" aria-label="管理导航">
                 {adminNavigation.map((item) => {
                   const Icon = item.icon;
                   return <a key={item.tab} href={adminTabPaths[item.tab]} className={tab === item.tab ? "active" : ""} aria-current={tab === item.tab ? "page" : undefined} onClick={(event) => {
@@ -958,7 +1044,7 @@ export function AdminPanel({
                         <Checkbox checked={selectedIds.includes(server.id)} onChange={() => toggleSelected(server.id)} ariaLabel={`选择 ${server.name}`} />
                         <span className={`status-dot ${settings && isOnline(server, settings.offline_threshold_seconds) ? "online" : ""}`} />
                         <div className="server-name"><div className="server-name-main"><Flag region={server.region} size={17} /><strong>{server.name}</strong></div><ServerIpMeta server={server} agentVersion={server.agent_version} onCopy={(value) => void copyServerIp(value)} /></div>
-                        <div className="row-actions"><button className="icon-btn" disabled={index === 0} onClick={() => void move(index, -1)} title="上移"><ChevronUp size={15} /></button><button className="icon-btn" disabled={index === servers.length - 1} onClick={() => void move(index, 1)} title="下移"><ChevronDown size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => void showInstallCommand(server)} title="显示安装命令"><Download size={15} /></button><button className="icon-btn" onClick={() => openEditor(server)} title="编辑节点"><Pencil size={15} /></button><button className="icon-btn danger" onClick={() => void remove(server)} title="删除节点"><Trash2 size={15} /></button></div>
+                        <div className="row-actions"><button className="icon-btn" disabled={index === 0} onClick={() => void move(index, -1)} title="上移"><ChevronUp size={15} /></button><button className="icon-btn" disabled={index === servers.length - 1} onClick={() => void move(index, 1)} title="下移"><ChevronDown size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => void showInstallCommand(server)} title="重置 Token 并生成安装命令"><Download size={15} /></button><button className="icon-btn" onClick={() => openEditor(server)} title="编辑节点"><Pencil size={15} /></button><button className="icon-btn danger" onClick={() => void remove(server)} title="删除节点"><Trash2 size={15} /></button></div>
                       </div>
                     ))}
                     {!servers.length && !busy ? <div className="list-empty">暂无节点</div> : null}
@@ -990,13 +1076,13 @@ export function AdminPanel({
                     </div>
                   </section>
                   <form className="admin-section theme-add-form" onSubmit={addTheme}>
-                    <div className="section-head"><div><h3>安装主题</h3><span>主题会安装到本机，不依赖运行时远程资源。</span></div></div>
+                    <div className="section-head"><div><h3>安装主题</h3><span>主题包含可执行前端代码，只安装可信来源；安装后不依赖运行时远程资源。</span></div></div>
                     <div className="segmented theme-source-tabs" role="group" aria-label="主题安装来源">
                       <button type="button" className={themeSourceMode === "repository" ? "active" : ""} aria-pressed={themeSourceMode === "repository"} onClick={() => setThemeSourceMode("repository")}>GitHub 仓库</button>
-                      <button type="button" className={themeSourceMode === "upload" ? "active" : ""} aria-pressed={themeSourceMode === "upload"} onClick={() => setThemeSourceMode("upload")}>上传 ZIP</button>
+                      <button type="button" className={themeSourceMode === "upload" ? "active" : ""} aria-pressed={themeSourceMode === "upload"} onClick={() => setThemeSourceMode("upload")}>上传</button>
                     </div>
                     <p className="settings-hint">{themeSourceMode === "repository" ? "填写仓库主页地址，NodeFlare 会下载 latest Release 中的第一个 ZIP 文件。" : "ZIP 根目录需包含 index.html，也支持外层只有一个目录的打包方式；最大 32 MiB。"}</p>
-                    <div className="form-grid"><label><span>主题名称</span><input required maxLength={80} value={themeName} onChange={(event) => setThemeName(event.target.value)} placeholder="例如：Ocean" /></label>{themeSourceMode === "repository" ? <label><span>GitHub 仓库</span><input required type="url" maxLength={2048} value={themeUrl} onChange={(event) => setThemeUrl(event.target.value)} placeholder="https://github.com/user/theme" /></label> : <label className="theme-file-field"><span>主题 ZIP</span><input ref={themeFileInputRef} required type="file" accept=".zip,application/zip" onChange={(event) => setThemeFile(event.target.files?.[0] ?? null)} /><small>{themeFile ? `${themeFile.name} · ${(themeFile.size / 1024 / 1024).toFixed(2)} MiB` : "请选择 .zip 文件"}</small></label>}</div>
+                    <div className="form-grid"><label><span>主题名称</span><input required maxLength={80} value={themeName} onChange={(event) => setThemeName(event.target.value)} placeholder="例如：Ocean" /></label>{themeSourceMode === "repository" ? <label><span>GitHub 仓库</span><input required type="url" maxLength={2048} value={themeUrl} onChange={(event) => setThemeUrl(event.target.value)} placeholder="https://github.com/user/theme" /></label> : <label className="theme-file-field"><span>文件</span><input ref={themeFileInputRef} required type="file" accept=".zip,application/zip" onChange={(event) => setThemeFile(event.target.files?.[0] ?? null)} /><small>{themeFile ? `${themeFile.name} · ${(themeFile.size / 1024 / 1024).toFixed(2)} MiB` : "请选择 .zip 文件"}</small></label>}</div>
                     <label><span>主题说明（可选）</span><textarea rows={2} maxLength={300} value={themeDescription} onChange={(event) => setThemeDescription(event.target.value)} placeholder="简短描述主题风格和来源" /></label>
                     <div className="form-actions"><button className="primary-btn" disabled={busy || (themeSourceMode === "upload" && !themeFile)}>{themeSourceMode === "upload" ? <Upload size={15} /> : <Download size={15} />}{busy ? "安装中" : "安装主题"}</button></div>
                   </form>
@@ -1031,7 +1117,7 @@ export function AdminPanel({
 
                   {tab === "security" ? <>
                     <div className="section-title"><ShieldCheck size={15} />账号与 Cloudflare 防护</div>
-                    <div className="form-grid"><label><span>管理员用户名</span><input autoComplete="username" value={settings.admin_username} onChange={(event) => updateSettings("admin_username", event.target.value)} /></label><label><span>新密码（留空不修改）</span><input autoComplete="new-password" type="password" value={settings.new_password || ""} onChange={(event) => updateSettings("new_password", event.target.value)} placeholder="至少 8 个字符" /></label></div>
+                    <div className="form-grid"><label><span>管理员用户名</span><input autoComplete="username" value={settings.admin_username} onChange={(event) => updateSettings("admin_username", event.target.value)} /></label><label><span>新密码（留空不修改）</span><input autoComplete="new-password" type="password" minLength={8} maxLength={128} value={settings.new_password || ""} onChange={(event) => updateSettings("new_password", event.target.value)} placeholder="至少 8 个字符" /></label></div>
                     <div className="two-factor-panel">
                       <div className="two-factor-head"><div><div className="section-subtitle">TOTP 两步验证</div><p className="settings-hint">启用后管理员登录和每次远程执行都必须提交验证器生成的 6 位动态码。</p></div><span className={`two-factor-status ${twoFactorStatus?.enabled ? "enabled" : ""}`}>{twoFactorStatus?.enabled ? "已启用" : twoFactorStatus ? "未启用" : "读取中"}</span></div>
                       {twoFactorSetup ? <div className="two-factor-setup">
@@ -1040,21 +1126,24 @@ export function AdminPanel({
                       </div> : null}
                       {twoFactorStatus?.enabled ? <div className="two-factor-actions"><label><span>当前验证码</span><input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={twoFactorCode} onChange={(event) => setTwoFactorCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="000000" /></label><button type="button" className="danger-btn" disabled={busy} onClick={() => void disableTwoFactor()}>禁用两步验证</button></div> : <div className="two-factor-actions">
                         {twoFactorSetup ? <label><span>当前验证码</span><input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={twoFactorCode} onChange={(event) => setTwoFactorCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="000000" /></label> : <p className="settings-hint">{twoFactorStatus?.has_secret ? "已有未启用的密钥；重新生成后，旧密钥会失效。" : "尚未生成两步验证密钥。"}</p>}
-                        <button type="button" className="secondary-btn" disabled={busy} onClick={() => void setupTwoFactor()}>{twoFactorStatus?.has_secret ? "重新生成密钥" : "生成密钥"}</button>
+                        <button type="button" className="secondary-btn two-factor-generate-btn" disabled={busy} onClick={() => void setupTwoFactor()}>{twoFactorStatus?.has_secret ? "重新生成密钥" : "生成密钥"}</button>
                         {twoFactorSetup ? <button type="button" className="primary-btn" disabled={busy} onClick={() => void enableTwoFactor()}>启用两步验证</button> : null}
                       </div>}
                     </div>
+                    <div className="login-devices-panel">
+                      <div className="login-devices-head"><div><div className="section-subtitle">登录设备</div><p className="settings-hint">踢下线后，对应设备的登录状态会立即失效。</p></div><button type="button" className="secondary-btn compact" disabled={Boolean(revokingSessionId)} onClick={() => void loadLoginSessions()}><RotateCw size={14} />刷新</button></div>
+                      {!loginSessionsLoaded ? <p className="settings-hint">正在读取登录设备...</p> : loginSessions.length ? <div className="login-device-list">{loginSessions.map((session) => <div className="login-device-row" key={session.id}><span className="login-device-icon"><MonitorSmartphone size={18} /></span><div className="login-device-copy"><div className="login-device-title"><strong>{describeLoginDevice(session.user_agent)}</strong>{session.current ? <span className="login-device-current">当前设备</span> : null}</div><span>{session.ip_address || "未知 IP"}</span><small title={session.user_agent}>最近活动 {formatSessionTime(session.last_seen_at)} · 登录于 {formatSessionTime(session.created_at)} · 到期 {formatSessionTime(session.expires_at)}</small></div>{!session.current ? <button type="button" className="danger-btn compact login-device-revoke" disabled={Boolean(revokingSessionId)} onClick={() => void revokeLoginSession(session)}><LogOut size={14} />{revokingSessionId === session.id ? "下线中" : "踢下线"}</button> : null}</div>)}</div> : <p className="settings-hint">暂无有效登录设备。</p>}
+                    </div>
                     <div className="form-grid"><Toggle label="保护公开仪表盘" checked={settings.turnstile_enabled} onChange={(value) => updateSettings("turnstile_enabled", value)} /><Toggle label="保护管理员登录" checked={settings.turnstile_login_enabled} onChange={(value) => updateSettings("turnstile_login_enabled", value)} /></div>
                     <div className="form-grid"><label><span>Turnstile Site Key</span><input autoComplete="off" type="password" value={settings.turnstile_site_key} onChange={(event) => updateSettings("turnstile_site_key", event.target.value)} /></label><label><span>Turnstile Secret Key</span><input autoComplete="off" type="password" value={settings.turnstile_secret_key} onChange={(event) => updateSettings("turnstile_secret_key", event.target.value)} /></label></div>
-                    <p className="settings-hint">已配置的密钥显示为 ********；两项同时清空可禁用 Turnstile。</p>
                   </> : null}
 
                   {tab === "data" ? <>
-                    <div className="section-title"><Database size={15} />数据库维护</div>
+                    <div className="section-head database-section-head"><div><h3>数据库维护</h3><span>备份包含节点、设置、历史、任务及安全配置，请妥善保管。</span></div><div className="section-actions"><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void exportDatabaseBackup()}><Download size={15} />导出备份</button><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => databaseRestoreInputRef.current?.click()}><Upload size={15} />恢复备份</button><input ref={databaseRestoreInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void restoreDatabaseBackup(file); }} /></div></div>
                     <div className="data-stat-grid">{database ? <><DataStat label="节点" value={database.server_count} /><DataStat label="在线" value={database.online_count} /><DataStat label="历史行数" value={database.history_rows.toLocaleString()} /></> : <p className="settings-hint">正在读取数据库统计...</p>}</div>
                     <div className="usage-section">
-                      <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取汇率快照"}</p></div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={15} />立即更新</button></div>
-                      {exchangeRates ? <div className="usage-table-wrap"><table className="usage-table"><thead><tr><th>币种</th><th>1 CNY 可兑换</th></tr></thead><tbody>{ASSET_CURRENCIES.filter((currency) => currency !== "CNY").map((currency) => <tr key={currency}><th scope="row">{currency}</th><td>{exchangeRates.rates[currency]?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "--"}</td></tr>)}</tbody></table></div> : <div className="usage-empty">尚未读取</div>}
+                      <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取汇率快照"}</p></div><div className="usage-head-actions">{exchangeRatesExpanded ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={15} />立即更新</button> : null}<button type="button" className="secondary-btn compact usage-toggle" aria-expanded={exchangeRatesExpanded} onClick={() => setExchangeRatesExpanded((expanded) => !expanded)}>{exchangeRatesExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}{exchangeRatesExpanded ? "收起" : "展开"}</button></div></div>
+                      {exchangeRatesExpanded ? exchangeRates ? <div className="usage-table-wrap"><table className="usage-table"><thead><tr><th>币种</th><th>1 CNY 可兑换</th></tr></thead><tbody>{ASSET_CURRENCIES.filter((currency) => currency !== "CNY").map((currency) => <tr key={currency}><th scope="row">{currency}</th><td>{exchangeRates.rates[currency]?.toLocaleString(undefined, { maximumFractionDigits: 6 }) ?? "--"}</td></tr>)}</tbody></table></div> : <div className="usage-empty">尚未读取</div> : null}
                     </div>
                     <div className="data-actions"><button type="button" className="secondary-btn" onClick={() => void loadDatabase()}>刷新统计</button><button type="button" className="danger-btn" onClick={() => void clearHistory()}><Trash2 size={15} />清空历史指标</button></div>
                     <p className="settings-hint">清空历史不会删除节点、密钥或最新状态。</p>
@@ -1064,11 +1153,10 @@ export function AdminPanel({
                 </form>
               ) : tab === "remote" ? (
                 <div className="admin-section remote-section">
-                  <div className="section-head"><div><h3>一次性远程执行</h3><span>命令只用于本次下发，不会保存为服务器设置。</span></div>{remoteTasks.length ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshRemoteTasks(false, true)}><RotateCw size={14} />刷新结果</button> : null}</div>
                   <form className="remote-execution-form" onSubmit={(event) => void createRemoteTask(event)}>
                     <label className="remote-command-field">
                       <span>执行命令</span>
-                      <textarea autoFocus required rows={5} maxLength={16_384} spellCheck={false} value={remoteCommand} onChange={(event) => setRemoteCommand(event.target.value)} placeholder={"df -h\nuname -a"} />
+                      <textarea autoFocus required rows={5} maxLength={16_384} spellCheck={false} value={remoteCommand} onChange={(event) => setRemoteCommand(event.target.value)} />
                       <small>多行内容会作为同一次 shell 命令执行。</small>
                     </label>
 
@@ -1088,15 +1176,14 @@ export function AdminPanel({
                   </form>
 
                   {remoteTasks.length > 0 ? <div className="remote-results">
-                    <div className="section-head"><div><h3>执行结果</h3>{remoteTasksActive ? <span className="remote-auto-refresh"><RotateCw size={12} />执行中，每 2 秒自动刷新</span> : <span>本次命令已完成</span>}</div></div>
+                    <div className="section-head"><div><h3>执行结果</h3>{remoteTasksActive ? <span className="remote-auto-refresh"><RotateCw size={12} />执行中，每 2 秒自动刷新</span> : <span>本次命令已完成</span>}</div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshRemoteTasks(false, true)}><RotateCw size={14} />刷新结果</button></div>
                     <div className="remote-command-summary"><span>本次命令</span><code>{remoteTasks[0]?.command}</code></div>
                     <div className="task-list">
                       {remoteTasks.map((task) => {
                         const server = remoteServerById.get(task.server_id);
                         return <div key={task.id} className="task-item remote-result-item">
                           <div className="task-header"><strong className="remote-result-server">{server?.name ?? task.server_id}</strong><span className={`task-status ${task.status}`}>{remoteTaskStatusLabels[task.status]}</span><span className="task-time">{new Date(task.requested_at * 1000).toLocaleString()}</span></div>
-                          <code className="task-id">{task.id}</code>
-                          {task.status === "success" || task.status === "failed" ? <div className={`task-latest-result ${task.status}`}><strong>{task.status === "success" ? "执行成功" : "执行失败"}{task.exit_code !== null ? ` · 退出码 ${task.exit_code}` : ""}</strong><pre className="task-result">{task.result || "（命令没有输出）"}</pre></div> : <p className="task-progress">{task.status === "pending" ? "等待 Agent 上线接收命令…" : "Agent 已接收，正在等待执行结果…"}</p>}
+                          {task.status === "success" || task.status === "failed" ? <pre className={`task-result ${task.status}`}>{task.result || "（命令没有输出）"}</pre> : <p className="task-progress">{task.status === "pending" ? "等待 Agent 上线接收命令…" : "Agent 已接收，正在等待执行结果…"}</p>}
                         </div>;
                       })}
                     </div>

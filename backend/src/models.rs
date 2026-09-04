@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 #[serde(deny_unknown_fields)]
 pub struct LoginRequest {
     pub username: String,
-    pub password: String,
     pub password_derived: String,
     #[serde(default)]
     pub turnstile_token: String,
@@ -71,7 +70,6 @@ pub struct SettingsInput {
     pub show_latency: Option<bool>,
     pub show_uptime: Option<bool>,
     pub admin_username: Option<String>,
-    pub new_password: Option<String>,
     pub new_password_derived: Option<String>,
     pub turnstile_enabled: Option<bool>,
     pub turnstile_login_enabled: Option<bool>,
@@ -126,6 +124,17 @@ pub struct SettingsView {
     pub offline_alert_minutes: i64,
     pub expiry_alert_days: i64,
     pub traffic_alert_percentage: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoginSessionView {
+    pub id: String,
+    pub ip_address: String,
+    pub user_agent: String,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    pub expires_at: i64,
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -445,7 +454,6 @@ pub struct Enable2FaRequest {
 #[derive(Debug, Serialize)]
 pub struct TotpSetupResponse {
     pub secret: String,
-    pub uri: String,
     pub enabled: bool,
 }
 

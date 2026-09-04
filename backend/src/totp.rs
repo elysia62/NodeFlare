@@ -1,5 +1,4 @@
 use anyhow::{Result, anyhow};
-use rand::Rng;
 use totp_lite::{Sha1, totp_custom};
 
 const TOTP_DIGITS: u32 = 6;
@@ -7,18 +6,8 @@ const TOTP_STEP: u64 = 30;
 
 /// 生成一个新的 TOTP secret（base32 编码）
 pub fn generate_secret() -> String {
-    let mut rng = rand::thread_rng();
-    let secret: [u8; 20] = rng.r#gen();
+    let secret: [u8; 20] = rand::random();
     data_encoding::BASE32_NOPAD.encode(&secret)
-}
-
-/// 生成 TOTP URI（用于显示二维码）
-pub fn generate_uri(secret: &str, issuer: &str, account_name: &str) -> String {
-    let issuer = url::form_urlencoded::byte_serialize(issuer.as_bytes()).collect::<String>();
-    let account = url::form_urlencoded::byte_serialize(account_name.as_bytes()).collect::<String>();
-    format!(
-        "otpauth://totp/{issuer}:{account}?secret={secret}&issuer={issuer}&digits={TOTP_DIGITS}&period={TOTP_STEP}",
-    )
 }
 
 /// 验证 TOTP 代码（允许前后一个时间窗口的误差）
@@ -61,16 +50,6 @@ mod tests {
                 .chars()
                 .all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c))
         );
-    }
-
-    #[test]
-    fn test_generate_uri() {
-        let secret = "JBSWY3DPEHPK3PXP";
-        let uri = generate_uri(secret, "NodeFlare", "admin");
-        assert!(uri.starts_with("otpauth://totp/"));
-        assert!(uri.contains("secret=JBSWY3DPEHPK3PXP"));
-        assert!(uri.contains("digits=6"));
-        assert!(uri.contains("period=30"));
     }
 
     #[test]

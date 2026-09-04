@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatByteSize, formatPrice, parseByteSize } from "./format";
+import { formatByteSize, formatPrice, formatSpeedParts, parseByteSize } from "./format";
 
 describe("parseByteSize", () => {
   test("accepts manual units and defaults to GB", () => {
@@ -29,6 +29,13 @@ describe("formatByteSize", () => {
     // 0 就是「不限」，没有单独的负数哨兵。
     expect(formatByteSize(0)).toBe("0");
     expect(formatByteSize(-1)).toBe("0");
+  });
+});
+
+describe("formatSpeedParts", () => {
+  test("keeps the numeric value separate from its unit", () => {
+    expect(formatSpeedParts(1.5 * 1024 ** 2)).toEqual({ value: "1.5", unit: "MB/s" });
+    expect(formatSpeedParts(0)).toEqual({ value: "0", unit: "B/s" });
   });
 });
 

@@ -214,15 +214,12 @@ install_agent() {
     '' \
     '[Service]' \
     'Type=simple' \
-    "ExecStart=$AGENT_FILE -e $endpoint -t $token -i $interval" \
+    "ExecStart=$AGENT_FILE -e $endpoint -i $interval" \
     'Restart=always' \
     'RestartSec=10' \
     'NoNewPrivileges=true' \
-    'PrivateTmp=true' \
-    'ProtectHome=true' \
-    'ProtectSystem=strict' \
+    "Environment=NODEFLARE_AGENT_TOKEN=$token" \
     "Environment=NODEFLARE_STATE_DIR=$STATE_DIR" \
-    "ReadWritePaths=$INSTALL_DIR $STATE_DIR" \
     '' \
     '[Install]' \
     'WantedBy=multi-user.target' > "$SERVICE_FILE"
@@ -238,8 +235,9 @@ install_agent() {
       '#!/sbin/openrc-run' \
       "name=\"$SERVICE_NAME\"" \
       "command=\"$AGENT_FILE\"" \
-      "command_args=\"-e $endpoint -t $token -i $interval\"" \
+      "command_args=\"-e $endpoint -i $interval\"" \
       "command_user=\"root\"" \
+      "export NODEFLARE_AGENT_TOKEN=\"$token\"" \
       "export NODEFLARE_STATE_DIR=\"$STATE_DIR\"" \
       "supervisor=\"supervise-daemon\"" \
       "respawn_delay=10" \

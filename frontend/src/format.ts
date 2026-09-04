@@ -10,16 +10,34 @@ export function percent(used: number | null, total: number | null) {
   return safeTotal > 0 ? Math.min(100, Math.max(0, (number(used) / safeTotal) * 100)) : 0;
 }
 
-export function formatBytes(value: number | null | undefined, decimals = 1) {
+export interface FormattedBytes {
+  value: string;
+  unit: string;
+}
+
+export function formatBytesParts(value: number | null | undefined, decimals = 1): FormattedBytes {
   const size = Math.max(0, number(value));
-  if (size === 0) return "0 B";
+  if (size === 0) return { value: "0", unit: "B" };
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
   const index = Math.min(units.length - 1, Math.floor(Math.log(size) / Math.log(1024)));
-  return `${(size / 1024 ** index).toFixed(index === 0 ? 0 : decimals)} ${units[index]}`;
+  return {
+    value: (size / 1024 ** index).toFixed(index === 0 ? 0 : decimals),
+    unit: units[index],
+  };
+}
+
+export function formatBytes(value: number | null | undefined, decimals = 1) {
+  const formatted = formatBytesParts(value, decimals);
+  return `${formatted.value} ${formatted.unit}`;
 }
 
 export function formatSpeed(value: number | null | undefined) {
   return `${formatBytes(value)}/s`;
+}
+
+export function formatSpeedParts(value: number | null | undefined): FormattedBytes {
+  const formatted = formatBytesParts(value);
+  return { ...formatted, unit: `${formatted.unit}/s` };
 }
 
 // 节点编辑框的手动单位输入："100 G"、"0.5 T"；不带单位按 GB。

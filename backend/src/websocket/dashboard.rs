@@ -9,6 +9,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
 
+const MAX_DASHBOARD_MESSAGE_BYTES: usize = 8 * 1024;
+
 #[derive(Deserialize)]
 pub struct DashboardQuery {
     server_id: Option<String>,
@@ -37,7 +39,9 @@ pub async fn handle(
     let server_id = query
         .server_id
         .filter(|value| !value.is_empty() && value.len() <= 80 && !value.contains('/'));
-    ws.on_upgrade(move |socket| run(socket, state, server_id))
+    ws.max_message_size(MAX_DASHBOARD_MESSAGE_BYTES)
+        .max_frame_size(MAX_DASHBOARD_MESSAGE_BYTES)
+        .on_upgrade(move |socket| run(socket, state, server_id))
 }
 
 async fn run(socket: WebSocket, state: Arc<AppState>, server_id: Option<String>) {
@@ -47,7 +51,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, server_id: Option<String>)
         tokio::select! {
             update = updates.recv() => match update {
                 Ok(update) if server_id.as_ref().is_none_or(|id| id == &update.server_id) => {
-                    if sender.send(Message::Text(update.payload)).await.is_err() {
+                    if sender.send(Message::Text(update.payload.into())).await.is_err() {
                         break;
                     }
                 }
@@ -57,7 +61,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, server_id: Option<String>)
             },
             incoming = receiver.next() => match incoming {
                 Some(Ok(Message::Text(text))) if text == "ping" => {
-                    if sender.send(Message::Text("pong".to_string())).await.is_err() {
+                    if sender.send(Message::Text("pong".into())).await.is_err() {
                         break;
                     }
                 }

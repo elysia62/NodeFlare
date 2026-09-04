@@ -7,10 +7,14 @@ const serverId = process.env.MONITOR_SERVER_ID;
 const latencyTaskId = process.env.MONITOR_LATENCY_TASK_ID;
 const expectTaskAssigned = process.env.MONITOR_EXPECT_TASK_ASSIGNED !== "0";
 const configOnly = process.env.MONITOR_CONFIG_ONLY === "1";
+const expectAgentRejected = process.env.MONITOR_EXPECT_AGENT_REJECTED === "1";
+const rotateAgentToken = process.env.MONITOR_ROTATE_AGENT_TOKEN === "1";
 
-if (!baseUrl || !adminToken || !agentToken || !serverId || !latencyTaskId) {
+if (!baseUrl || !agentToken || (!expectAgentRejected && (!adminToken || !serverId || !latencyTaskId))) {
   throw new Error(
-    "MONITOR_BASE_URL, MONITOR_ADMIN_TOKEN, MONITOR_AGENT_TOKEN, MONITOR_SERVER_ID and MONITOR_LATENCY_TASK_ID are required",
+    expectAgentRejected
+      ? "MONITOR_BASE_URL and MONITOR_AGENT_TOKEN are required"
+      : "MONITOR_BASE_URL, MONITOR_ADMIN_TOKEN, MONITOR_AGENT_TOKEN, MONITOR_SERVER_ID and MONITOR_LATENCY_TASK_ID are required",
   );
 }
 
@@ -159,7 +163,35 @@ function closeSocket(socket) {
   });
 }
 
+function waitForSocketClose(socket, expected) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`WebSocket did not close after ${expected}`));
+    }, 5_000);
+    socket.once("close", onClose);
+    socket.once("error", onError);
+  });
+}
+
 await expectSocketStatus("/api/agent/ws", "invalid-agent-token", 401);
+if (expectAgentRejected) {
+  await expectSocketStatus("/api/agent/ws", agentToken, 401);
+  process.exit(0);
+}
 
 const dashboard = configOnly ? null : await openSocket("/api/ws", adminToken);
 let agent;
@@ -168,6 +200,14 @@ try {
     const pong = waitForMessage(dashboard, "pong");
     dashboard.send("ping");
     await pong;
+
+    const oversizedDashboard = await openSocket("/api/ws", adminToken);
+    const oversizedClosed = waitForSocketClose(
+      oversizedDashboard,
+      "an oversized dashboard message was sent",
+    );
+    oversizedDashboard.send("x".repeat(16 * 1024));
+    await oversizedClosed;
   }
 
   agent = await openSocket("/api/agent/ws", agentToken, { "CF-Connecting-IP": "8.8.8.8" });
@@ -191,7 +231,48 @@ try {
   ) {
     throw new Error(`Invalid Agent config: ${JSON.stringify(config)}`);
   }
-  if (!configOnly) {
+  if (rotateAgentToken) {
+    const firstSocket = agent;
+    const firstClosed = waitForSocketClose(firstSocket, "a duplicate Agent connected");
+    const replacement = await openSocket("/api/agent/ws", agentToken);
+    await waitForJsonMessage(
+      replacement,
+      "replacement Agent config",
+      (message) => message.type === "config" && message.config,
+    );
+    await firstClosed;
+    agent = replacement;
+
+    const rotatedClosed = waitForSocketClose(agent, "the Agent Token rotated");
+    const rotateResponse = await fetch(
+      new URL(`/api/admin/servers/${encodeURIComponent(serverId)}/token`, baseUrl),
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${adminToken}` },
+      },
+    );
+    if (!rotateResponse.ok) {
+      throw new Error(
+        `Agent Token rotation returned HTTP ${rotateResponse.status}: ${await rotateResponse.text()}`,
+      );
+    }
+    const rotated = await rotateResponse.json();
+    const rotatedToken = rotated.agent_token;
+    if (!rotatedToken || rotatedToken === agentToken) {
+      throw new Error("Agent Token rotation did not return a new token");
+    }
+    await rotatedClosed;
+    await expectSocketStatus("/api/agent/ws", agentToken, 401);
+
+    const rotatedSocket = await openSocket("/api/agent/ws", rotatedToken);
+    await waitForJsonMessage(
+      rotatedSocket,
+      "rotated Agent config",
+      (message) => message.type === "config" && message.config,
+    );
+    await closeSocket(rotatedSocket);
+    process.stdout.write(`${rotatedToken}\n`);
+  } else if (!configOnly) {
   const wakeHintPromise = waitForJsonMessage(
     agent,
     "batched overview wake hint",
@@ -318,7 +399,7 @@ try {
     ack.persistenceError !== false ||
     !Number.isInteger(ack.persistedThroughTs) ||
     ack.persistedThroughTs < latestTimestamp ||
-    ack.nextD1WriteAfterMs !== 60_000 ||
+    ack.nextPersistAfterMs !== 60_000 ||
     ack.nextWssReportAfterMs !== 5_000
   ) {
     throw new Error(`Invalid Agent metric ACK: ${JSON.stringify(ack)}`);

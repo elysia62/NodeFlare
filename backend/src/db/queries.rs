@@ -6,8 +6,18 @@ use crate::models::{
     ServerInput, ServerView, TelegramSettingsInput, TelegramSettingsView, ThemeInput, ThemeView,
 };
 use anyhow::{Context, Result};
-use sqlx::{Any, Row, Transaction};
+use sqlx::any::AnyArguments;
+use sqlx::{Any, Arguments, AssertSqlSafe, Row, Transaction};
 use std::collections::{HashMap, HashSet};
+
+const REMOTE_TASK_ACTIVE_TTL_SECONDS: i64 = 24 * 60 * 60;
+const AGENT_REPORT_MAX_AGE_SECONDS: i64 = 2 * 60 * 60;
+const AGENT_REPORT_MAX_BYTES: usize = 256 * 1024;
+const AGENT_REPORT_MAX_DISKS: usize = 128;
+const AGENT_REPORT_MAX_GPUS: usize = 32;
+const AGENT_REPORT_MAX_LATENCY_RESULTS: usize = 2048;
+const HISTORY_INSERT_BATCH_ROWS: usize = 500;
+const LATENCY_INSERT_BATCH_ROWS: usize = 500;
 
 #[derive(Debug, Clone)]
 pub struct AgentIdentity {
@@ -152,11 +162,12 @@ pub async fn all_server_ids(db: &Database) -> Result<HashSet<String>> {
 pub async fn create_server(db: &Database, input: &ServerInput) -> Result<(String, String)> {
     let id = uuid::Uuid::new_v4().to_string();
     let token = auth::random_token(32);
+    let token_hash = auth::token_hash(&token);
     let timestamp = now();
     let mut transaction = db.pool().begin().await?;
     sqlx::query(db.sql(
         "INSERT INTO servers( \
-         id, token, name, region, group_name, tags, hidden, expires_at, traffic_limit, \
+         id, token_hash, name, region, group_name, tags, hidden, expires_at, traffic_limit, \
          traffic_limit_type, price, billing_cycle, currency, auto_renewal, last_ip, ip_v4, ip_v6, \
          network_interface, reset_day, report_interval, collect_interval, rx_correction, \
          tx_correction, agent_mirror, offline_notify_disabled, auto_update, created_at, updated_at, \
@@ -164,7 +175,7 @@ pub async fn create_server(db: &Database, input: &ServerInput) -> Result<(String
          ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM servers))",
     ))
     .bind(&id)
-    .bind(&token)
+    .bind(&token_hash)
     .bind(input.name.trim())
     .bind(input.region.trim())
     .bind(input.group_name.trim())
@@ -273,9 +284,20 @@ pub async fn reorder_servers(db: &Database, ids: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub async fn server_token(db: &Database, id: &str) -> Result<Option<String>> {
+pub async fn rotate_server_token(db: &Database, id: &str) -> Result<Option<String>> {
+    let token = auth::random_token(32);
+    let result = sqlx::query(db.sql("UPDATE servers SET token_hash=?, updated_at=? WHERE id=?"))
+        .bind(auth::token_hash(&token))
+        .bind(now())
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok((result.rows_affected() > 0).then_some(token))
+}
+
+pub async fn server_name(db: &Database, id: &str) -> Result<Option<String>> {
     Ok(
-        sqlx::query_scalar::<_, String>(db.sql("SELECT token FROM servers WHERE id=?"))
+        sqlx::query_scalar::<_, String>(db.sql("SELECT name FROM servers WHERE id=?"))
             .bind(id)
             .fetch_optional(db.pool())
             .await?,
@@ -285,9 +307,9 @@ pub async fn server_token(db: &Database, id: &str) -> Result<Option<String>> {
 pub async fn agent_identity(db: &Database, token: &str) -> Result<Option<AgentIdentity>> {
     let row = sqlx::query(db.sql(
         "SELECT id, hidden, report_interval, collect_interval, reset_day, rx_correction, \
-         tx_correction FROM servers WHERE token=?",
+         tx_correction FROM servers WHERE token_hash=?",
     ))
-    .bind(token)
+    .bind(auth::token_hash(token))
     .fetch_optional(db.pool())
     .await?;
     row.map(|row| {
@@ -340,8 +362,9 @@ pub async fn save_agent_batch(
     let current = now();
     reports.retain(|report| {
         report.timestamp > 0
-            && report.timestamp >= current - 7 * 86_400
+            && report.timestamp >= current - AGENT_REPORT_MAX_AGE_SECONDS
             && report.timestamp <= current + 300
+            && valid_agent_report(report, current)
     });
     if reports.is_empty() {
         anyhow::bail!("report batch contains no valid samples");
@@ -382,15 +405,9 @@ pub async fn save_agent_batch(
     let mut traffic = load_traffic_state(db, &mut transaction, &identity.server_id).await?;
     for report in &mut reports {
         apply_traffic(report, &mut traffic, identity);
-        save_history_row(db, &mut transaction, &identity.server_id, report).await?;
-        save_latency_rows(
-            db,
-            &mut transaction,
-            &identity.server_id,
-            &report.latency_results,
-        )
-        .await?;
     }
+    save_history_rows(db, &mut transaction, &identity.server_id, &reports).await?;
+    save_latency_rows(db, &mut transaction, &identity.server_id, &reports).await?;
     let latest = reports.last().context("report batch became empty")?;
     let persisted_through = latest.timestamp;
     let latest_json = serde_json::to_string(latest)?;
@@ -437,6 +454,96 @@ pub async fn save_agent_batch(
         reports,
         persisted_through,
     })
+}
+
+fn valid_agent_report(report: &AgentReport, current: i64) -> bool {
+    fn finite_between(value: f64, minimum: f64, maximum: f64) -> bool {
+        value.is_finite() && (minimum..=maximum).contains(&value)
+    }
+
+    fn valid_capacity(used: i64, total: i64) -> bool {
+        used >= 0 && total >= 0 && (total == 0 || used <= total)
+    }
+
+    if !finite_between(report.cpu, 0.0, 100.0)
+        || !finite_between(report.load1, 0.0, 1_000_000.0)
+        || !finite_between(report.load5, 0.0, 1_000_000.0)
+        || !finite_between(report.load15, 0.0, 1_000_000.0)
+        || !valid_capacity(report.mem_used, report.mem_total)
+        || !valid_capacity(report.swap_used, report.swap_total)
+        || !valid_capacity(report.disk_used, report.disk_total)
+        || !finite_between(report.net_in, 0.0, 1.0e18)
+        || !finite_between(report.net_out, 0.0, 1.0e18)
+        || report.net_rx_total < 0
+        || report.net_tx_total < 0
+        || report.uptime < 0
+        || report.processes < 0
+        || report.tcp_connections < 0
+        || report.udp_connections < 0
+        || !(0..=1_000_000).contains(&report.cpu_cores)
+        || !finite_between(report.gpu_usage, 0.0, 100.0)
+        || !finite_between(report.disk_read_bps, 0.0, 1.0e18)
+        || !finite_between(report.disk_write_bps, 0.0, 1.0e18)
+        || !finite_between(report.disk_read_iops, 0.0, 1.0e12)
+        || !finite_between(report.disk_write_iops, 0.0, 1.0e12)
+        || !finite_between(report.disk_await_ms, 0.0, 86_400_000.0)
+        || !finite_between(report.disk_utilization, 0.0, 100.0)
+        || report.cpu_model.len() > 512
+        || report.os.len() > 128
+        || report.kernel.len() > 256
+        || report.arch.len() > 64
+        || report.virtualization.len() > 128
+        || report.gpu_model.len() > 512
+        || report.agent_version.len() > 64
+        || report
+            .ip_v4
+            .parse::<std::net::Ipv4Addr>()
+            .is_err_and(|_| !report.ip_v4.is_empty())
+        || report
+            .ip_v6
+            .parse::<std::net::Ipv6Addr>()
+            .is_err_and(|_| !report.ip_v6.is_empty())
+        || report.disks.len() > AGENT_REPORT_MAX_DISKS
+        || report.gpus.len() > AGENT_REPORT_MAX_GPUS
+        || report.latency_results.len() > AGENT_REPORT_MAX_LATENCY_RESULTS
+    {
+        return false;
+    }
+
+    if report.disks.iter().any(|disk| {
+        disk.name.len() > 128
+            || disk.mount_point.len() > 512
+            || !valid_capacity(disk.used, disk.total)
+            || !finite_between(disk.read_bps, 0.0, 1.0e18)
+            || !finite_between(disk.write_bps, 0.0, 1.0e18)
+            || !finite_between(disk.read_iops, 0.0, 1.0e12)
+            || !finite_between(disk.write_iops, 0.0, 1.0e12)
+            || !finite_between(disk.await_ms, 0.0, 86_400_000.0)
+            || !finite_between(disk.utilization, 0.0, 100.0)
+    }) || report.gpus.iter().any(|gpu| {
+        gpu.model.len() > 512
+            || gpu
+                .usage
+                .is_some_and(|usage| !finite_between(usage, 0.0, 100.0))
+            || !valid_capacity(gpu.memory_used, gpu.memory_total)
+    }) {
+        return false;
+    }
+
+    let mut latency_ids = HashSet::with_capacity(report.latency_results.len());
+    if report.latency_results.iter().any(|latency| {
+        latency.task_id.is_empty()
+            || latency.task_id.len() > 80
+            || !latency_ids.insert(&latency.task_id)
+            || latency.timestamp < current - AGENT_REPORT_MAX_AGE_SECONDS
+            || latency.timestamp > current + 300
+            || !finite_between(latency.latency_ms, -1.0, 86_400_000.0)
+            || !finite_between(latency.packet_loss, -1.0, 100.0)
+    }) {
+        return false;
+    }
+
+    serde_json::to_vec(report).is_ok_and(|encoded| encoded.len() <= AGENT_REPORT_MAX_BYTES)
 }
 
 async fn load_traffic_state(
@@ -529,59 +636,88 @@ async fn save_traffic_state(
     Ok(())
 }
 
-async fn save_history_row(
+async fn save_history_rows(
     db: &Database,
     transaction: &mut Transaction<'_, Any>,
     server_id: &str,
-    report: &AgentReport,
+    reports: &[AgentReport],
 ) -> Result<()> {
-    sqlx::query(db.sql(
-        "INSERT INTO metric_history(server_id, timestamp, cpu, load1, load5, load15, mem_used, \
-         mem_total, swap_used, swap_total, disk_used, disk_total, net_in, net_out, net_rx_total, \
-         net_tx_total, uptime, processes, tcp_connections, udp_connections, gpu_usage, \
-         disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops, disk_await_ms, \
-         disk_utilization) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-         ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, timestamp) DO UPDATE SET cpu=excluded.cpu, \
-         load1=excluded.load1, load5=excluded.load5, load15=excluded.load15, \
-         mem_used=excluded.mem_used, mem_total=excluded.mem_total, swap_used=excluded.swap_used, \
-         swap_total=excluded.swap_total, disk_used=excluded.disk_used, disk_total=excluded.disk_total, \
-         net_in=excluded.net_in, net_out=excluded.net_out, net_rx_total=excluded.net_rx_total, \
-         net_tx_total=excluded.net_tx_total, uptime=excluded.uptime, processes=excluded.processes, \
-         tcp_connections=excluded.tcp_connections, udp_connections=excluded.udp_connections, \
-         gpu_usage=excluded.gpu_usage, disk_read_bps=excluded.disk_read_bps, \
-         disk_write_bps=excluded.disk_write_bps, disk_read_iops=excluded.disk_read_iops, \
-         disk_write_iops=excluded.disk_write_iops, disk_await_ms=excluded.disk_await_ms, \
-         disk_utilization=excluded.disk_utilization",
-    ))
-    .bind(server_id)
-    .bind(report.timestamp)
-    .bind(report.cpu)
-    .bind(report.load1)
-    .bind(report.load5)
-    .bind(report.load15)
-    .bind(report.mem_used)
-    .bind(report.mem_total)
-    .bind(report.swap_used)
-    .bind(report.swap_total)
-    .bind(report.disk_used)
-    .bind(report.disk_total)
-    .bind(report.net_in)
-    .bind(report.net_out)
-    .bind(report.net_rx_total)
-    .bind(report.net_tx_total)
-    .bind(report.uptime)
-    .bind(report.processes)
-    .bind(report.tcp_connections)
-    .bind(report.udp_connections)
-    .bind(report.gpu_usage)
-    .bind(report.disk_read_bps)
-    .bind(report.disk_write_bps)
-    .bind(report.disk_read_iops)
-    .bind(report.disk_write_iops)
-    .bind(report.disk_await_ms)
-    .bind(report.disk_utilization)
-    .execute(&mut **transaction)
-    .await?;
+    for batch in reports.chunks(HISTORY_INSERT_BATCH_ROWS) {
+        let mut arguments = AnyArguments::default();
+        let mut parameter_index = 1_usize;
+        let mut value_groups = Vec::with_capacity(batch.len());
+        for report in batch {
+            let mut placeholders = Vec::with_capacity(27);
+            for _ in 0..27 {
+                placeholders.push(if db.is_postgres() {
+                    let placeholder = format!("${parameter_index}");
+                    parameter_index += 1;
+                    placeholder
+                } else {
+                    "?".to_string()
+                });
+            }
+            value_groups.push(format!("({})", placeholders.join(",")));
+            macro_rules! add {
+                ($value:expr) => {
+                    arguments.add($value).map_err(|error| {
+                        anyhow::anyhow!("无法编码历史指标数据库字段：{error}")
+                    })?
+                };
+            }
+            add!(server_id.to_string());
+            add!(report.timestamp);
+            add!(report.cpu);
+            add!(report.load1);
+            add!(report.load5);
+            add!(report.load15);
+            add!(report.mem_used);
+            add!(report.mem_total);
+            add!(report.swap_used);
+            add!(report.swap_total);
+            add!(report.disk_used);
+            add!(report.disk_total);
+            add!(report.net_in);
+            add!(report.net_out);
+            add!(report.net_rx_total);
+            add!(report.net_tx_total);
+            add!(report.uptime);
+            add!(report.processes);
+            add!(report.tcp_connections);
+            add!(report.udp_connections);
+            add!(report.gpu_usage);
+            add!(report.disk_read_bps);
+            add!(report.disk_write_bps);
+            add!(report.disk_read_iops);
+            add!(report.disk_write_iops);
+            add!(report.disk_await_ms);
+            add!(report.disk_utilization);
+        }
+        let sql = format!(
+            "INSERT INTO metric_history(server_id, timestamp, cpu, load1, load5, load15, \
+             mem_used, mem_total, swap_used, swap_total, disk_used, disk_total, net_in, net_out, \
+             net_rx_total, net_tx_total, uptime, processes, tcp_connections, udp_connections, \
+             gpu_usage, disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops, \
+             disk_await_ms, disk_utilization) VALUES {} \
+             ON CONFLICT(server_id, timestamp) DO UPDATE SET cpu=excluded.cpu, \
+             load1=excluded.load1, load5=excluded.load5, load15=excluded.load15, \
+             mem_used=excluded.mem_used, mem_total=excluded.mem_total, \
+             swap_used=excluded.swap_used, swap_total=excluded.swap_total, \
+             disk_used=excluded.disk_used, disk_total=excluded.disk_total, net_in=excluded.net_in, \
+             net_out=excluded.net_out, net_rx_total=excluded.net_rx_total, \
+             net_tx_total=excluded.net_tx_total, uptime=excluded.uptime, \
+             processes=excluded.processes, tcp_connections=excluded.tcp_connections, \
+             udp_connections=excluded.udp_connections, gpu_usage=excluded.gpu_usage, \
+             disk_read_bps=excluded.disk_read_bps, disk_write_bps=excluded.disk_write_bps, \
+             disk_read_iops=excluded.disk_read_iops, disk_write_iops=excluded.disk_write_iops, \
+             disk_await_ms=excluded.disk_await_ms, disk_utilization=excluded.disk_utilization",
+            value_groups.join(",")
+        );
+        // SQL identifiers are fixed above; only generated placeholders are interpolated.
+        sqlx::query_with(AssertSqlSafe(sql), arguments)
+            .execute(&mut **transaction)
+            .await?;
+    }
     Ok(())
 }
 
@@ -589,31 +725,64 @@ async fn save_latency_rows(
     db: &Database,
     transaction: &mut Transaction<'_, Any>,
     server_id: &str,
-    results: &[AgentLatencyResult],
+    reports: &[AgentReport],
 ) -> Result<()> {
-    for result in results {
-        if result.task_id.is_empty()
-            || result.timestamp <= 0
-            || !result.latency_ms.is_finite()
-            || !result.packet_loss.is_finite()
+    let mut unique = HashMap::<(String, i64), AgentLatencyResult>::new();
+    for result in reports.iter().flat_map(|report| &report.latency_results) {
+        if !result.task_id.is_empty()
+            && result.timestamp > 0
+            && result.latency_ms.is_finite()
+            && result.packet_loss.is_finite()
         {
-            continue;
+            unique.insert((result.task_id.clone(), result.timestamp), result.clone());
         }
-        sqlx::query(db.sql(
-            "INSERT INTO latency_results(task_id, server_id, timestamp, latency_ms, packet_loss) \
-             SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM latency_task_servers \
-             WHERE task_id=? AND server_id=?) ON CONFLICT(task_id, server_id, timestamp) \
-             DO UPDATE SET latency_ms=excluded.latency_ms, packet_loss=excluded.packet_loss",
-        ))
-        .bind(&result.task_id)
-        .bind(server_id)
-        .bind(result.timestamp)
-        .bind(result.latency_ms)
-        .bind(result.packet_loss)
-        .bind(&result.task_id)
-        .bind(server_id)
-        .execute(&mut **transaction)
-        .await?;
+    }
+    let results = unique.into_values().collect::<Vec<_>>();
+    for batch in results.chunks(LATENCY_INSERT_BATCH_ROWS) {
+        let mut arguments = AnyArguments::default();
+        let mut parameter_index = 1_usize;
+        let mut value_groups = Vec::with_capacity(batch.len());
+        for result in batch {
+            let mut placeholders = Vec::with_capacity(5);
+            for _ in 0..5 {
+                placeholders.push(if db.is_postgres() {
+                    let placeholder = format!("${parameter_index}");
+                    parameter_index += 1;
+                    placeholder
+                } else {
+                    "?".to_string()
+                });
+            }
+            value_groups.push(format!("({})", placeholders.join(",")));
+            for value in [result.task_id.clone(), server_id.to_string()] {
+                arguments
+                    .add(value)
+                    .map_err(|error| anyhow::anyhow!("无法编码延迟结果数据库字段：{error}"))?;
+            }
+            arguments
+                .add(result.timestamp)
+                .map_err(|error| anyhow::anyhow!("无法编码延迟结果数据库字段：{error}"))?;
+            arguments
+                .add(result.latency_ms)
+                .map_err(|error| anyhow::anyhow!("无法编码延迟结果数据库字段：{error}"))?;
+            arguments
+                .add(result.packet_loss)
+                .map_err(|error| anyhow::anyhow!("无法编码延迟结果数据库字段：{error}"))?;
+        }
+        let sql = format!(
+            "WITH incoming(task_id, server_id, timestamp, latency_ms, packet_loss) AS (VALUES {}) \
+             INSERT INTO latency_results(task_id, server_id, timestamp, latency_ms, packet_loss) \
+             SELECT task_id, server_id, timestamp, latency_ms, packet_loss FROM incoming \
+             WHERE EXISTS (SELECT 1 FROM latency_task_servers assigned \
+               WHERE assigned.task_id=incoming.task_id AND assigned.server_id=incoming.server_id) \
+             ON CONFLICT(task_id, server_id, timestamp) DO UPDATE SET \
+             latency_ms=excluded.latency_ms, packet_loss=excluded.packet_loss",
+            value_groups.join(",")
+        );
+        // SQL identifiers are fixed above; only generated placeholders are interpolated.
+        sqlx::query_with(AssertSqlSafe(sql), arguments)
+            .execute(&mut **transaction)
+            .await?;
     }
     Ok(())
 }
@@ -693,16 +862,40 @@ pub async fn clear_history(db: &Database) -> Result<()> {
     Ok(())
 }
 
-pub async fn cleanup_history(db: &Database, retention_days: i64) -> Result<()> {
-    let cutoff = now() - retention_days.clamp(1, 3650) * 86_400;
+pub async fn cleanup_database(db: &Database, retention_days: i64) -> Result<()> {
+    let current = now();
+    let cutoff = current - retention_days.clamp(1, 3650) * 86_400;
+    let active_task_cutoff = current - REMOTE_TASK_ACTIVE_TTL_SECONDS;
+    let mut transaction = db.pool().begin().await?;
+    sqlx::query(db.sql(
+        "UPDATE remote_tasks SET status='failed', completed_at=?, \
+         result=CASE WHEN result='' THEN '任务等待超过 24 小时，已自动取消' ELSE result END \
+         WHERE status IN ('pending','sent','running') AND requested_at<?",
+    ))
+    .bind(current)
+    .bind(active_task_cutoff)
+    .execute(&mut *transaction)
+    .await?;
     sqlx::query(db.sql("DELETE FROM metric_history WHERE timestamp<?"))
         .bind(cutoff)
-        .execute(db.pool())
+        .execute(&mut *transaction)
         .await?;
     sqlx::query(db.sql("DELETE FROM latency_results WHERE timestamp<?"))
         .bind(cutoff)
-        .execute(db.pool())
+        .execute(&mut *transaction)
         .await?;
+    sqlx::query(db.sql(
+        "DELETE FROM remote_tasks WHERE status IN ('success','failed') \
+         AND completed_at IS NOT NULL AND completed_at<?",
+    ))
+    .bind(cutoff)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(db.sql("DELETE FROM alert_states WHERE active=0 AND updated_at<?"))
+        .bind(cutoff)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -1011,7 +1204,7 @@ pub async fn latency_history(
 
 fn latency_history_bucket_seconds(hours: i64, task_count: i64) -> i64 {
     let hours = hours.clamp(1, 24 * 365);
-    let task_count = task_count.clamp(1, 128);
+    let task_count = task_count.max(1);
     let base = match hours {
         1 => 60,
         2..=4 => 120,
@@ -1343,14 +1536,28 @@ pub async fn remote_task(db: &Database, id: &str) -> Result<Option<RemoteTaskInf
 }
 
 pub async fn pending_remote_tasks(db: &Database, server_id: &str) -> Result<Vec<RemoteTaskInfo>> {
+    let current = now();
+    let cutoff = current - REMOTE_TASK_ACTIVE_TTL_SECONDS;
+    let mut transaction = db.pool().begin().await?;
+    sqlx::query(db.sql(
+        "UPDATE remote_tasks SET status='failed', completed_at=?, \
+         result=CASE WHEN result='' THEN '任务等待超过 24 小时，已自动取消' ELSE result END \
+         WHERE server_id=? AND status='pending' AND requested_at<?",
+    ))
+    .bind(current)
+    .bind(server_id)
+    .bind(cutoff)
+    .execute(&mut *transaction)
+    .await?;
     let rows = sqlx::query(db.sql(
         "SELECT id, server_id, command, status, requested_by, requested_at, started_at, \
          completed_at, result, exit_code FROM remote_tasks WHERE server_id=? AND status='pending' \
          ORDER BY requested_at LIMIT 50",
     ))
     .bind(server_id)
-    .fetch_all(db.pool())
+    .fetch_all(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     rows.into_iter()
         .map(remote_task_from_row)
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -1397,7 +1604,7 @@ pub async fn update_remote_task_result(
 ) -> Result<bool> {
     let result = sqlx::query(db.sql(
         "UPDATE remote_tasks SET status=?, result=?, exit_code=?, completed_at=? \
-         WHERE id=? AND server_id=?",
+         WHERE id=? AND server_id=? AND status IN ('pending','sent','running')",
     ))
     .bind(status)
     .bind(result)
@@ -1685,12 +1892,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validates_agent_report_bounds() {
+        let current = now();
+        let mut report = AgentReport {
+            timestamp: current,
+            ..AgentReport::default()
+        };
+        assert!(valid_agent_report(&report, current));
+
+        report.cpu = f64::NAN;
+        assert!(!valid_agent_report(&report, current));
+        report.cpu = 10.0;
+        report.cpu_model = "x".repeat(513);
+        assert!(!valid_agent_report(&report, current));
+        report.cpu_model.clear();
+        report.latency_results = (0..=AGENT_REPORT_MAX_LATENCY_RESULTS)
+            .map(|index| AgentLatencyResult {
+                task_id: format!("task-{index}"),
+                timestamp: current,
+                latency_ms: 10.0,
+                packet_loss: 0.0,
+            })
+            .collect();
+        assert!(!valid_agent_report(&report, current));
+    }
+
     #[tokio::test]
     async fn sqlite_preserves_large_traffic_limits() {
         let db = super::super::connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();
         let expected = 100_i64 * 1024 * 1024 * 1024;
         let (id, _) = create_server(&db, &server_input(expected)).await.unwrap();
+        assert_eq!(
+            server_name(&db, &id).await.unwrap().as_deref(),
+            Some("Large traffic node")
+        );
         let raw =
             sqlx::query_scalar::<_, i64>(db.sql("SELECT traffic_limit FROM servers WHERE id=?"))
                 .bind(&id)
@@ -1705,5 +1942,148 @@ mod tests {
             .find(|server| server.id == id)
             .unwrap();
         assert_eq!(server.traffic_limit, expected);
+    }
+
+    #[tokio::test]
+    async fn sqlite_persists_large_agent_batches() {
+        let db = super::super::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let (id, token) = create_server(&db, &server_input(0)).await.unwrap();
+        let latency_task_id = create_latency_task(
+            &db,
+            &LatencyTaskInput {
+                name: "Batch latency".to_string(),
+                task_type: "tcp".to_string(),
+                target: "example.com".to_string(),
+                port: Some(443),
+                interval_seconds: 60,
+                default_enabled: false,
+                server_ids: vec![id.clone()],
+            },
+        )
+        .await
+        .unwrap();
+        let identity = agent_identity(&db, &token).await.unwrap().unwrap();
+        let start = now() - 600;
+        let reports = (0..600)
+            .map(|offset| AgentReport {
+                timestamp: start + offset,
+                cpu: offset as f64 / 10.0,
+                latency_results: vec![AgentLatencyResult {
+                    task_id: latency_task_id.clone(),
+                    timestamp: start + offset,
+                    latency_ms: 10.0 + offset as f64 / 100.0,
+                    packet_loss: 0.0,
+                }],
+                ..AgentReport::default()
+            })
+            .collect::<Vec<_>>();
+
+        let result = save_agent_batch(&db, &identity, "large-batch", &reports, "127.0.0.1")
+            .await
+            .unwrap();
+        let rows = sqlx::query_scalar::<_, i64>(
+            db.sql("SELECT COUNT(*) FROM metric_history WHERE server_id=?"),
+        )
+        .bind(&id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let latency_rows = sqlx::query_scalar::<_, i64>(
+            db.sql("SELECT COUNT(*) FROM latency_results WHERE server_id=?"),
+        )
+        .bind(&id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(result.reports.len(), 600);
+        assert_eq!(rows, 600);
+        assert_eq!(latency_rows, 600);
+    }
+
+    #[tokio::test]
+    async fn database_cleanup_expires_tasks_and_removes_retained_data() {
+        let db = super::super::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let (server_id, _) = create_server(&db, &server_input(0)).await.unwrap();
+        let old = now() - 3 * 86_400;
+        sqlx::query(
+            "INSERT INTO remote_tasks(\
+             id, server_id, command, status, requested_by, requested_at, completed_at, result\
+             ) VALUES \
+             ('pending-old', ?, 'uptime', 'pending', 'admin', ?, NULL, ''), \
+             ('success-old', ?, 'uptime', 'success', 'admin', ?, ?, 'done')",
+        )
+        .bind(&server_id)
+        .bind(old)
+        .bind(&server_id)
+        .bind(old)
+        .bind(old)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO alert_states(state_key, active, updated_at, details_json) VALUES \
+             ('inactive-old', 0, ?, '{}'), ('active-old', 1, ?, '{}')",
+        )
+        .bind(old)
+        .bind(old)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        cleanup_database(&db, 1).await.unwrap();
+
+        let pending_status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM remote_tasks WHERE id='pending-old'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let completed_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM remote_tasks WHERE id='success-old'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let inactive_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM alert_states WHERE state_key='inactive-old'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        let active_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM alert_states WHERE state_key='active-old'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(pending_status, "failed");
+        assert_eq!(completed_count, 0);
+        assert_eq!(inactive_count, 0);
+        assert_eq!(active_count, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_migration_contains_optimized_indexes() {
+        let db = super::super::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let indexes = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name IN (\
+             'metric_history_time',\
+             'latency_results_time',\
+             'remote_tasks_server_status_time')",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<HashSet<_>>();
+        assert_eq!(indexes.len(), 3);
+    }
+
+    #[test]
+    fn latency_history_bucket_scales_beyond_128_tasks() {
+        assert!(latency_history_bucket_seconds(1, 256) > latency_history_bucket_seconds(1, 128));
     }
 }

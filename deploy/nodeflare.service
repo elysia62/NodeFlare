@@ -5,16 +5,27 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/nodeflare/data/server
+WorkingDirectory=/etc/nodeflare
 ExecStart=/opt/nodeflare/nodeflare --config /etc/nodeflare/config.toml
 Restart=on-failure
 RestartSec=5s
-UMask=0027
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectHome=true
-ProtectSystem=full
-ReadWritePaths=/opt/nodeflare/data/server
+ProtectSystem=strict
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadWritePaths=/etc/nodeflare
 
 [Install]
 WantedBy=multi-user.target

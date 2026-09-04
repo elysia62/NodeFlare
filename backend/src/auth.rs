@@ -1,17 +1,15 @@
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use pbkdf2::pbkdf2_hmac;
-use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 pub const CLIENT_PASSWORD_ROUNDS: u32 = 600_000;
 
 pub fn hash_password(password_derived: &str) -> anyhow::Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
     Ok(Argon2::default()
-        .hash_password(password_derived.as_bytes(), &salt)
+        .hash_password(password_derived.as_bytes())
         .map_err(|error| anyhow::anyhow!(error.to_string()))?
         .to_string())
 }
@@ -37,7 +35,7 @@ pub fn derive_client_password(password: &str, deployment_salt: &str) -> String {
 
 pub fn random_token(bytes: usize) -> String {
     let mut value = vec![0_u8; bytes];
-    rand::rngs::OsRng.fill_bytes(&mut value);
+    rand::fill(&mut value);
     hex::encode(value)
 }
 

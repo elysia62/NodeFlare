@@ -7,15 +7,34 @@ use crate::models::{
     SettingsInput, TelegramSettingsInput, ThemeInput, ThemeUploadInput,
 };
 use axum::Json;
-use axum::body::to_bytes;
-use axum::extract::{Extension, Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE};
+use axum::body::{Body, to_bytes};
+use axum::extract::{ConnectInfo, Extension, Path, Query, Request, State};
+use axum::http::{
+    HeaderMap, HeaderValue, StatusCode,
+    header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, SET_COOKIE},
+};
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use tokio_util::io::ReaderStream;
 use url::Url;
+
+#[derive(Deserialize)]
+pub struct DatabaseRestoreInput {
+    filename: String,
+}
+
+struct DatabaseRestoreFlag<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for DatabaseRestoreFlag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 pub async fn servers_get(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
     let servers = crate::db::queries::list_servers(&state.db, true)
@@ -102,15 +121,16 @@ pub async fn servers_order(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-pub async fn server_token(
+pub async fn server_token_rotate(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiResponse> {
     validate_id(&id)?;
-    let token = crate::db::queries::server_token(&state.db, &id)
+    let token = crate::db::queries::rotate_server_token(&state.db, &id)
         .await
         .map_err(ApiResponse::internal)?
         .ok_or_else(|| ApiResponse::not_found("节点不存在"))?;
+    state.disconnect_agent(&id).await;
     Ok(Json(serde_json::json!({"agent_token": token})).into_response())
 }
 
@@ -123,6 +143,7 @@ pub async fn settings_get(State(state): State<Arc<AppState>>) -> Result<Response
 
 pub async fn settings_patch(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(mut input): Json<SettingsInput>,
@@ -131,17 +152,12 @@ pub async fn settings_patch(
         .await
         .map_err(ApiResponse::internal)?;
     validate_settings(&state, &current, &input).await?;
-    let password_hash = match input
-        .new_password
+    let password_hash = input
+        .new_password_derived
         .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        Some(_) => Some(
-            crate::auth::hash_password(input.new_password_derived.as_deref().unwrap_or_default())
-                .map_err(ApiResponse::internal)?,
-        ),
-        None => None,
-    };
+        .map(crate::auth::hash_password)
+        .transpose()
+        .map_err(ApiResponse::internal)?;
     let next_username = input
         .admin_username
         .as_deref()
@@ -161,9 +177,14 @@ pub async fn settings_patch(
     let credentials_changed = password_hash.is_some() || username_changed;
     let token = if credentials_changed {
         Some(
-            crate::db::create_session(&state.db, &next_username, state.config.session_ttl_hours)
-                .await
-                .map_err(ApiResponse::internal)?,
+            crate::db::create_session(
+                &state.db,
+                &next_username,
+                state.config.session_ttl_hours,
+                &super::auth::session_device(&headers, peer),
+            )
+            .await
+            .map_err(ApiResponse::internal)?,
         )
     } else {
         None
@@ -204,14 +225,6 @@ pub async fn latency_tasks_post(
     Json(input): Json<LatencyTaskInput>,
 ) -> Result<Response, ApiResponse> {
     validate_latency_task(&state, &input).await?;
-    if crate::db::queries::list_latency_tasks(&state.db)
-        .await
-        .map_err(ApiResponse::internal)?
-        .len()
-        >= 128
-    {
-        return Err(ApiResponse::bad_request("最多可创建 128 个延迟任务"));
-    }
     let id = crate::db::queries::create_latency_task(&state.db, &input)
         .await
         .map_err(ApiResponse::internal)?;
@@ -612,7 +625,83 @@ pub async fn database_stats(State(state): State<Arc<AppState>>) -> Result<Respon
     .into_response())
 }
 
+pub async fn database_backup(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+    let _maintenance = state.database_maintenance.lock().await;
+    let archive = crate::backup::export_archive(&state.db)
+        .await
+        .map_err(ApiResponse::internal)?;
+    let disposition =
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", archive.filename))
+            .map_err(ApiResponse::internal)?;
+    let body = Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(archive.file)));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/zip")
+        .header(CONTENT_DISPOSITION, disposition)
+        .header(CONTENT_LENGTH, archive.size)
+        .header(CACHE_CONTROL, "no-store")
+        .body(body)
+        .map_err(ApiResponse::internal)
+}
+
+pub async fn database_restore(
+    State(state): State<Arc<AppState>>,
+    Query(input): Query<DatabaseRestoreInput>,
+    request: Request,
+) -> Result<Response, ApiResponse> {
+    let filename = input.filename.trim();
+    if filename.is_empty()
+        || filename.chars().count() > 255
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.chars().any(char::is_control)
+        || !filename.to_ascii_lowercase().ends_with(".zip")
+    {
+        return Err(ApiResponse::bad_request("请选择有效的数据库备份 ZIP"));
+    }
+    if request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > crate::backup::DATABASE_BACKUP_MAX_BYTES)
+    {
+        return Err(ApiResponse::error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "数据库备份 ZIP 不能超过 512 MiB",
+        ));
+    }
+    let archive = to_bytes(
+        request.into_body(),
+        crate::backup::DATABASE_BACKUP_MAX_BYTES,
+    )
+    .await
+    .map_err(|_| {
+        ApiResponse::error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "数据库备份 ZIP 不能超过 512 MiB",
+        )
+    })?;
+
+    let _maintenance = state.database_maintenance.lock().await;
+    if state.database_restoring.swap(true, Ordering::AcqRel) {
+        return Err(ApiResponse::conflict("数据库正在恢复"));
+    }
+    let _restore_flag = DatabaseRestoreFlag(&state.database_restoring);
+    let agents = std::mem::take(&mut *state.agents.write().await);
+    for connection in agents.into_values() {
+        let _ = connection
+            .sender
+            .try_send(crate::websocket::AgentCommand::Close);
+    }
+    let restored_rows = crate::backup::restore_archive(&state.db, &archive)
+        .await
+        .map_err(|error| ApiResponse::unprocessable(format!("恢复失败：{error}")))?;
+    Ok(Json(serde_json::json!({"restored_rows": restored_rows})).into_response())
+}
+
 pub async fn history_delete(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+    let _maintenance = state.database_maintenance.lock().await;
     crate::db::queries::clear_history(&state.db)
         .await
         .map_err(ApiResponse::internal)?;
@@ -792,19 +881,11 @@ async fn validate_settings(
         return Err(ApiResponse::bad_request("管理员用户名格式无效"));
     }
     if input
-        .new_password
-        .as_ref()
-        .is_some_and(|value| !value.is_empty() && !(8..=128).contains(&value.chars().count()))
-        || input
-            .new_password
-            .as_ref()
-            .is_some_and(|value| !value.is_empty())
-            && input
-                .new_password_derived
-                .as_deref()
-                .is_none_or(|value| !crate::auth::valid_password_derived(value))
+        .new_password_derived
+        .as_deref()
+        .is_some_and(|value| !crate::auth::valid_password_derived(value))
     {
-        return Err(ApiResponse::bad_request("新密码格式无效"));
+        return Err(ApiResponse::bad_request("新密码摘要格式无效"));
     }
     if input.theme_options.as_ref().is_some_and(|value| {
         let Some(object) = value.as_object() else {

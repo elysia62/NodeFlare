@@ -30,7 +30,7 @@ CREATE TABLE servers (
   agent_mirror TEXT NOT NULL DEFAULT '',
   offline_notify_disabled BIGINT NOT NULL DEFAULT 0,
   auto_update BIGINT NOT NULL DEFAULT 1,
-  token TEXT NOT NULL UNIQUE,
+  token_hash TEXT NOT NULL UNIQUE,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL
 );
@@ -85,6 +85,8 @@ CREATE TABLE server_latest_state (
   last_batch_id TEXT NOT NULL DEFAULT ''
 );
 
+CREATE INDEX server_latest_state_time ON server_latest_state(latest_timestamp);
+
 CREATE TABLE admin_2fa (
   username TEXT PRIMARY KEY,
   totp_secret TEXT NOT NULL,
@@ -105,8 +107,14 @@ CREATE TABLE remote_tasks (
   exit_code BIGINT
 );
 
-CREATE INDEX remote_tasks_server ON remote_tasks(server_id, requested_at DESC);
-CREATE INDEX remote_tasks_status ON remote_tasks(status, requested_at DESC);
+CREATE INDEX remote_tasks_server_status_time
+ON remote_tasks(server_id, status, requested_at);
+
+CREATE INDEX remote_tasks_status_completed
+ON remote_tasks(status, completed_at);
+
+CREATE INDEX remote_tasks_status_requested
+ON remote_tasks(status, requested_at);
 
 CREATE TABLE exchange_rates (
   base_currency TEXT PRIMARY KEY,
@@ -118,13 +126,18 @@ CREATE TABLE exchange_rates (
 );
 
 CREATE TABLE sessions (
-  token_hash TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
   username TEXT NOT NULL,
+  ip_address TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
   created_at BIGINT NOT NULL,
+  last_seen_at BIGINT NOT NULL,
   expires_at BIGINT NOT NULL
 );
 
 CREATE INDEX sessions_expires_at ON sessions(expires_at);
+CREATE INDEX sessions_user_activity ON sessions(username, last_seen_at DESC);
 
 CREATE TABLE dashboard_proofs (
   token_hash TEXT PRIMARY KEY,
@@ -159,6 +172,8 @@ CREATE TABLE latency_tasks (
   CHECK((task_type = 'tcp' AND port IS NOT NULL) OR (task_type = 'icmp' AND port IS NULL))
 );
 
+CREATE INDEX latency_tasks_sort ON latency_tasks(sort_order, created_at);
+
 CREATE TABLE latency_task_servers (
   task_id TEXT NOT NULL REFERENCES latency_tasks(id) ON DELETE CASCADE,
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -178,6 +193,7 @@ CREATE TABLE latency_results (
 );
 
 CREATE INDEX latency_results_server_time ON latency_results(server_id, timestamp DESC);
+CREATE INDEX latency_results_time ON latency_results(timestamp);
 
 CREATE TABLE alert_rules (
   id TEXT PRIMARY KEY,
@@ -191,11 +207,15 @@ CREATE TABLE alert_rules (
   updated_at BIGINT NOT NULL
 );
 
+CREATE INDEX alert_rules_created_at ON alert_rules(created_at);
+
 CREATE TABLE alert_rule_servers (
   rule_id TEXT NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE,
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
   PRIMARY KEY(rule_id, server_id)
 );
+
+CREATE INDEX alert_rule_servers_server ON alert_rule_servers(server_id, rule_id);
 
 CREATE TABLE alert_states (
   state_key TEXT PRIMARY KEY,
@@ -203,6 +223,8 @@ CREATE TABLE alert_states (
   updated_at BIGINT NOT NULL,
   details_json TEXT NOT NULL DEFAULT '{}'
 );
+
+CREATE INDEX alert_states_active_time ON alert_states(active, updated_at);
 
 CREATE TABLE notification_telegram (
   id BIGINT PRIMARY KEY CHECK(id = 1),

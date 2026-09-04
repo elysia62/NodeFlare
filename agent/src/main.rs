@@ -11,9 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-#[cfg(target_os = "windows")]
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
@@ -43,7 +41,10 @@ const LATEST_RELEASE_API: &str = "https://api.github.com/repos/imengying/NodeFla
 const PROBE_ATTEMPTS: usize = 4;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_LATENCY_TASKS: usize = 128;
+const REMOTE_TASK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const REMOTE_STREAM_OUTPUT_BYTES: u64 = 512 * 1024;
+const REMOTE_RESULT_OUTPUT_BYTES: usize = 900 * 1024;
+const REMOTE_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const LATENCY_WORKERS: usize = 4;
 const MAX_PENDING_LATENCY_RESULTS: usize = 4096;
 const MAX_REPORT_AGE_SECONDS: i64 = 7_000;
@@ -95,7 +96,7 @@ struct CliOptions {
     endpoint: String,
     /// Agent token
     #[arg(short = 't', value_name = "TOKEN")]
-    token: String,
+    token: Option<String>,
     /// Initial report interval in seconds (15-3600)
     #[arg(short = 'i', value_name = "SECONDS", default_value_t = 60)]
     interval: u64,
@@ -127,7 +128,7 @@ struct LatencyResult {
 }
 
 struct LatencyExecutor {
-    task_tx: mpsc::SyncSender<LatencyTask>,
+    task_tx: mpsc::Sender<LatencyTask>,
     result_rx: mpsc::Receiver<LatencyResult>,
     in_flight: HashSet<String>,
     stats: Arc<runtime_stats::RuntimeStats>,
@@ -135,7 +136,7 @@ struct LatencyExecutor {
 
 impl LatencyExecutor {
     fn new(stats: Arc<runtime_stats::RuntimeStats>) -> Result<Self> {
-        let (task_tx, task_rx) = mpsc::sync_channel::<LatencyTask>(MAX_LATENCY_TASKS);
+        let (task_tx, task_rx) = mpsc::channel::<LatencyTask>();
         let (result_tx, result_rx) = mpsc::channel();
         let task_rx = Arc::new(Mutex::new(task_rx));
 
@@ -175,12 +176,12 @@ impl LatencyExecutor {
             return false;
         }
         let task_id = task.id.clone();
-        match self.task_tx.try_send(task) {
+        match self.task_tx.send(task) {
             Ok(()) => {
                 self.in_flight.insert(task_id);
                 true
             }
-            Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
+            Err(mpsc::SendError(_)) => {
                 self.stats.latency_queue_rejected();
                 false
             }
@@ -1707,7 +1708,11 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
     if !(15..=3600).contains(&interval) {
         return Err("interval must be between 15 and 3600 seconds".into());
     }
-    let token = options.token.clone();
+    let token = options
+        .token
+        .clone()
+        .or_else(|| env::var("NODEFLARE_AGENT_TOKEN").ok())
+        .unwrap_or_default();
     let endpoint = options.endpoint.clone();
     if token.is_empty() || token.len() > 512 || token.chars().any(char::is_whitespace) {
         return Err("token is invalid".into());
@@ -1786,7 +1791,7 @@ struct LiveAck {
     persistence_error: bool,
     #[serde(rename = "persistedThroughTs")]
     persisted_through_ts: i64,
-    #[serde(rename = "nextD1WriteAfterMs")]
+    #[serde(rename = "nextPersistAfterMs")]
     next_persist_after_ms: u64,
     #[serde(rename = "nextWssReportAfterMs")]
     next_wss_report_after_ms: u64,
@@ -1822,59 +1827,294 @@ struct TaskResultMessage {
     exit_code: Option<i64>,
 }
 
-fn execute_remote_task(task: &RemoteTaskMessage) -> TaskResultMessage {
+#[derive(Default)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn capture_remote_output<R>(reader: R) -> mpsc::Receiver<CapturedOutput>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut reader = reader.take(REMOTE_STREAM_OUTPUT_BYTES + 1);
+        let _ = reader.read_to_end(&mut bytes);
+        let truncated = bytes.len() > REMOTE_STREAM_OUTPUT_BYTES as usize;
+        bytes.truncate(REMOTE_STREAM_OUTPUT_BYTES as usize);
+        let _ = sender.send(CapturedOutput { bytes, truncated });
+    });
+    receiver
+}
+
+fn terminate_remote_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{}", child.id());
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", process_group.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn receive_remote_output(
+    receiver: &mpsc::Receiver<CapturedOutput>,
+    child: &mut Child,
+) -> CapturedOutput {
+    match receiver.recv_timeout(REMOTE_OUTPUT_DRAIN_TIMEOUT) {
+        Ok(output) => output,
+        Err(_) => {
+            // A background descendant can keep the inherited pipe open after
+            // the shell exits. End the task's process group so result
+            // collection itself cannot hang the Agent.
+            terminate_remote_process_tree(child);
+            receiver
+                .recv_timeout(REMOTE_OUTPUT_DRAIN_TIMEOUT)
+                .unwrap_or_default()
+        }
+    }
+}
+
+fn remote_result_text(stdout: CapturedOutput, stderr: CapturedOutput) -> String {
+    let truncated = stdout.truncated || stderr.truncated;
+    let stdout = String::from_utf8_lossy(&stdout.bytes);
+    let stderr = String::from_utf8_lossy(&stderr.bytes);
+    let mut combined = if stderr.is_empty() {
+        stdout.trim().to_string()
+    } else if stdout.is_empty() {
+        stderr.trim().to_string()
+    } else {
+        format!("{}\n{}", stdout.trim(), stderr.trim())
+    };
+    let result_truncated = combined.len() > REMOTE_RESULT_OUTPUT_BYTES;
+    if result_truncated {
+        let mut end = REMOTE_RESULT_OUTPUT_BYTES;
+        while !combined.is_char_boundary(end) {
+            end -= 1;
+        }
+        combined.truncate(end);
+    }
+    if truncated || result_truncated {
+        combined.push_str("\n[输出已截断]");
+    }
+    combined
+}
+
+fn wait_for_remote_child(
+    child: &mut Child,
+    timeout: Duration,
+) -> io::Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+}
+
+fn execute_remote_task_with_timeout(
+    task: &RemoteTaskMessage,
+    timeout: Duration,
+) -> TaskResultMessage {
     let task_id = task.task_id.clone();
 
-    let (shell, args) = if !task.command.is_empty() {
-        #[cfg(unix)]
-        {
-            ("sh", vec!["-c", task.command.as_str()])
-        }
-        #[cfg(target_os = "windows")]
-        {
-            ("cmd.exe", vec!["/C", task.command.as_str()])
-        }
-    } else {
+    if task.command.trim().is_empty() || task.command.len() > 16_384 {
         return TaskResultMessage {
             message_type: "task_result".to_string(),
             task_id,
             status: "failed".to_string(),
-            result: "No command provided".to_string(),
+            result: "命令为空或长度超出限制".to_string(),
+            exit_code: Some(-1),
+        };
+    }
+
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = Command::new("sh");
+        command.args(["-c", task.command.as_str()]);
+        command.process_group(0);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/C", task.command.as_str()]);
+        command
+    };
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return TaskResultMessage {
+                message_type: "task_result".to_string(),
+                task_id,
+                status: "failed".to_string(),
+                result: format!("无法启动命令：{error}"),
+                exit_code: Some(-1),
+            };
+        }
+    };
+    let stdout = capture_remote_output(child.stdout.take().expect("stdout is piped"));
+    let stderr = capture_remote_output(child.stderr.take().expect("stderr is piped"));
+
+    let status = match wait_for_remote_child(&mut child, timeout) {
+        Ok(Some(status)) => Some(status),
+        Ok(None) => {
+            terminate_remote_process_tree(&mut child);
+            None
+        }
+        Err(error) => {
+            terminate_remote_process_tree(&mut child);
+            let stdout = receive_remote_output(&stdout, &mut child);
+            let stderr = receive_remote_output(&stderr, &mut child);
+            let output = remote_result_text(stdout, stderr);
+            return TaskResultMessage {
+                message_type: "task_result".to_string(),
+                task_id,
+                status: "failed".to_string(),
+                result: if output.is_empty() {
+                    format!("等待命令结束失败：{error}")
+                } else {
+                    format!("{output}\n等待命令结束失败：{error}")
+                },
+                exit_code: Some(-1),
+            };
+        }
+    };
+    let stdout = receive_remote_output(&stdout, &mut child);
+    let stderr = receive_remote_output(&stderr, &mut child);
+    let output = remote_result_text(stdout, stderr);
+
+    let Some(status) = status else {
+        let timeout_seconds = timeout.as_secs().max(1);
+        return TaskResultMessage {
+            message_type: "task_result".to_string(),
+            task_id,
+            status: "failed".to_string(),
+            result: if output.is_empty() {
+                format!("命令执行超过 {timeout_seconds} 秒，已终止")
+            } else {
+                format!("{output}\n命令执行超过 {timeout_seconds} 秒，已终止")
+            },
             exit_code: Some(-1),
         };
     };
 
-    match Command::new(shell).args(&args).output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let combined = if stderr.is_empty() {
-                stdout.to_string()
-            } else {
-                format!("{}\n{}", stdout.trim(), stderr.trim())
-            };
+    TaskResultMessage {
+        message_type: "task_result".to_string(),
+        task_id,
+        status: if status.success() {
+            "success"
+        } else {
+            "failed"
+        }
+        .to_string(),
+        result: output,
+        exit_code: status.code().map(i64::from),
+    }
+}
 
-            TaskResultMessage {
-                message_type: "task_result".to_string(),
-                task_id,
-                status: if output.status.success() {
-                    "success"
-                } else {
-                    "failed"
+fn execute_remote_task(task: &RemoteTaskMessage) -> TaskResultMessage {
+    execute_remote_task_with_timeout(task, REMOTE_TASK_TIMEOUT)
+}
+
+struct RemoteExecutor {
+    task_tx: mpsc::SyncSender<RemoteTaskMessage>,
+    result_rx: mpsc::Receiver<TaskResultMessage>,
+    seen: HashSet<String>,
+    seen_order: VecDeque<String>,
+}
+
+impl RemoteExecutor {
+    fn new() -> Result<Self> {
+        let (task_tx, task_rx) = mpsc::sync_channel::<RemoteTaskMessage>(16);
+        let (result_tx, result_rx) = mpsc::channel::<TaskResultMessage>();
+        thread::Builder::new()
+            .name("nodeflare-remote".to_string())
+            .spawn(move || {
+                while let Ok(task) = task_rx.recv() {
+                    if result_tx.send(execute_remote_task(&task)).is_err() {
+                        return;
+                    }
                 }
-                .to_string(),
-                result: combined.trim().to_string(),
-                exit_code: output.status.code().map(|c| c as i64),
+            })?;
+        Ok(Self {
+            task_tx,
+            result_rx,
+            seen: HashSet::new(),
+            seen_order: VecDeque::new(),
+        })
+    }
+
+    fn enqueue(&mut self, task: RemoteTaskMessage) -> Option<TaskResultMessage> {
+        if self.seen.contains(&task.task_id) {
+            return None;
+        }
+        let task_id = task.task_id.clone();
+        self.seen.insert(task_id.clone());
+        self.seen_order.push_back(task_id.clone());
+        while self.seen_order.len() > 1024 {
+            if let Some(expired) = self.seen_order.pop_front() {
+                self.seen.remove(&expired);
             }
         }
-        Err(error) => TaskResultMessage {
-            message_type: "task_result".to_string(),
-            task_id,
-            status: "failed".to_string(),
-            result: format!("Execution error: {}", error),
-            exit_code: Some(-1),
-        },
+        match self.task_tx.try_send(task) {
+            Ok(()) => None,
+            Err(mpsc::TrySendError::Full(_)) => Some(TaskResultMessage {
+                message_type: "task_result".to_string(),
+                task_id,
+                status: "failed".to_string(),
+                result: "远程命令队列已满，请稍后重试".to_string(),
+                exit_code: Some(-1),
+            }),
+            Err(mpsc::TrySendError::Disconnected(_)) => Some(TaskResultMessage {
+                message_type: "task_result".to_string(),
+                task_id,
+                status: "failed".to_string(),
+                result: "远程命令执行线程不可用".to_string(),
+                exit_code: Some(-1),
+            }),
+        }
     }
+
+    fn drain(&self) -> impl Iterator<Item = TaskResultMessage> + '_ {
+        self.result_rx.try_iter()
+    }
+}
+
+fn flush_remote_results(
+    socket: &mut LiveSocket,
+    executor: &RemoteExecutor,
+    pending: &mut VecDeque<TaskResultMessage>,
+) -> Result<()> {
+    pending.extend(executor.drain());
+    while let Some(result) = pending.front() {
+        socket.send(Message::Text(serde_json::to_string(result)?.into()))?;
+        pending.pop_front();
+    }
+    Ok(())
 }
 
 fn ack_wss_interval(ack: &LiveAck) -> Duration {
@@ -1882,7 +2122,7 @@ fn ack_wss_interval(ack: &LiveAck) -> Duration {
         .clamp(Duration::from_secs(1), Duration::from_secs(3600))
 }
 
-fn ack_d1_interval(ack: &LiveAck) -> Duration {
+fn ack_persist_interval(ack: &LiveAck) -> Duration {
     Duration::from_millis(ack.next_persist_after_ms)
         .clamp(Duration::from_secs(1), Duration::from_secs(3600))
 }
@@ -1924,7 +2164,12 @@ fn read_live_ack(socket: &mut LiveSocket) -> Result<LiveRead> {
                     let Ok(task) = serde_json::from_value::<RemoteTaskMessage>(value) else {
                         return Ok(LiveRead::Pending);
                     };
-                    if task.message_type != "remote_task" || task.task_id.is_empty() {
+                    if task.message_type != "remote_task"
+                        || task.task_id.is_empty()
+                        || task.task_id.len() > 80
+                        || task.command.trim().is_empty()
+                        || task.command.len() > 16_384
+                    {
                         return Ok(LiveRead::Pending);
                     }
                     Ok(LiveRead::RemoteTask(task))
@@ -1950,6 +2195,8 @@ fn read_live_ack(socket: &mut LiveSocket) -> Result<LiveRead> {
 fn wait_for_live_ack(
     socket: &mut LiveSocket,
     remote_config: &Arc<Mutex<Option<RemoteConfig>>>,
+    remote_executor: &mut RemoteExecutor,
+    pending_remote_results: &mut VecDeque<TaskResultMessage>,
 ) -> Result<LiveRead> {
     let deadline = Instant::now() + LIVE_ACK_READ_TIMEOUT;
     loop {
@@ -1968,10 +2215,8 @@ fn wait_for_live_ack(
                 }
             }
             LiveRead::RemoteTask(task) => {
-                // 执行任务并发送结果
-                let result = execute_remote_task(&task);
-                if let Ok(payload) = serde_json::to_string(&result) {
-                    let _ = socket.send(Message::Text(payload.into()));
+                if let Some(result) = remote_executor.enqueue(task) {
+                    pending_remote_results.push_back(result);
                 }
             }
             LiveRead::Closed => return Ok(LiveRead::Closed),
@@ -2039,6 +2284,14 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
     let mut accepted_through = persisted_through.load(Ordering::Acquire);
     let mut next_send_at = Instant::now();
     let mut next_probe_at = Instant::now();
+    let mut remote_executor = match RemoteExecutor::new() {
+        Ok(executor) => executor,
+        Err(error) => {
+            eprintln!("remote executor failed to start: {error}");
+            return;
+        }
+    };
+    let mut pending_remote_results = VecDeque::new();
     'sender: loop {
         if socket.is_none() {
             match connect_live(endpoint, token) {
@@ -2061,6 +2314,15 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                     continue;
                 }
             }
+        }
+
+        if let Some(connected) = socket.as_mut()
+            && flush_remote_results(connected, &remote_executor, &mut pending_remote_results)
+                .is_err()
+        {
+            socket = None;
+            thread::sleep(LIVE_RECONNECT_DELAY);
+            continue;
         }
 
         let (queue_lock, ready) = &*pending;
@@ -2100,7 +2362,10 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
 
             let mut drop_socket = false;
             if let Some(connected) = socket.as_mut() {
-                if set_live_read_timeout(connected, Some(LIVE_HINT_READ_TIMEOUT)).is_err() {
+                if flush_remote_results(connected, &remote_executor, &mut pending_remote_results)
+                    .is_err()
+                    || set_live_read_timeout(connected, Some(LIVE_HINT_READ_TIMEOUT)).is_err()
+                {
                     drop_socket = true;
                 } else {
                     match read_live_ack(connected) {
@@ -2115,7 +2380,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                                 accepted_through = accepted_through.max(ack.persisted_through_ts);
                                 wss_interval = ack_wss_interval(&ack);
                                 next_send_at = Instant::now() + wss_interval;
-                                next_probe_at = Instant::now() + ack_d1_interval(&ack);
+                                next_probe_at = Instant::now() + ack_persist_interval(&ack);
                             }
                         }
                         Ok(LiveRead::Config(config)) => {
@@ -2124,9 +2389,8 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                             }
                         }
                         Ok(LiveRead::RemoteTask(task)) => {
-                            let result = execute_remote_task(&task);
-                            if let Ok(payload) = serde_json::to_string(&result) {
-                                let _ = connected.send(Message::Text(payload.into()));
+                            if let Some(result) = remote_executor.enqueue(task) {
+                                pending_remote_results.push_back(result);
                             }
                         }
                         Ok(LiveRead::Pending) => {}
@@ -2179,7 +2443,12 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
 
         let mut drop_socket = false;
         if let Some(socket) = socket.as_mut() {
-            match wait_for_live_ack(socket, &remote_config) {
+            match wait_for_live_ack(
+                socket,
+                &remote_config,
+                &mut remote_executor,
+                &mut pending_remote_results,
+            ) {
                 Ok(LiveRead::Closed) => drop_socket = true,
                 Ok(LiveRead::Ack(ack)) => {
                     observe_persisted_through(&persisted_through, &ack);
@@ -2194,7 +2463,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                         accepted_through = accepted_through.max(ack.persisted_through_ts);
                         wss_interval = ack_wss_interval(&ack);
                         next_send_at = Instant::now() + wss_interval;
-                        next_probe_at = Instant::now() + ack_d1_interval(&ack);
+                        next_probe_at = Instant::now() + ack_persist_interval(&ack);
                     }
                 }
                 Ok(LiveRead::Config(config)) => {
@@ -2261,7 +2530,6 @@ fn sanitize_latency_tasks(tasks: &[LatencyTask]) -> Vec<LatencyTask> {
                 && parse_probe_target(&task.target, None).is_some()
                 && seen.insert(task.id.clone())
         })
-        .take(MAX_LATENCY_TASKS)
         .cloned()
         .collect()
 }
@@ -2864,16 +3132,17 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        CLOCK_CALIBRATION_MAX_AGE, CliOptions, ClockCalibration, GithubReleaseAsset, LatencyResult,
-        LatencyTask, LiveAck, MAX_LATENCY_TASKS, MAX_PENDING_LATENCY_RESULTS,
-        PUBLIC_IP_STALE_AFTER, PublicIpValue, Report, UPDATE_CHECK_JITTER_MAX_SECONDS,
-        ack_d1_interval, ack_wss_interval, advance_deadline, clock_offset_from_http_date,
-        corrected_timestamp, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
+        CLOCK_CALIBRATION_MAX_AGE, CapturedOutput, CliOptions, ClockCalibration,
+        GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, MAX_PENDING_LATENCY_RESULTS,
+        PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES, RemoteTaskMessage,
+        Report, UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval, ack_wss_interval,
+        advance_deadline, clock_offset_from_http_date, corrected_timestamp,
+        execute_remote_task_with_timeout, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
         live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
         parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
         parse_system_profiler_gpu_names, ping_latencies, ping_latency, prune_report_samples,
-        release_asset_sha256, sanitize_latency_tasks, update_check_jitter, valid_endpoint,
-        version_triplet,
+        release_asset_sha256, remote_result_text, sanitize_latency_tasks, update_check_jitter,
+        valid_endpoint, version_triplet,
     };
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
@@ -3021,22 +3290,67 @@ mod tests {
     #[test]
     fn accepts_server_realtime_ack_interval() {
         let ack: LiveAck = serde_json::from_str(
-            r#"{"type":"ack","ts":100,"persisted":false,"persistenceError":false,"persistedThroughTs":90,"nextD1WriteAfterMs":60000,"nextWssReportAfterMs":5000,"realtimeHint":false}"#,
+            r#"{"type":"ack","ts":100,"persisted":false,"persistenceError":false,"persistedThroughTs":90,"nextPersistAfterMs":60000,"nextWssReportAfterMs":5000,"realtimeHint":false}"#,
         )
         .unwrap();
         assert_eq!(ack_wss_interval(&ack), Duration::from_secs(5));
-        assert_eq!(ack_d1_interval(&ack), Duration::from_secs(60));
+        assert_eq!(ack_persist_interval(&ack), Duration::from_secs(60));
         let slow: LiveAck = serde_json::from_str(
-            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextD1WriteAfterMs":60000,"nextWssReportAfterMs":1,"realtimeHint":true}"#,
+            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextPersistAfterMs":60000,"nextWssReportAfterMs":1,"realtimeHint":true}"#,
         )
         .unwrap();
         assert_eq!(ack_wss_interval(&slow), Duration::from_secs(1));
         assert!(slow.realtime_hint);
         let idle: LiveAck = serde_json::from_str(
-            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextD1WriteAfterMs":120000,"nextWssReportAfterMs":3600000,"realtimeHint":false}"#,
+            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextPersistAfterMs":120000,"nextWssReportAfterMs":3600000,"realtimeHint":false}"#,
         )
         .unwrap();
-        assert_eq!(ack_d1_interval(&idle), Duration::from_secs(120));
+        assert_eq!(ack_persist_interval(&idle), Duration::from_secs(120));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_commands_capture_output_and_exit_status() {
+        let result = execute_remote_task_with_timeout(
+            &RemoteTaskMessage {
+                message_type: "remote_task".to_string(),
+                task_id: "task-output".to_string(),
+                command: "printf stdout; printf stderr >&2; exit 7".to_string(),
+            },
+            Duration::from_secs(2),
+        );
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.exit_code, Some(7));
+        assert_eq!(result.result, "stdout\nstderr");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_commands_are_terminated_after_the_deadline() {
+        let result = execute_remote_task_with_timeout(
+            &RemoteTaskMessage {
+                message_type: "remote_task".to_string(),
+                task_id: "task-timeout".to_string(),
+                command: "sleep 5".to_string(),
+            },
+            Duration::from_millis(50),
+        );
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.exit_code, Some(-1));
+        assert!(result.result.contains("已终止"));
+    }
+
+    #[test]
+    fn remote_command_output_is_bounded() {
+        let result = remote_result_text(
+            CapturedOutput {
+                bytes: vec![b'x'; REMOTE_RESULT_OUTPUT_BYTES + 100],
+                truncated: true,
+            },
+            CapturedOutput::default(),
+        );
+        assert!(result.len() < REMOTE_RESULT_OUTPUT_BYTES + 64);
+        assert!(result.ends_with("[输出已截断]"));
     }
 
     #[test]
@@ -3103,7 +3417,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.endpoint, "https://monitor.example.com");
-        assert_eq!(parsed.token, "agent-token");
+        assert_eq!(parsed.token.as_deref(), Some("agent-token"));
         assert_eq!(parsed.interval, 60);
         assert!(parsed.once);
         assert!(CliOptions::try_parse_from(["agent", "-t"]).is_err());
@@ -3124,7 +3438,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_and_filters_remote_latency_tasks() {
+    fn filters_and_deduplicates_remote_latency_tasks_without_a_count_limit() {
         let valid = LatencyTask {
             id: "task-1".to_string(),
             name: "Cloudflare".to_string(),
@@ -3142,7 +3456,7 @@ mod tests {
             port: Some(443),
             interval_seconds: 1,
         });
-        for index in 2..=MAX_LATENCY_TASKS + 10 {
+        for index in 2..=300 {
             tasks.push(LatencyTask {
                 id: format!("task-{index}"),
                 name: format!("Task {index}"),
@@ -3153,7 +3467,7 @@ mod tests {
             });
         }
         let sanitized = sanitize_latency_tasks(&tasks);
-        assert_eq!(sanitized.len(), MAX_LATENCY_TASKS);
+        assert_eq!(sanitized.len(), 300);
         assert_eq!(sanitized[0].id, "task-1");
         assert!(!sanitized.iter().any(|task| task.id == "bad"));
     }

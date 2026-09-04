@@ -1,4 +1,5 @@
 mod auth;
+mod backup;
 mod config;
 mod db;
 mod exchange;
@@ -6,6 +7,7 @@ mod middleware;
 mod models;
 mod notify;
 mod routes;
+mod security;
 mod theme;
 mod totp;
 mod turnstile;
@@ -20,7 +22,8 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
+use std::sync::atomic::AtomicBool;
+use tokio::sync::{Mutex, RwLock, Semaphore, broadcast};
 use tower_http::trace::TraceLayer;
 
 pub struct AppState {
@@ -29,6 +32,11 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub agents: RwLock<HashMap<String, websocket::AgentConnection>>,
     pub dashboard_tx: broadcast::Sender<websocket::DashboardEvent>,
+    pub database_maintenance: Mutex<()>,
+    pub database_restoring: AtomicBool,
+    pub login_attempts: security::AttemptLimiter,
+    pub remote_totp_attempts: security::AttemptLimiter,
+    pub password_verifications: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -52,12 +60,12 @@ impl AppState {
         .to_string();
         let _ = connection
             .sender
-            .send(websocket::AgentCommand::Text(payload));
+            .try_send(websocket::AgentCommand::Text(payload));
     }
 
     pub async fn disconnect_agent(&self, server_id: &str) {
         if let Some(connection) = self.agents.write().await.remove(server_id) {
-            let _ = connection.sender.send(websocket::AgentCommand::Close);
+            let _ = connection.sender.try_send(websocket::AgentCommand::Close);
         }
     }
 
@@ -71,14 +79,14 @@ impl AppState {
             "persisted": false,
             "persistenceError": false,
             "persistedThroughTs": 0,
-            "nextD1WriteAfterMs": connection.report_interval.clamp(15, 3600) * 1000,
+            "nextPersistAfterMs": connection.report_interval.clamp(15, 3600) * 1000,
             "nextWssReportAfterMs": connection.collect_interval.clamp(1, 60) * 1000,
             "realtimeHint": true,
         })
         .to_string();
         let _ = connection
             .sender
-            .send(websocket::AgentCommand::Text(payload));
+            .try_send(websocket::AgentCommand::Text(payload));
     }
 
     pub async fn send_remote_task(&self, task: &models::RemoteTaskInfo) -> bool {
@@ -92,10 +100,13 @@ impl AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("failed to install the Rustls Ring crypto provider"))?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "nodeflare_backend=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "nodeflare=info,tower_http=info".into()),
         )
         .init();
 
@@ -112,6 +123,7 @@ async fn main() -> Result<()> {
     tracing::info!(database = ?database.kind(), "connected to database");
     database.migrate().await?;
     db::initialize(&database, &config).await?;
+    database.optimize().await?;
 
     for (label, path) in [
         ("public frontend", &config.frontend_dir),
@@ -134,10 +146,28 @@ async fn main() -> Result<()> {
         http,
         agents: RwLock::new(HashMap::new()),
         dashboard_tx,
+        database_maintenance: Mutex::new(()),
+        database_restoring: AtomicBool::new(false),
+        login_attempts: security::AttemptLimiter::new(
+            5,
+            std::time::Duration::from_secs(5 * 60),
+            std::time::Duration::from_secs(5 * 60),
+        ),
+        remote_totp_attempts: security::AttemptLimiter::new(
+            5,
+            std::time::Duration::from_secs(5 * 60),
+            std::time::Duration::from_secs(10 * 60),
+        ),
+        password_verifications: Arc::new(Semaphore::new(4)),
     });
 
     let protected = Router::new()
         .route("/api/admin/logout", post(routes::auth::logout))
+        .route("/api/admin/sessions", get(routes::auth::sessions_get))
+        .route(
+            "/api/admin/sessions/{id}",
+            delete(routes::auth::session_delete),
+        )
         .route("/api/admin/2fa/status", get(routes::auth::get_2fa_status))
         .route("/api/admin/2fa/setup", post(routes::auth::setup_2fa))
         .route("/api/admin/2fa/enable", post(routes::auth::enable_2fa))
@@ -153,11 +183,11 @@ async fn main() -> Result<()> {
             patch(routes::admin::servers_order),
         )
         .route(
-            "/api/admin/servers/:id/token",
-            get(routes::admin::server_token),
+            "/api/admin/servers/{id}/token",
+            post(routes::admin::server_token_rotate),
         )
         .route(
-            "/api/admin/servers/:id",
+            "/api/admin/servers/{id}",
             patch(routes::admin::server_patch).delete(routes::admin::server_delete),
         )
         .route(
@@ -169,7 +199,7 @@ async fn main() -> Result<()> {
             get(routes::admin::latency_tasks_get).post(routes::admin::latency_tasks_post),
         )
         .route(
-            "/api/admin/latency-tasks/:id",
+            "/api/admin/latency-tasks/{id}",
             patch(routes::admin::latency_task_patch).delete(routes::admin::latency_task_delete),
         )
         .route(
@@ -177,7 +207,7 @@ async fn main() -> Result<()> {
             get(routes::admin::alert_rules_get).post(routes::admin::alert_rules_post),
         )
         .route(
-            "/api/admin/alert-rules/:id",
+            "/api/admin/alert-rules/{id}",
             patch(routes::admin::alert_rule_patch).delete(routes::admin::alert_rule_delete),
         )
         .route(
@@ -197,14 +227,17 @@ async fn main() -> Result<()> {
             post(routes::admin::themes_upload),
         )
         .route(
-            "/api/admin/themes/:id/activate",
+            "/api/admin/themes/{id}/activate",
             post(routes::admin::theme_activate),
         )
         .route(
-            "/api/admin/themes/:id/preview",
+            "/api/admin/themes/{id}/preview",
             post(routes::admin::theme_preview),
         )
-        .route("/api/admin/themes/:id", delete(routes::admin::theme_delete))
+        .route(
+            "/api/admin/themes/{id}",
+            delete(routes::admin::theme_delete),
+        )
         .route(
             "/api/admin/theme-settings",
             get(routes::admin::theme_settings),
@@ -214,9 +247,17 @@ async fn main() -> Result<()> {
             post(routes::admin::exchange_refresh),
         )
         .route("/api/admin/database", get(routes::admin::database_stats))
+        .route(
+            "/api/admin/database/backup",
+            get(routes::admin::database_backup),
+        )
+        .route(
+            "/api/admin/database/restore",
+            post(routes::admin::database_restore),
+        )
         .route("/api/admin/history", delete(routes::admin::history_delete))
         .route("/api/admin/remote/task", post(routes::remote::create_task))
-        .route("/api/admin/remote/task/:id", get(routes::remote::get_task))
+        .route("/api/admin/remote/task/{id}", get(routes::remote::get_task))
         .layer(axum_middleware::from_fn_with_state(
             Arc::clone(&state),
             middleware::auth_middleware,
@@ -226,8 +267,8 @@ async fn main() -> Result<()> {
         .route("/api/bootstrap", get(routes::public::bootstrap))
         .route("/api/config", get(routes::public::config))
         .route("/api/servers", get(routes::public::servers))
-        .route("/api/history/:id", get(routes::public::history))
-        .route("/api/latency/:id", get(routes::public::latency_history))
+        .route("/api/history/{id}", get(routes::public::history))
+        .route("/api/latency/{id}", get(routes::public::latency_history))
         .route("/api/exchange-rates", get(routes::public::exchange_rates))
         .route("/api/live/wake", post(routes::public::wake_servers))
         .route(
@@ -259,6 +300,8 @@ async fn main() -> Result<()> {
 fn spawn_maintenance(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut maintenance_runs = 0_u64;
         loop {
             interval.tick().await;
             if let Err(error) = db::cleanup_auth(&state.db).await {
@@ -277,10 +320,19 @@ fn spawn_maintenance(state: Arc<AppState>) {
             if let Err(error) = notify::run_periodic(&state.db, &state.http, &settings).await {
                 tracing::error!(%error, "notification maintenance failed");
             }
-            if let Err(error) =
-                db::queries::cleanup_history(&state.db, settings.history_retention_days).await
+            maintenance_runs = maintenance_runs.wrapping_add(1);
             {
-                tracing::error!(%error, "history cleanup failed");
+                let _maintenance = state.database_maintenance.lock().await;
+                if let Err(error) =
+                    db::queries::cleanup_database(&state.db, settings.history_retention_days).await
+                {
+                    tracing::error!(%error, "database cleanup failed");
+                }
+                if maintenance_runs.is_multiple_of(6 * 60)
+                    && let Err(error) = state.db.optimize().await
+                {
+                    tracing::error!(%error, "database optimization failed");
+                }
             }
             if let Err(error) = exchange::refresh(&state.db, &state.http, false).await {
                 tracing::warn!(%error, "scheduled exchange-rate refresh failed");

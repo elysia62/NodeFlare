@@ -1,5 +1,5 @@
-import { Activity, ArrowDown, ArrowUp, Database, ServerIcon, WalletCards } from "lucide-react";
-import { formatBytes, formatCurrency, formatSpeed, isOnline, number, remainingAssetValue } from "../format";
+import { ArrowDown, ArrowUp, Database, ServerIcon, WalletCards } from "lucide-react";
+import { formatBytes, formatCurrency, formatSpeed, formatSpeedParts, isOnline, number, remainingAssetValue } from "../format";
 import { assetCurrency, themeToggle } from "../theme";
 import type { Config, ExchangeRates, Server } from "../types";
 import { ui } from "../locale";
@@ -11,6 +11,7 @@ interface Stat {
   unit?: string;
   detail: React.ReactNode;
   tone?: string;
+  iconTone?: "success" | "info";
 }
 
 export function StatsBar({ servers, config, exchangeRates }: { servers: Server[]; config: Config; exchangeRates: ExchangeRates | null }) {
@@ -23,6 +24,14 @@ export function StatsBar({ servers, config, exchangeRates }: { servers: Server[]
   const trafficDown = servers.reduce((sum, server) => sum + number(server.net_rx_total), 0);
   const speedUp = onlineServers.reduce((sum, server) => sum + number(server.net_out), 0);
   const speedDown = onlineServers.reduce((sum, server) => sum + number(server.net_in), 0);
+  const formattedSpeedUp = formatSpeedParts(speedUp);
+  const formattedSpeedDown = formatSpeedParts(speedDown);
+  const peakUpload = onlineServers.reduce<Server | null>((peak, server) => !peak || number(server.net_out) > number(peak.net_out) ? server : peak, null);
+  const peakDownload = onlineServers.reduce<Server | null>((peak, server) => !peak || number(server.net_in) > number(peak.net_in) ? server : peak, null);
+  const peakDetail = (server: Server | null, field: "net_out" | "net_in") => {
+    if (!server || number(server[field]) <= 0) return <span>{ui(locale, "暂无实时流量", "No live traffic")}</span>;
+    return <span title={server.name}>{ui(locale, `峰值 ${server.name} · ${formatSpeed(server[field])}`, `Peak ${server.name} · ${formatSpeed(server[field])}`)}</span>;
+  };
   const paid = servers.filter((server) => server.price > 0);
   const toDisplayCurrency = (value: number, currency: string) => {
     const code = currency.trim().toUpperCase();
@@ -64,18 +73,29 @@ export function StatsBar({ servers, config, exchangeRates }: { servers: Server[]
     detail: <><span className="success-text">{ui(locale, "上传", "Upload")} {formatBytes(trafficUp)}</span><span className="info-text">{ui(locale, "下载", "Download")} {formatBytes(trafficDown)}</span></>,
   });
   if (config.show_speed) stats.push({
-    icon: Activity,
-    label: ui(locale, "实时网速", "Live speed"),
-    value: formatSpeed(speedUp + speedDown),
-    detail: <><span className="success-text"><ArrowUp size={11} />{formatSpeed(speedUp)}</span><span className="info-text"><ArrowDown size={11} />{formatSpeed(speedDown)}</span></>,
+    icon: ArrowUp,
+    label: ui(locale, "实时上行", "Live upload"),
+    value: formattedSpeedUp.value,
+    unit: formattedSpeedUp.unit,
+    detail: peakDetail(peakUpload, "net_out"),
+    tone: "success-text",
+    iconTone: "success",
+  }, {
+    icon: ArrowDown,
+    label: ui(locale, "实时下行", "Live download"),
+    value: formattedSpeedDown.value,
+    unit: formattedSpeedDown.unit,
+    detail: peakDetail(peakDownload, "net_in"),
+    tone: "info-text",
+    iconTone: "info",
   });
 
   if (!stats.length) return null;
   return (
-    <section className={`overview glass-panel overview-${Math.min(stats.length, 4)}`} aria-label={ui(locale, "服务器总览", "Server overview")}>
-      {stats.map(({ icon: Icon, label, value, unit, detail, tone }) => (
+    <section className={`overview glass-panel overview-${Math.min(stats.length, 5)}`} aria-label={ui(locale, "服务器总览", "Server overview")}>
+      {stats.map(({ icon: Icon, label, value, unit, detail, tone, iconTone }) => (
         <div className="overview-item" key={label}>
-          <div className="overview-label"><span>{label}</span><span className="stat-icon"><Icon size={17} /></span></div>
+          <div className="overview-label"><span>{label}</span><span className={`stat-icon ${iconTone ?? ""}`}><Icon size={17} /></span></div>
           <div className="overview-value"><strong className={tone}>{value}</strong>{unit ? <b>{unit}</b> : null}</div>
           <div className="overview-detail">{detail}</div>
         </div>

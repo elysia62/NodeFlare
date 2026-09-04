@@ -135,8 +135,8 @@ export function LatencyManager({
 
   return <div className="admin-section latency-section">
     <div className="section-head">
-      <div><h3>延迟任务</h3><span>{tasks.length} / 128 个任务 · TCP / ICMP</span></div>
-      <button className="primary-btn compact" type="button" disabled={tasks.length >= 128} onClick={() => open()}><Plus size={15} />添加</button>
+      <div><h3>延迟任务</h3><span>{tasks.length} 个任务 · TCP / ICMP</span></div>
+      <button className="primary-btn compact" type="button" onClick={() => open()}><Plus size={15} />添加</button>
     </div>
     <div className="latency-task-list">
       {tasks.map((task) => <div className="latency-task-row" key={task.id}>

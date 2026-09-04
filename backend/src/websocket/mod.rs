@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 pub struct AgentConnection {
     pub connection_id: String,
-    pub sender: mpsc::UnboundedSender<AgentCommand>,
+    pub sender: mpsc::Sender<AgentCommand>,
     pub report_interval: i64,
     pub collect_interval: i64,
 }

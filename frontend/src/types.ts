@@ -316,6 +316,16 @@ export interface DatabaseStats {
   history_rows: number;
 }
 
+export interface LoginSession {
+  id: string;
+  ip_address: string;
+  user_agent: string;
+  created_at: number;
+  last_seen_at: number;
+  expires_at: number;
+  current: boolean;
+}
+
 export interface TotpStatus {
   enabled: boolean;
   has_secret: boolean;
@@ -323,7 +333,6 @@ export interface TotpStatus {
 
 export interface TotpSetup {
   secret: string;
-  uri: string;
   enabled: boolean;
 }
 

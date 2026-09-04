@@ -2,8 +2,8 @@
 # 正式安装请运行仓库根目录的 install.sh，配置将写入 /etc/nodeflare/config.toml
 
 # 数据库连接 URL
-# SQLite: sqlite://path/to/db.sqlite 或 sqlite://nodeflare.db
-# PostgreSQL: postgres://user:password@localhost/nodeflare
+# SQLite: sqlite:///path/to/database.db 或 sqlite://nodeflare.db
+# PostgreSQL: postgres://user:password@127.0.0.1:5432/nodeflare?sslmode=prefer
 database_url = "sqlite://nodeflare.db"
 
 # 服务器监听地址

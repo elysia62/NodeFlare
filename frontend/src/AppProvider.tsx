@@ -147,7 +147,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string, turnstileToken: string, totpCode: string) => {
     const derived = await derivePassword(password, config.password_client_salt);
-    const result = await api.login(username.trim(), password, derived, turnstileToken, totpCode);
+    const result = await api.login(username.trim(), derived, turnstileToken, totpCode);
     setToken(result.token);
     setAccess("ok");
     await reload();

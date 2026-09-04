@@ -17,11 +17,12 @@ pub async fn auth_middleware(
     let Some(token) = bearer_or_cookie(request.headers()) else {
         return ApiResponse::unauthorized("请先登录").into_response();
     };
-    match crate::db::session_username(&state.db, &token).await {
-        Ok(Some(username)) => {
-            request
-                .extensions_mut()
-                .insert(AuthenticatedUser { username });
+    match crate::db::session_identity(&state.db, &token).await {
+        Ok(Some(identity)) => {
+            request.extensions_mut().insert(AuthenticatedUser {
+                username: identity.username,
+                session_id: identity.id,
+            });
             next.run(request).await
         }
         Ok(None) => ApiResponse::unauthorized("登录状态已过期").into_response(),
@@ -32,6 +33,7 @@ pub async fn auth_middleware(
 #[derive(Clone)]
 pub struct AuthenticatedUser {
     pub username: String,
+    pub session_id: String,
 }
 
 pub async fn security_headers(request: Request, next: Next) -> Response {

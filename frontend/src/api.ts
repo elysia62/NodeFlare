@@ -1,4 +1,4 @@
-import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, RemoteTask, RemoteTaskCreated, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
+import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
 
 const TOKEN_KEY = "nodeflare-admin-token";
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
@@ -18,7 +18,7 @@ export function setToken(token: string) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
-async function request<T>(path: string, init: RequestInit = {}, admin = false): Promise<T> {
+async function requestResponse(path: string, init: RequestInit = {}, admin = false): Promise<Response> {
   const headers = new Headers(init.headers);
   if (typeof init.body === "string" && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const token = getToken();
@@ -33,6 +33,11 @@ async function request<T>(path: string, init: RequestInit = {}, admin = false): 
     }
     throw new ApiError(payload.error ?? "请求失败", response.status);
   }
+  return response;
+}
+
+async function request<T>(path: string, init: RequestInit = {}, admin = false): Promise<T> {
+  const response = await requestResponse(path, init, admin);
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
@@ -54,12 +59,15 @@ export const api = {
     request<{ tasks: LatencyTestPoint[]; points: LatencySample[] }>(`/api/latency/${encodeURIComponent(id)}?hours=${hours}`),
   verifyTurnstile: (token: string) =>
     request<void>("/api/turnstile/verify", { method: "POST", body: JSON.stringify({ token }) }),
-  login: (username: string, password: string, passwordDerived: string, turnstileToken: string, totpCode = "") =>
+  login: (username: string, passwordDerived: string, turnstileToken: string, totpCode = "") =>
     request<{ token: string }>("/api/admin/login", {
       method: "POST",
-      body: JSON.stringify({ username, password, password_derived: passwordDerived, turnstile_token: turnstileToken, totp_code: totpCode }),
+      body: JSON.stringify({ username, password_derived: passwordDerived, turnstile_token: turnstileToken, totp_code: totpCode }),
     }),
   logout: () => request<void>("/api/admin/logout", { method: "POST" }),
+  loginSessions: () => request<{ sessions: LoginSession[] }>("/api/admin/sessions", {}, true),
+  revokeLoginSession: (id: string) =>
+    request<void>(`/api/admin/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }, true),
   settings: () => request<Settings>("/api/admin/settings", {}, true),
   twoFactorStatus: () => request<TotpStatus>("/api/admin/2fa/status", {}, true),
   setupTwoFactor: () => request<TotpSetup>("/api/admin/2fa/setup", { method: "POST" }, true),
@@ -111,8 +119,8 @@ export const api = {
       { method: "POST", body: JSON.stringify(input) },
       true,
     ),
-  serverToken: (id: string) =>
-    request<{ agent_token: string }>(`/api/admin/servers/${encodeURIComponent(id)}/token`, {}, true),
+  rotateServerToken: (id: string) =>
+    request<{ agent_token: string }>(`/api/admin/servers/${encodeURIComponent(id)}/token`, { method: "POST" }, true),
   updateServer: (id: string, input: ServerInput) =>
     request<void>(
       `/api/admin/servers/${encodeURIComponent(id)}`,
@@ -137,6 +145,16 @@ export const api = {
       true,
     ),
   databaseStats: () => request<DatabaseStats>("/api/admin/database", {}, true),
+  databaseBackup: async () => {
+    const response = await requestResponse("/api/admin/database/backup", {}, true);
+    const disposition = response.headers.get("Content-Disposition") ?? "";
+    const filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? "nodeflare-database-backup.zip";
+    return { blob: await response.blob(), filename };
+  },
+  restoreDatabaseBackup: (file: File) => {
+    const query = new URLSearchParams({ filename: file.name });
+    return request<{ restored_rows: number }>(`/api/admin/database/restore?${query}`, { method: "POST", body: file }, true);
+  },
   clearHistory: () => request<void>("/api/admin/history", { method: "DELETE" }, true),
   createRemoteTask: (input: RemoteTaskInput) => request<{ tasks: RemoteTaskCreated[] }>("/api/admin/remote/task", {
     method: "POST",

@@ -202,12 +202,13 @@ cat > "$SERVICE_FILE" <<EOF
 . /etc/rc.subr
 
 export NODEFLARE_STATE_DIR="$STATE_DIR"
+export NODEFLARE_AGENT_TOKEN="$token"
 
 name="$RC_NAME"
 rcvar="${RC_NAME}_enable"
 pidfile="/var/run/\${name}.pid"
 command="/usr/sbin/daemon"
-command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint -t $token -i $interval"
+command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint -i $interval"
 
 load_rc_config "\${name}"
 : \${nodeflare_agent_enable:="NO"}

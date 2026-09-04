@@ -94,7 +94,7 @@ pub fn hostname(headers: &HeaderMap) -> Option<String> {
 }
 
 pub fn forwarded_ip(headers: &HeaderMap) -> Option<String> {
-    ["cf-connecting-ip", "x-real-ip"].iter().find_map(|name| {
+    ["x-real-ip", "cf-connecting-ip"].iter().find_map(|name| {
         headers
             .get(*name)
             .and_then(|value| value.to_str().ok())
@@ -102,6 +102,15 @@ pub fn forwarded_ip(headers: &HeaderMap) -> Option<String> {
             .filter(|value| value.parse::<std::net::IpAddr>().is_ok())
             .map(str::to_string)
     })
+}
+
+pub fn client_ip(headers: &HeaderMap, peer: std::net::SocketAddr) -> String {
+    if peer.ip().is_loopback()
+        && let Some(forwarded) = forwarded_ip(headers)
+    {
+        return forwarded;
+    }
+    peer.ip().to_string()
 }
 
 pub fn request_is_secure(headers: &HeaderMap) -> bool {
@@ -117,4 +126,28 @@ pub fn admin_cookie(token: &str, max_age: i64, secure: bool) -> String {
         "nodeflare_admin={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict{}",
         if secure { "; Secure" } else { "" }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn forwarded_ip_prefers_the_reverse_proxy_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("198.51.100.9"));
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+        assert_eq!(client_ip(&headers, peer), "203.0.113.7");
+    }
+
+    #[test]
+    fn public_peers_cannot_spoof_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)), 12345);
+        assert_eq!(client_ip(&headers, peer), "198.51.100.20");
+    }
 }

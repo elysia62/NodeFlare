@@ -2,16 +2,21 @@ pub mod queries;
 
 use crate::auth;
 use crate::config::Config;
-use crate::models::{PublicConfig, SettingsInput, SettingsView};
-use anyhow::Result;
+use crate::models::{LoginSessionView, PublicConfig, SettingsInput, SettingsView};
+use anyhow::{Context, Result};
 use sqlx::any::{AnyPoolOptions, install_default_drivers};
 use sqlx::migrate::Migrator;
+use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 pub const SECRET_MASK: &str = "********";
 const PASSWORD_SCHEME: &str = "argon2-client-pbkdf2-v1";
+const SESSION_ACTIVITY_WRITE_INTERVAL_SECONDS: i64 = 60;
 
 static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
@@ -28,6 +33,18 @@ pub struct Database {
     kind: DatabaseKind,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionDevice {
+    pub ip_address: String,
+    pub user_agent: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionIdentity {
+    pub id: String,
+    pub username: String,
+}
+
 impl Database {
     pub fn pool(&self) -> &AnyPool {
         &self.pool
@@ -39,6 +56,16 @@ impl Database {
 
     pub fn is_postgres(&self) -> bool {
         self.kind == DatabaseKind::Postgres
+    }
+
+    pub async fn optimize(&self) -> Result<()> {
+        if self.kind == DatabaseKind::Sqlite {
+            sqlx::query("PRAGMA optimize").execute(&self.pool).await?;
+            sqlx::query("PRAGMA incremental_vacuum(256)")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     pub fn sql(&self, statement: &'static str) -> &'static str {
@@ -181,22 +208,66 @@ pub async fn connect(database_url: &str) -> Result<Database> {
     } else {
         anyhow::bail!("unsupported database URL");
     };
-    let pool = AnyPoolOptions::new()
-        .max_connections(if kind == DatabaseKind::Sqlite { 1 } else { 10 })
-        .connect(database_url)
-        .await?;
-    if kind == DatabaseKind::Sqlite {
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA journal_mode = WAL")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA busy_timeout = 10000")
-            .execute(&pool)
-            .await?;
+    let sqlite_in_memory =
+        kind == DatabaseKind::Sqlite && database_url.trim_start().starts_with("sqlite::memory:");
+    if kind == DatabaseKind::Sqlite && !sqlite_in_memory {
+        ensure_sqlite_file(database_url)?;
     }
+    let max_connections = match kind {
+        DatabaseKind::Sqlite if sqlite_in_memory => 1,
+        DatabaseKind::Sqlite => 4,
+        DatabaseKind::Postgres => 10,
+    };
+    let mut options = AnyPoolOptions::new()
+        .min_connections(1)
+        .max_connections(max_connections)
+        .acquire_timeout(Duration::from_secs(10));
+    if kind == DatabaseKind::Sqlite {
+        options = options.after_connect(|connection, _| {
+            Box::pin(async move {
+                for statement in [
+                    "PRAGMA auto_vacuum = INCREMENTAL",
+                    "PRAGMA foreign_keys = ON",
+                    "PRAGMA journal_mode = WAL",
+                    "PRAGMA synchronous = NORMAL",
+                    "PRAGMA busy_timeout = 10000",
+                ] {
+                    sqlx::query(statement).execute(&mut *connection).await?;
+                }
+                Ok(())
+            })
+        });
+    }
+    let pool = options.connect(database_url).await?;
     Ok(Database { pool, kind })
+}
+
+fn ensure_sqlite_file(database_url: &str) -> Result<()> {
+    let has_mode = database_url
+        .split_once('?')
+        .is_some_and(|(_, query)| query.split('&').any(|item| item.starts_with("mode=")));
+    if has_mode {
+        return Ok(());
+    }
+    let options =
+        SqliteConnectOptions::from_str(database_url).context("无法解析 SQLite 数据库 URL")?;
+    let path = options.get_filename();
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        && !parent.is_dir()
+    {
+        anyhow::bail!("SQLite 数据库目录不存在：{}", parent.display());
+    }
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("无法创建 SQLite 数据库文件：{}", path.display()))?;
+    Ok(())
 }
 
 pub async fn initialize(pool: &Database, config: &Config) -> Result<()> {
@@ -468,15 +539,27 @@ pub async fn set_setting(pool: &Database, key: &str, value: &str) -> Result<()> 
     Ok(())
 }
 
-pub async fn create_session(pool: &Database, username: &str, ttl_hours: i64) -> Result<String> {
+pub async fn create_session(
+    pool: &Database,
+    username: &str,
+    ttl_hours: i64,
+    device: &SessionDevice,
+) -> Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
     let token = auth::random_token(32);
     let created_at = now();
     let expires_at = created_at.saturating_add(ttl_hours.clamp(1, 24 * 90) * 3600);
     sqlx::query(pool.sql(
-        "INSERT INTO sessions(token_hash, username, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions(\
+         id, token_hash, username, ip_address, user_agent, created_at, last_seen_at, expires_at\
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     ))
+    .bind(id)
     .bind(auth::token_hash(&token))
     .bind(username)
+    .bind(&device.ip_address)
+    .bind(&device.user_agent)
+    .bind(created_at)
     .bind(created_at)
     .bind(expires_at)
     .execute(pool.pool())
@@ -484,18 +567,84 @@ pub async fn create_session(pool: &Database, username: &str, ttl_hours: i64) -> 
     Ok(token)
 }
 
-pub async fn session_username(pool: &Database, token: &str) -> Result<Option<String>> {
+pub async fn session_identity(pool: &Database, token: &str) -> Result<Option<SessionIdentity>> {
     if token.is_empty() || token.len() > 512 {
         return Ok(None);
     }
     let current = now();
-    Ok(sqlx::query_scalar::<_, String>(
-        pool.sql("SELECT username FROM sessions WHERE token_hash = ? AND expires_at > ?"),
-    )
+    let row = sqlx::query(pool.sql(
+        "SELECT id, username, last_seen_at FROM sessions \
+         WHERE token_hash=? AND expires_at>?",
+    ))
     .bind(auth::token_hash(token))
     .bind(current)
     .fetch_optional(pool.pool())
-    .await?)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let id: String = row.try_get("id")?;
+    let username: String = row.try_get("username")?;
+    let last_seen_at: i64 = row.try_get("last_seen_at")?;
+    if current.saturating_sub(last_seen_at) >= SESSION_ACTIVITY_WRITE_INTERVAL_SECONDS {
+        sqlx::query(pool.sql("UPDATE sessions SET last_seen_at=? WHERE id=? AND last_seen_at=?"))
+            .bind(current)
+            .bind(&id)
+            .bind(last_seen_at)
+            .execute(pool.pool())
+            .await?;
+    }
+    Ok(Some(SessionIdentity { id, username }))
+}
+
+pub async fn session_username(pool: &Database, token: &str) -> Result<Option<String>> {
+    Ok(session_identity(pool, token)
+        .await?
+        .map(|identity| identity.username))
+}
+
+pub async fn login_sessions(
+    pool: &Database,
+    username: &str,
+    current_session_id: &str,
+) -> Result<Vec<LoginSessionView>> {
+    let rows = sqlx::query(pool.sql(
+        "SELECT id, ip_address, user_agent, created_at, last_seen_at, expires_at \
+         FROM sessions WHERE username=? AND expires_at>? \
+         ORDER BY last_seen_at DESC, created_at DESC",
+    ))
+    .bind(username)
+    .bind(now())
+    .fetch_all(pool.pool())
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let id: String = row.try_get("id")?;
+            Ok(LoginSessionView {
+                current: id == current_session_id,
+                id,
+                ip_address: row.try_get("ip_address")?,
+                user_agent: row.try_get("user_agent")?,
+                created_at: row.try_get("created_at")?,
+                last_seen_at: row.try_get("last_seen_at")?,
+                expires_at: row.try_get("expires_at")?,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
+        .map_err(Into::into)
+}
+
+pub async fn revoke_login_session(
+    pool: &Database,
+    username: &str,
+    session_id: &str,
+) -> Result<bool> {
+    let result = sqlx::query(pool.sql("DELETE FROM sessions WHERE id=? AND username=?"))
+        .bind(session_id)
+        .bind(username)
+        .execute(pool.pool())
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn revoke_session(pool: &Database, token: &str) -> Result<()> {
@@ -579,5 +728,78 @@ fn mask_secret(value: &str) -> String {
         String::new()
     } else {
         SECRET_MASK.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sqlite_file_pool_configures_every_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nodeflare.db");
+        let database_url = format!("sqlite://{}", path.display());
+        let db = connect(&database_url).await.unwrap();
+        assert!(path.is_file());
+        db.migrate().await.unwrap();
+
+        let mut connections = Vec::new();
+        for _ in 0..4 {
+            connections.push(db.pool().acquire().await.unwrap());
+        }
+        for connection in &mut connections {
+            let foreign_keys = sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            let synchronous = sqlx::query_scalar::<_, i64>("PRAGMA synchronous")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            let busy_timeout = sqlx::query_scalar::<_, i64>("PRAGMA busy_timeout")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            assert_eq!(foreign_keys, 1);
+            assert_eq!(synchronous, 1);
+            assert_eq!(busy_timeout, 10_000);
+        }
+        drop(connections);
+
+        let journal_mode = sqlx::query_scalar::<_, String>("PRAGMA journal_mode")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let auto_vacuum = sqlx::query_scalar::<_, i64>("PRAGMA auto_vacuum")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        assert_eq!(auto_vacuum, 2);
+    }
+
+    #[tokio::test]
+    async fn login_sessions_can_be_listed_and_revoked() {
+        let db = connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let device = SessionDevice {
+            ip_address: "203.0.113.8".to_string(),
+            user_agent: "Test Browser".to_string(),
+        };
+        let token = create_session(&db, "admin", 24, &device).await.unwrap();
+        let identity = session_identity(&db, &token).await.unwrap().unwrap();
+        let sessions = login_sessions(&db, "admin", &identity.id).await.unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].current);
+        assert_eq!(sessions[0].ip_address, "203.0.113.8");
+        assert_eq!(sessions[0].user_agent, "Test Browser");
+        assert!(
+            revoke_login_session(&db, "admin", &identity.id)
+                .await
+                .unwrap()
+        );
+        assert!(session_identity(&db, &token).await.unwrap().is_none());
     }
 }

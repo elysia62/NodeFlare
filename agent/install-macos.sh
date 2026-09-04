@@ -170,8 +170,8 @@ cat > "$PLIST_FILE" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>$LABEL</string>
-<key>ProgramArguments</key><array><string>$AGENT_FILE</string><string>-e</string><string>$endpoint</string><string>-t</string><string>$token</string><string>-i</string><string>$interval</string></array>
-<key>EnvironmentVariables</key><dict><key>NODEFLARE_STATE_DIR</key><string>$STATE_DIR</string></dict>
+<key>ProgramArguments</key><array><string>$AGENT_FILE</string><string>-e</string><string>$endpoint</string><string>-i</string><string>$interval</string></array>
+<key>EnvironmentVariables</key><dict><key>NODEFLARE_AGENT_TOKEN</key><string>$token</string><key>NODEFLARE_STATE_DIR</key><string>$STATE_DIR</string></dict>
 <key>KeepAlive</key><true/><key>RunAtLoad</key><true/>
 <key>StandardOutPath</key><string>/var/log/nodeflare-agent.log</string>
 <key>StandardErrorPath</key><string>/var/log/nodeflare-agent.log</string>

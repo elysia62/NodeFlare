@@ -116,7 +116,7 @@ function formatNetworkAxis(value: number): string {
 
 function latencyBucketSeconds(hours: number, taskCount: number): number {
   const boundedHours = Math.max(1, Math.min(24 * 30, Math.trunc(hours)));
-  const boundedTasks = Math.max(1, Math.min(128, Math.trunc(taskCount)));
+  const boundedTasks = Math.max(1, Math.trunc(taskCount));
   const base = boundedHours === 1 ? 60
     : boundedHours <= 4 ? 120
       : boundedHours <= 24 ? 600

@@ -5,8 +5,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 config_dir=/etc/nodeflare
 config_file=$config_dir/config.toml
 install_dir=/opt/nodeflare
-data_dir=$install_dir/data
-state_dir=$data_dir/server
+theme_dir=$config_dir/themes
+default_database_url=sqlite:///etc/nodeflare/nodeflare.db
 share_dir=$install_dir/share
 public_frontend_dir=$share_dir/frontend
 admin_frontend_dir=$share_dir/admin
@@ -27,8 +27,8 @@ usage() {
     '  sudo ./install.sh --uninstall' \
     '  sudo ./install.sh --uninstall --purge' \
     '' \
-    '首次安装会询问管理员用户名和密码。' \
-    '其他设置写入 /etc/nodeflare/config.toml，可在安装后编辑。' \
+    '首次安装会询问管理员用户名、密码和可选数据库连接。' \
+    '数据库设置可直接回车跳过，其他设置也可在安装后编辑。' \
     '重复运行会保留已有配置和数据库。' \
     '--uninstall 保留配置和数据；只有同时指定 --purge 才彻底删除。'
 }
@@ -127,7 +127,26 @@ prompt_credentials() {
   done
 }
 
+prompt_database() {
+  while :; do
+    printf '%s\n' \
+      "SQLite 示例：sqlite:///path/to/database.db" \
+      "PostgreSQL 示例：postgres://用户:密码@ip:端口/数据库?sslmode=require" > /dev/tty
+    prompt_line "数据库 URL [$default_database_url]: "
+    database_url=${prompt_value:-$default_database_url}
+    if LC_ALL=C printf '%s' "$database_url" | grep -q '[[:space:][:cntrl:]]'; then
+      printf '%s\n' "数据库 URL 不能包含空白或控制字符。" > /dev/tty
+      continue
+    fi
+    case "$database_url" in
+      sqlite://*|postgres://*|postgresql://*) break ;;
+      *) printf '%s\n' "数据库 URL 必须使用 sqlite://、postgres:// 或 postgresql://。" > /dev/tty ;;
+    esac
+  done
+}
+
 write_config() {
+  escaped_database_url=$(toml_escape "$database_url")
   escaped_username=$(toml_escape "$admin_username")
   escaped_password=$(toml_escape "$admin_password")
   config_temp=$(mktemp "$config_dir/.config.toml.XXXXXX")
@@ -135,7 +154,10 @@ write_config() {
     printf '%s\n' '# NodeFlare 服务端配置'
     printf '%s\n' '# 修改后运行：systemctl restart nodeflare'
     printf '\n'
-    printf 'database_url = "sqlite:///opt/nodeflare/data/server/nodeflare.db"\n'
+    printf '%s\n' '# SQLite：sqlite:///path/to/database.db'
+    printf '%s\n' '# PostgreSQL：postgres://用户:密码@ip:端口/数据库?sslmode=require'
+    printf '%s\n' '# URL 中的特殊字符需要进行百分号编码'
+    printf 'database_url = "%s"\n' "$escaped_database_url"
     printf 'bind_addr = "127.0.0.1:8080"\n'
     printf 'admin_username = "%s"\n' "$escaped_username"
     printf 'admin_password = "%s"\n' "$escaped_password"
@@ -147,7 +169,7 @@ write_config() {
     printf 'frontend_dir = "/opt/nodeflare/share/frontend"\n'
     printf 'admin_frontend_dir = "/opt/nodeflare/share/admin"\n'
     printf 'agent_dir = "/opt/nodeflare/share/agent"\n'
-    printf 'theme_dir = "/opt/nodeflare/data/server/themes"\n'
+    printf 'theme_dir = "/etc/nodeflare/themes"\n'
     printf 'session_ttl_hours = 168\n'
   } > "$config_temp"
   chown root:root "$config_temp"
@@ -155,6 +177,7 @@ write_config() {
   mv -f -- "$config_temp" "$config_file"
   config_temp=""
   admin_password=""
+  database_url=""
   prompt_value=""
 }
 
@@ -172,13 +195,12 @@ uninstall_server() {
   fi
 
   if [ "$purge" = true ]; then
-    rm -rf -- "$config_dir" "$state_dir"
-    log "已删除配置和数据库"
+    rm -rf -- "$config_dir"
+    log "已删除配置和全部服务端持久数据"
   else
-    log "已保留配置 $config_file 和数据目录 $state_dir"
+    log "已保留配置和服务端持久数据：$config_dir"
     log "如需彻底删除，运行：sudo ./install.sh --uninstall --purge"
   fi
-  rmdir "$data_dir" 2>/dev/null || true
   rmdir "$install_dir" 2>/dev/null || true
   log "卸载完成"
 }
@@ -208,6 +230,7 @@ new_config=false
 if [ ! -f "$config_file" ]; then
   new_config=true
   prompt_credentials
+  prompt_database
 else
   log "保留已有配置：$config_file"
 fi
@@ -220,11 +243,9 @@ sh "$script_dir/scripts/build-frontend.sh"
 sh "$script_dir/scripts/build-backend.sh"
 
 install -d -m 0700 -o root -g root "$config_dir"
+install -d -m 0700 -o root -g root "$theme_dir"
 install -d -m 0755 -o root -g root "$install_dir"
-install -d -m 0750 -o root -g root "$data_dir"
-install -d -m 0750 -o root -g root "$state_dir"
-install -d -m 0750 -o root -g root "$state_dir/themes"
-chown -R root:root "$state_dir"
+chown -R root:root "$config_dir"
 install -d -m 0755 -o root -g root "$share_dir"
 rm -rf -- "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
 install -d -m 0755 -o root -g root "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
@@ -261,6 +282,6 @@ log "安装完成"
 printf '%s\n' \
   "配置文件：$config_file" \
   "程序目录：$install_dir" \
-  "数据目录：$state_dir" \
+  "持久数据：$config_dir" \
   '服务状态：systemctl status nodeflare' \
   '默认访问：http://127.0.0.1:8080'

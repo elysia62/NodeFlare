@@ -50,7 +50,7 @@ pub struct Config {
 }
 
 fn default_database_url() -> String {
-    "sqlite:///opt/nodeflare/data/server/nodeflare.db".to_string()
+    "sqlite:///etc/nodeflare/nodeflare.db".to_string()
 }
 
 fn default_bind_addr() -> String {
@@ -70,7 +70,7 @@ fn default_agent_dir() -> PathBuf {
 }
 
 fn default_theme_dir() -> PathBuf {
-    PathBuf::from("/opt/nodeflare/data/server/themes")
+    PathBuf::from("/etc/nodeflare/themes")
 }
 
 fn default_session_hours() -> i64 {
@@ -135,11 +135,7 @@ fn resolve_database_url(base: &Path, value: &str) -> Result<String> {
         return Ok(value.to_string());
     }
     if value.starts_with("sqlite:///") {
-        return Ok(if value.contains('?') {
-            value.to_string()
-        } else {
-            format!("{value}?mode=rwc")
-        });
+        return Ok(value.to_string());
     }
     let Some(relative) = value.strip_prefix("sqlite://") else {
         anyhow::bail!("database_url must use sqlite://, postgres://, or postgresql://");
@@ -153,7 +149,7 @@ fn resolve_database_url(base: &Path, value: &str) -> Result<String> {
         .to_str()
         .context("SQLite database path is not valid UTF-8")?;
     Ok(if query.is_empty() {
-        format!("sqlite://{resolved}?mode=rwc")
+        format!("sqlite://{resolved}")
     } else {
         format!("sqlite://{resolved}?{query}")
     })
@@ -175,7 +171,7 @@ mod tests {
         assert_eq!(args.config, Path::new("/etc/nodeflare/config.toml"));
         assert_eq!(
             default_database_url(),
-            "sqlite:///opt/nodeflare/data/server/nodeflare.db"
+            "sqlite:///etc/nodeflare/nodeflare.db"
         );
         assert_eq!(default_bind_addr(), "127.0.0.1:8080");
         assert_eq!(
@@ -187,10 +183,7 @@ mod tests {
             Path::new("/opt/nodeflare/share/admin")
         );
         assert_eq!(default_agent_dir(), Path::new("/opt/nodeflare/share/agent"));
-        assert_eq!(
-            default_theme_dir(),
-            Path::new("/opt/nodeflare/data/server/themes")
-        );
+        assert_eq!(default_theme_dir(), Path::new("/etc/nodeflare/themes"));
     }
 
     #[test]
@@ -198,15 +191,23 @@ mod tests {
         assert_eq!(
             resolve_database_url(Path::new("/srv/nodeflare/backend"), "sqlite://nodeflare.db")
                 .unwrap(),
-            "sqlite:///srv/nodeflare/backend/nodeflare.db?mode=rwc"
+            "sqlite:///srv/nodeflare/backend/nodeflare.db"
         );
     }
 
     #[test]
-    fn accepts_postgres_urls() {
+    fn accepts_database_url_examples() {
         assert_eq!(
-            resolve_database_url(Path::new("."), "postgres://localhost/nodeflare").unwrap(),
-            "postgres://localhost/nodeflare"
+            resolve_database_url(Path::new("."), "sqlite:///etc/nodeflare/nodeflare.db").unwrap(),
+            "sqlite:///etc/nodeflare/nodeflare.db"
+        );
+        assert_eq!(
+            resolve_database_url(
+                Path::new("."),
+                "postgres://nodeflare:password@127.0.0.1:5432/nodeflare?sslmode=prefer",
+            )
+            .unwrap(),
+            "postgres://nodeflare:password@127.0.0.1:5432/nodeflare?sslmode=prefer"
         );
     }
 

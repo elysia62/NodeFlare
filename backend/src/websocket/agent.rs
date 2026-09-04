@@ -2,7 +2,7 @@ use super::{AgentCommand, AgentConnection, DashboardEvent};
 use crate::AppState;
 use crate::db::queries::{AgentIdentity, PersistResult};
 use crate::models::{AgentReport, RemoteTaskInfo};
-use crate::routes::{ApiResponse, forwarded_ip};
+use crate::routes::{ApiResponse, client_ip};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
@@ -11,6 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -43,6 +44,13 @@ pub async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
+    if state.database_restoring.load(Ordering::Acquire) {
+        return ApiResponse::error(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "数据库正在恢复，请稍后重试",
+        )
+        .into_response();
+    }
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -56,17 +64,24 @@ pub async fn handle(
         Ok(None) => return ApiResponse::unauthorized("Agent Token 无效").into_response(),
         Err(error) => return ApiResponse::internal(error).into_response(),
     };
-    let remote_ip = forwarded_ip(&headers).unwrap_or_else(|| peer.ip().to_string());
+    let remote_ip = client_ip(&headers, peer);
+    let token = token.to_string();
     ws.max_message_size(MAX_AGENT_MESSAGE_BYTES)
         .max_frame_size(MAX_AGENT_MESSAGE_BYTES)
-        .on_upgrade(move |socket| run(socket, state, identity, remote_ip))
+        .on_upgrade(move |socket| run(socket, state, identity, remote_ip, token))
 }
 
-async fn run(socket: WebSocket, state: Arc<AppState>, identity: AgentIdentity, remote_ip: String) {
+async fn run(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    identity: AgentIdentity,
+    remote_ip: String,
+    token: String,
+) {
     let connection_id = uuid::Uuid::new_v4().to_string();
     let (mut websocket_tx, mut websocket_rx) = socket.split();
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<AgentCommand>();
-    state.agents.write().await.insert(
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentCommand>(256);
+    let previous = state.agents.write().await.insert(
         identity.server_id.clone(),
         AgentConnection {
             connection_id: connection_id.clone(),
@@ -75,6 +90,31 @@ async fn run(socket: WebSocket, state: Arc<AppState>, identity: AgentIdentity, r
             collect_interval: identity.collect_interval,
         },
     );
+    if let Some(previous) = previous {
+        let _ = previous.sender.try_send(AgentCommand::Close);
+    }
+
+    // The HTTP upgrade and the async socket task are separate scheduling points.
+    // Revalidate after registration so a token rotated in between cannot leave a
+    // stale authenticated socket alive. Token rotation either closes this entry,
+    // or this check observes the new hash and rejects the connection itself.
+    let still_authorized = matches!(
+        crate::db::queries::agent_identity(&state.db, &token).await,
+        Ok(Some(current)) if current.server_id == identity.server_id
+    );
+    if !still_authorized {
+        let mut agents = state.agents.write().await;
+        if agents
+            .get(&identity.server_id)
+            .is_some_and(|connection| connection.connection_id == connection_id)
+        {
+            agents.remove(&identity.server_id);
+        }
+        drop(agents);
+        let _ = websocket_tx.send(Message::Close(None)).await;
+        tracing::warn!(server_id = %identity.server_id, "rejected stale Agent connection");
+        return;
+    }
     tracing::info!(server_id = %identity.server_id, remote_ip, "Agent connected");
 
     if let Some(config) = crate::db::queries::agent_config(&state.db, &identity.server_id)
@@ -82,7 +122,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, identity: AgentIdentity, r
         .ok()
         .flatten()
     {
-        let _ = outbound_tx.send(AgentCommand::Text(
+        let _ = outbound_tx.try_send(AgentCommand::Text(
             serde_json::json!({"type": "config", "ts": crate::db::now(), "config": config})
                 .to_string(),
         ));
@@ -106,12 +146,16 @@ async fn run(socket: WebSocket, state: Arc<AppState>, identity: AgentIdentity, r
         while let Some(command) = outbound_rx.recv().await {
             match command {
                 AgentCommand::Text(text) => {
-                    if websocket_tx.send(Message::Text(text)).await.is_err() {
+                    if websocket_tx.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
                 }
                 AgentCommand::Pong(payload) => {
-                    if websocket_tx.send(Message::Pong(payload)).await.is_err() {
+                    if websocket_tx
+                        .send(Message::Pong(payload.into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -129,7 +173,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, identity: AgentIdentity, r
                 handle_text(&state, &identity, &remote_ip, &outbound_tx, &text).await;
             }
             Ok(Message::Ping(payload)) => {
-                let _ = outbound_tx.send(AgentCommand::Pong(payload));
+                let _ = outbound_tx.try_send(AgentCommand::Pong(payload.to_vec()));
             }
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {}
@@ -150,9 +194,13 @@ async fn handle_text(
     state: &Arc<AppState>,
     identity: &AgentIdentity,
     remote_ip: &str,
-    outbound: &mpsc::UnboundedSender<AgentCommand>,
+    outbound: &mpsc::Sender<AgentCommand>,
     text: &str,
 ) {
+    if state.database_restoring.load(Ordering::Acquire) {
+        send_persistence_error(outbound, 0);
+        return;
+    }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
@@ -189,16 +237,15 @@ async fn handle_text(
                                     return;
                                 }
                             };
-                            let server_name = crate::db::queries::list_servers(&state.db, true)
-                                .await
-                                .ok()
-                                .and_then(|servers| {
-                                    servers
-                                        .into_iter()
-                                        .find(|server| server.id == server_id)
-                                        .map(|server| server.name)
-                                })
-                                .unwrap_or_else(|| server_id.clone());
+                            if !settings.notification_enabled {
+                                return;
+                            }
+                            let server_name =
+                                crate::db::queries::server_name(&state.db, &server_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(|| server_id.clone());
                             if let Err(error) = crate::notify::evaluate_resource_alerts(
                                 &state.db,
                                 &state.http,
@@ -247,9 +294,9 @@ async fn handle_text(
     }
 }
 
-fn send_task(outbound: &mpsc::UnboundedSender<AgentCommand>, task: &RemoteTaskInfo) -> bool {
+fn send_task(outbound: &mpsc::Sender<AgentCommand>, task: &RemoteTaskInfo) -> bool {
     outbound
-        .send(AgentCommand::Text(
+        .try_send(AgentCommand::Text(
             serde_json::json!({
                 "type": "remote_task",
                 "task_id": task.id,
@@ -261,20 +308,20 @@ fn send_task(outbound: &mpsc::UnboundedSender<AgentCommand>, task: &RemoteTaskIn
 }
 
 fn send_ack(
-    outbound: &mpsc::UnboundedSender<AgentCommand>,
+    outbound: &mpsc::Sender<AgentCommand>,
     identity: &AgentIdentity,
     result: &PersistResult,
 ) {
     let report_interval = identity.report_interval.clamp(15, 3600) * 1000;
     let live_interval = identity.collect_interval.clamp(1, 60) * 1000;
-    let _ = outbound.send(AgentCommand::Text(
+    let _ = outbound.try_send(AgentCommand::Text(
         serde_json::json!({
             "type": "ack",
             "ts": crate::db::now(),
             "persisted": true,
             "persistenceError": false,
             "persistedThroughTs": result.persisted_through,
-            "nextD1WriteAfterMs": report_interval,
+            "nextPersistAfterMs": report_interval,
             "nextWssReportAfterMs": live_interval,
             "realtimeHint": false,
         })
@@ -282,15 +329,15 @@ fn send_ack(
     ));
 }
 
-fn send_persistence_error(outbound: &mpsc::UnboundedSender<AgentCommand>, persisted: i64) {
-    let _ = outbound.send(AgentCommand::Text(
+fn send_persistence_error(outbound: &mpsc::Sender<AgentCommand>, persisted: i64) {
+    let _ = outbound.try_send(AgentCommand::Text(
         serde_json::json!({
             "type": "ack",
             "ts": crate::db::now(),
             "persisted": false,
             "persistenceError": true,
             "persistedThroughTs": persisted,
-            "nextD1WriteAfterMs": 5000,
+            "nextPersistAfterMs": 5000,
             "nextWssReportAfterMs": 5000,
             "realtimeHint": false,
         })
