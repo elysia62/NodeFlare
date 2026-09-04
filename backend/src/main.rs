@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tokio::sync::{Mutex, RwLock, Semaphore, broadcast};
+use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, watch};
 use tower_http::trace::TraceLayer;
 
 pub struct AppState {
@@ -37,6 +37,8 @@ pub struct AppState {
     pub dashboard_tx: broadcast::Sender<websocket::DashboardEvent>,
     pub database_maintenance: Mutex<()>,
     pub database_maintenance_active: AtomicBool,
+    pub database_restart_required: AtomicBool,
+    pub restart_tx: watch::Sender<bool>,
     pub login_attempts: security::AttemptLimiter,
     pub remote_totp_attempts: security::AttemptLimiter,
     pub password_verifications: Arc<Semaphore>,
@@ -162,6 +164,7 @@ async fn main() -> Result<()> {
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()?;
     let (dashboard_tx, _) = broadcast::channel(2048);
+    let (restart_tx, restart_rx) = watch::channel(false);
     let state = Arc::new(AppState {
         db: database,
         config,
@@ -172,6 +175,8 @@ async fn main() -> Result<()> {
         dashboard_tx,
         database_maintenance: Mutex::new(()),
         database_maintenance_active: AtomicBool::new(false),
+        database_restart_required: AtomicBool::new(false),
+        restart_tx,
         login_attempts: security::AttemptLimiter::new(
             5,
             std::time::Duration::from_secs(5 * 60),
@@ -280,6 +285,10 @@ async fn main() -> Result<()> {
             post(routes::admin::database_migrate),
         )
         .route(
+            "/api/admin/database/restart",
+            post(routes::admin::database_restart),
+        )
+        .route(
             "/api/admin/database/backup",
             get(routes::admin::database_backup),
         )
@@ -323,8 +332,12 @@ async fn main() -> Result<()> {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown_signal(restart_rx.clone()))
     .await?;
+    if *restart_rx.borrow() {
+        tracing::info!("restarting NodeFlare");
+        std::process::exit(75);
+    }
     Ok(())
 }
 
@@ -372,8 +385,17 @@ fn spawn_maintenance(state: Arc<AppState>) {
     });
 }
 
-async fn shutdown_signal() {
-    if tokio::signal::ctrl_c().await.is_ok() {
-        tracing::info!("shutdown signal received");
+async fn shutdown_signal(mut restart_rx: watch::Receiver<bool>) {
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if result.is_ok() {
+                tracing::info!("shutdown signal received");
+            }
+        }
+        result = restart_rx.wait_for(|requested| *requested) => {
+            if result.is_ok() {
+                tracing::info!("restart requested");
+            }
+        }
     }
 }

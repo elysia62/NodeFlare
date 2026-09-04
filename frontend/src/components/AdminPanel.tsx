@@ -20,6 +20,7 @@ import {
   Palette,
   Pencil,
   Plus,
+  Power,
   RadioTower,
   RotateCw,
   Save,
@@ -40,7 +41,7 @@ import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } fr
 import { formatBytes, formatByteSize, isOnline, parseByteSize } from "../format";
 import { derivePassword } from "../password";
 import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS } from "../refresh";
-import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseStats, type ExchangeRates, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
+import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
 import { Checkbox } from "./Checkbox";
 import { TurnstileWidget } from "./TurnstileWidget";
 import { useDialog } from "./useDialog";
@@ -228,6 +229,26 @@ async function copyText(value: string) {
   if (!copied) throw new Error("copy failed");
 }
 
+async function waitForDatabaseSwitch(targetKind: DatabaseStats["kind"], token: string) {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, 750));
+    try {
+      const response = await fetch(`/api/admin/database?restart=${Date.now()}`, {
+        cache: "no-store",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        signal: AbortSignal.timeout(2_500),
+      });
+      if (response.status === 401) return;
+      if (response.ok) {
+        const database = await response.json() as DatabaseStats;
+        if (database.kind === targetKind && !database.restart_required) return;
+      }
+    } catch {}
+  }
+  throw new Error("NodeFlare 未自动恢复，请在主机上检查服务状态");
+}
+
 export function AdminPanel({
   config,
   dark,
@@ -256,6 +277,8 @@ export function AdminPanel({
   const [settings, setSettings] = useState<Settings | null>(null);
   const [database, setDatabase] = useState<DatabaseStats | null>(null);
   const [databaseMigrationUrl, setDatabaseMigrationUrl] = useState("");
+  const [databaseMigrationResult, setDatabaseMigrationResult] = useState<DatabaseMigrationResult | null>(null);
+  const [restarting, setRestarting] = useState(false);
   const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [exchangeRatesExpanded, setExchangeRatesExpanded] = useState(false);
   const [themes, setThemes] = useState<Theme[]>([]);
@@ -582,6 +605,7 @@ export function AdminPanel({
     try {
       const [stats, rates] = await Promise.all([api.databaseStats(), api.exchangeRates()]);
       setDatabase(stats);
+      if (!stats.restart_required) setDatabaseMigrationResult(null);
       setExchangeRates(rates);
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : "读取数据库统计失败"); }
@@ -609,10 +633,34 @@ export function AdminPanel({
     try {
       const result = await api.migrateDatabase(databaseUrl);
       setDatabaseMigrationUrl("");
+      setDatabaseMigrationResult(result);
+      setDatabase((current) => current ? { ...current, restart_required: result.restart_required } : current);
       const targetName = result.target_kind === "postgresql" ? "PostgreSQL" : "SQLite";
-      window.alert(`数据库已迁移到 ${targetName}，共 ${result.migrated_rows.toLocaleString()} 行（${formatBytes(result.size_bytes)}），并已更新配置。请重启 NodeFlare 后重新登录。`);
+      setNotice(`数据库已迁移到 ${targetName}，共 ${result.migrated_rows.toLocaleString()} 行（${formatBytes(result.size_bytes)}）`);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "数据库迁移失败"); }
     finally { setBusy(false); }
+  }
+
+  async function restartAfterDatabaseMigration() {
+    if (!database?.restart_required || !window.confirm("立即重启 NodeFlare 并切换到新数据库？管理界面和 Agent 会短暂断开。")) return;
+    const targetKind = databaseMigrationResult?.target_kind === "postgresql"
+      ? "postgresql"
+      : databaseMigrationResult?.target_kind === "sqlite"
+        ? "sqlite"
+        : database.kind === "postgresql" ? "sqlite" : "postgresql";
+    const token = getToken();
+    setBusy(true); setRestarting(true); setError(""); setNotice("NodeFlare 正在重启");
+    try {
+      await api.restartAfterDatabaseMigration();
+      await waitForDatabaseSwitch(targetKind, token);
+      setToken("");
+      window.location.replace("/admin/login");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "重启 NodeFlare 失败");
+    } finally {
+      setBusy(false);
+      setRestarting(false);
+    }
   }
 
   async function refreshExchangeRates() {
@@ -1149,11 +1197,11 @@ export function AdminPanel({
                   </> : null}
 
                   {tab === "data" ? <>
-                    <div className="section-head database-section-head"><div><h3>数据库维护</h3><span>备份包含节点、设置、历史、任务及安全配置，请妥善保管。</span></div><div className="section-actions"><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void exportDatabaseBackup()}><Download size={15} />导出备份</button><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => databaseRestoreInputRef.current?.click()}><Upload size={15} />恢复备份</button><input ref={databaseRestoreInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void restoreDatabaseBackup(file); }} /></div></div>
-                    <div className="database-storage"><div><span>数据库大小</span><strong>{database ? formatBytes(database.size_bytes) : "读取中..."}</strong>{database ? <small>{database.kind === "postgresql" ? "PostgreSQL" : "SQLite"}{database.reclaimable_bytes ? ` · 可回收 ${formatBytes(database.reclaimable_bytes)}` : ""}</small> : null}</div><button type="button" className="secondary-btn" disabled={busy || !database} onClick={() => void reclaimDatabase()}><RotateCw size={15} />回收空间</button></div>
+                    <div className="section-head database-section-head"><div><h3>数据库维护</h3><span>备份包含节点、设置、历史、任务及安全配置，请妥善保管。</span></div><div className="section-actions"><button type="button" className="secondary-btn compact" disabled={busy || database?.restart_required} onClick={() => void exportDatabaseBackup()}><Download size={15} />导出备份</button><button type="button" className="secondary-btn compact" disabled={busy || database?.restart_required} onClick={() => databaseRestoreInputRef.current?.click()}><Upload size={15} />恢复备份</button><input ref={databaseRestoreInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void restoreDatabaseBackup(file); }} /></div></div>
+                    <div className="database-storage"><div><span>数据库大小</span><strong>{database ? formatBytes(database.size_bytes) : "读取中..."}</strong>{database ? <small>{database.kind === "postgresql" ? "PostgreSQL" : "SQLite"}{database.reclaimable_bytes ? ` · 可回收 ${formatBytes(database.reclaimable_bytes)}` : ""}</small> : null}</div><button type="button" className="secondary-btn" disabled={busy || !database || database.restart_required} onClick={() => void reclaimDatabase()}><RotateCw size={15} />回收空间</button></div>
                     <div className="database-migration">
                       <div><div className="section-title"><ArrowRightLeft size={15} />数据库迁移</div><p className="settings-hint">将当前 {database?.kind === "postgresql" ? "PostgreSQL" : "SQLite"} 数据复制到 {database?.kind === "postgresql" ? "SQLite" : "PostgreSQL"}，完成后自动更新配置，重启服务后生效。</p></div>
-                      <div className="database-migration-form"><label><span>目标数据库 URL</span><input required type="password" autoComplete="off" maxLength={2048} spellCheck={false} value={databaseMigrationUrl} onChange={(event) => setDatabaseMigrationUrl(event.target.value)} placeholder={database?.kind === "postgresql" ? "sqlite://nodeflare-migrated.db" : "postgres://user:password@127.0.0.1:5432/nodeflare?sslmode=prefer"} /></label><button className="primary-btn" disabled={busy || !databaseMigrationUrl.trim()}><ArrowRightLeft size={15} />{busy ? "迁移中" : "开始迁移"}</button></div>
+                      {database?.restart_required ? <div className="database-migration-ready" role="status" aria-live="polite"><CircleCheck size={20} /><div><strong>迁移完成，等待重启</strong><span>{databaseMigrationResult ? `已复制 ${databaseMigrationResult.migrated_rows.toLocaleString()} 行，新数据库大小 ${formatBytes(databaseMigrationResult.size_bytes)}` : "配置已更新，重启后切换到新数据库"}</span></div><button type="button" className="primary-btn" disabled={busy} onClick={() => void restartAfterDatabaseMigration()}>{restarting ? <RotateCw className="spin" size={15} /> : <Power size={15} />}{restarting ? "正在重启" : "立即重启"}</button></div> : <div className="database-migration-form"><label><span>目标数据库 URL</span><input required type="password" autoComplete="off" maxLength={2048} spellCheck={false} value={databaseMigrationUrl} onChange={(event) => setDatabaseMigrationUrl(event.target.value)} placeholder={database?.kind === "postgresql" ? "sqlite://nodeflare-migrated.db" : "postgres://user:password@127.0.0.1:5432/nodeflare?sslmode=prefer"} /></label><button className="primary-btn" disabled={busy || !databaseMigrationUrl.trim()}><ArrowRightLeft size={15} />{busy ? "迁移中" : "开始迁移"}</button></div>}
                     </div>
                     <div className="usage-section">
                       <div className="usage-head"><div><div className="section-title"><Coins size={15} />每日汇率</div><p className="settings-hint">{exchangeRates ? `${exchangeRates.source} · ${exchangeRates.date || "等待首次更新"}${exchangeRates.stale ? " · 数据待更新" : ""}` : "正在读取汇率快照"}</p></div><div className="usage-head-actions">{exchangeRatesExpanded ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshExchangeRates()}><RotateCw size={15} />立即更新</button> : null}<button type="button" className="secondary-btn compact usage-toggle" aria-expanded={exchangeRatesExpanded} onClick={() => setExchangeRatesExpanded((expanded) => !expanded)}>{exchangeRatesExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}{exchangeRatesExpanded ? "收起" : "展开"}</button></div></div>

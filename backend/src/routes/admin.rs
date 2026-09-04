@@ -618,7 +618,9 @@ pub async fn exchange_refresh(State(state): State<Arc<AppState>>) -> Result<Resp
 }
 
 pub async fn database_stats(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    Ok(Json(state.db.stats().await.map_err(ApiResponse::internal)?).into_response())
+    let mut database = state.db.stats().await.map_err(ApiResponse::internal)?;
+    database.restart_required = state.database_restart_required.load(Ordering::Acquire);
+    Ok(Json(database).into_response())
 }
 
 pub async fn database_reclaim(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
@@ -635,7 +637,8 @@ pub async fn database_reclaim(State(state): State<Arc<AppState>>) -> Result<Resp
         .reclaim_space()
         .await
         .map_err(ApiResponse::internal)?;
-    let database = state.db.stats().await.map_err(ApiResponse::internal)?;
+    let mut database = state.db.stats().await.map_err(ApiResponse::internal)?;
+    database.restart_required = state.database_restart_required.load(Ordering::Acquire);
     let reclaimed_bytes = before.size_bytes.saturating_sub(database.size_bytes);
     Ok(Json(serde_json::json!({
         "database": database,
@@ -689,6 +692,9 @@ pub async fn database_migrate(
     let database = target.stats().await.map_err(ApiResponse::internal)?;
     crate::config::update_database_url(&state.config_path, &target_url)
         .map_err(ApiResponse::internal)?;
+    state
+        .database_restart_required
+        .store(true, Ordering::Release);
 
     Ok(Json(serde_json::json!({
         "migrated_rows": migrated_rows,
@@ -697,6 +703,19 @@ pub async fn database_migrate(
         "restart_required": true,
     }))
     .into_response())
+}
+
+pub async fn database_restart(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+    if !state.database_restart_required.load(Ordering::Acquire) {
+        return Err(ApiResponse::bad_request("当前没有等待生效的数据库迁移"));
+    }
+    state.disconnect_agents().await;
+    state.restart_tx.send(true).map_err(ApiResponse::internal)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"restarting": true})),
+    )
+        .into_response())
 }
 
 pub async fn database_backup(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {

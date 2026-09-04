@@ -313,6 +313,7 @@ export interface DatabaseStats {
   kind: "sqlite" | "postgresql";
   size_bytes: number;
   reclaimable_bytes: number | null;
+  restart_required: boolean;
 }
 
 export interface DatabaseMigrationResult {

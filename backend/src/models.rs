@@ -490,6 +490,7 @@ pub struct DatabaseStats {
     pub kind: String,
     pub size_bytes: i64,
     pub reclaimable_bytes: Option<i64>,
+    pub restart_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

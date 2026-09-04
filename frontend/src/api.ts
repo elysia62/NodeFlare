@@ -155,6 +155,11 @@ export const api = {
     { method: "POST", body: JSON.stringify({ database_url: databaseUrl }) },
     true,
   ),
+  restartAfterDatabaseMigration: () => request<{ restarting: boolean }>(
+    "/api/admin/database/restart",
+    { method: "POST" },
+    true,
+  ),
   databaseBackup: async () => {
     const response = await requestResponse("/api/admin/database/backup", {}, true);
     const disposition = response.headers.get("Content-Disposition") ?? "";

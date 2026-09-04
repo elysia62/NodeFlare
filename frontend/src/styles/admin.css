@@ -187,6 +187,12 @@
 .database-migration-form label { min-width: 0; }
 .database-migration-form input { width: 100%; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .database-migration-form button { min-width: 128px; }
+.database-migration-ready { display: grid; align-items: center; gap: 11px; border: 1px solid color-mix(in srgb, var(--admin-success) 34%, var(--admin-border)); border-radius: 7px; padding: 12px; background: var(--admin-success-bg); grid-template-columns: auto minmax(0, 1fr) auto; }
+.database-migration-ready > svg { color: var(--admin-success); }
+.database-migration-ready > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.database-migration-ready strong { color: var(--admin-text); font-size: 13px; }
+.database-migration-ready span { color: var(--admin-muted); font-size: 12px; }
+.database-migration-ready .spin { animation: remote-refresh-spin 1.2s linear infinite; }
 .usage-section { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--admin-border); padding-top: 14px; }
 .usage-head { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; }
 .usage-head .section-title { margin-bottom: 3px; }
@@ -431,6 +437,8 @@
   .database-storage button { width: 100%; }
   .database-migration-form { grid-template-columns: 1fr; }
   .database-migration-form button { width: 100%; }
+  .database-migration-ready { grid-template-columns: auto minmax(0, 1fr); }
+  .database-migration-ready .primary-btn { grid-column: 1 / -1; width: 100%; }
   .login-device-row { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .login-device-revoke { grid-column: 2; justify-self: start; }
   .remote-2fa-required { grid-template-columns: auto minmax(0, 1fr); }

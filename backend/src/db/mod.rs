@@ -95,6 +95,7 @@ impl Database {
             kind: self.kind.as_str().to_string(),
             size_bytes,
             reclaimable_bytes,
+            restart_required: false,
         })
     }
 
