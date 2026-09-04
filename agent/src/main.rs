@@ -60,8 +60,6 @@ const LIVE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const LIVE_QUEUE_CAPACITY: usize = 720;
 const MAX_PENDING_SPOOL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PENDING_SPOOL_LINE_BYTES: usize = 1024 * 1024;
-// Database persistence can take a few hundred milliseconds; allow the ACK to arrive
-// before continuing with the configured live interval.
 const LIVE_ACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const LIVE_HINT_READ_TIMEOUT: Duration = Duration::from_millis(10);
 const LIVE_REPORT_DIVISOR: u64 = 15;
@@ -250,8 +248,6 @@ impl ClockCalibration {
 
 type SharedClock = Arc<Mutex<ClockCalibration>>;
 
-/// 双栈公网地址探测：分别请求按协议族锁死的 icanhazip 端点（Cloudflare 运营，
-/// 纯文本返回调用方出口 IP）。短暂失败保留最近结果，持续失败则清空过期地址。
 #[derive(Default)]
 struct PublicIpValue {
     address: Option<IpAddr>,
@@ -286,7 +282,6 @@ struct PublicIpProbe {
 }
 
 impl PublicIpProbe {
-    /// 距上次尝试超过刷新间隔且没有探测在进行时，后台起一轮探测（不阻塞采样）。
     fn refresh(&self) {
         let due = self
             .last_attempt
@@ -329,7 +324,6 @@ impl PublicIpProbe {
             .map(|ip| ip.to_string())
     }
 
-    /// 一次性模式没有后续采样，等首轮探测落地（或预算耗尽）再出报告。
     fn wait_initial(&self) {
         let deadline = Instant::now() + PUBLIC_IP_WAIT_BUDGET;
         while self.probing.load(Ordering::SeqCst) && Instant::now() < deadline {
@@ -358,7 +352,6 @@ fn probe_public_ip(url: &str, ipv6: bool) -> Option<IpAddr> {
     parse_public_ip(&body, ipv6)
 }
 
-/// 端点返回的协议族必须与请求的锁族一致，防止代理或劫持回一个错族地址。
 fn parse_public_ip(text: &str, ipv6: bool) -> Option<IpAddr> {
     let ip: IpAddr = text.trim().parse().ok()?;
     match (ipv6, ip) {
@@ -1912,9 +1905,7 @@ fn receive_remote_output(
     match receiver.recv_timeout(REMOTE_OUTPUT_DRAIN_TIMEOUT) {
         Ok(output) => output,
         Err(_) => {
-            // A background descendant can keep the inherited pipe open after
-            // the shell exits. End the task's process group so result
-            // collection itself cannot hang the Agent.
+            // Descendants may keep the pipe open after the shell exits.
             terminate_remote_process_tree(child);
             receiver
                 .recv_timeout(REMOTE_OUTPUT_DRAIN_TIMEOUT)
@@ -2785,12 +2776,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                     }
                     drop_socket = true;
                 }
-                Ok(LiveRead::RemoteTask(_task)) => {
-                    // 在 wait_for_live_ack 中已处理，这里不应该出现
-                }
-                Ok(LiveRead::TaskResultAck(_)) => {
-                    // 在 wait_for_live_ack 中已处理，这里不应该出现
-                }
+                Ok(LiveRead::RemoteTask(_) | LiveRead::TaskResultAck(_)) => {}
                 Ok(LiveRead::Pending) => {
                     eprintln!("live ACK timed out");
                     drop_socket = true;
@@ -3030,11 +3016,20 @@ fn version_triplet(value: &str) -> Option<(u64, u64, u64)> {
 
 fn agent_artifact_name() -> Option<&'static str> {
     match (env::consts::OS, env::consts::ARCH) {
-        ("linux", "x86_64") => Some("agent-linux-x64"),
-        ("linux", "aarch64") => Some("agent-linux-aarch64"),
+        ("linux", "x86_64") => Some(if cfg!(target_env = "musl") {
+            "agent-linux-x64-musl"
+        } else {
+            "agent-linux-x64-glibc"
+        }),
+        ("linux", "aarch64") => Some(if cfg!(target_env = "musl") {
+            "agent-linux-aarch64-musl"
+        } else {
+            "agent-linux-aarch64-glibc"
+        }),
         ("windows", "x86_64") => Some("agent-windows-x64.exe"),
         ("macos", "aarch64") => Some("agent-macos-aarch64"),
         ("freebsd", "x86_64") => Some("agent-freebsd-x64"),
+        ("freebsd", "aarch64") => Some("agent-freebsd-aarch64"),
         _ => None,
     }
 }
@@ -3490,7 +3485,6 @@ mod tests {
         let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
         assert_eq!(parse_public_ip("203.0.113.7\n", false), Some(v4));
         assert_eq!(parse_public_ip("2001:db8::1", true), Some(v6));
-        // 协议族不匹配或无法解析时一律视为探测失败。
         assert_eq!(parse_public_ip("2001:db8::1", false), None);
         assert_eq!(parse_public_ip("203.0.113.7", true), None);
         assert_eq!(parse_public_ip("not an ip", false), None);
@@ -3575,7 +3569,7 @@ mod tests {
     fn validates_release_asset_digests() {
         let hash = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
         let mut asset = GithubReleaseAsset {
-            name: "agent-linux-x64".to_string(),
+            name: "agent-linux-x64-glibc".to_string(),
             browser_download_url: "https://example.com/agent".to_string(),
             digest: Some(format!("sha256:{hash}")),
         };

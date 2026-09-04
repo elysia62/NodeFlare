@@ -14,7 +14,7 @@ pub const VERSION: &str = match option_env!("NODEFLARE_VERSION") {
 #[command(version = VERSION, about = "NodeFlare monitoring server")]
 pub struct Args {
     /// Path to the TOML configuration file.
-    #[arg(short, long, default_value = "/etc/nodeflare/config.toml")]
+    #[arg(short, long, default_value_os_t = default_config_path())]
     pub config: PathBuf,
 
     /// Override the configured bind address.
@@ -52,27 +52,61 @@ pub struct Config {
 }
 
 fn default_database_url() -> String {
-    "sqlite:///etc/nodeflare/nodeflare.db".to_string()
+    "sqlite://nodeflare.db".to_string()
 }
 
 fn default_bind_addr() -> String {
     "127.0.0.1:8080".to_string()
 }
 
+fn default_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    return std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("NodeFlare")
+        .join("Server");
+    #[cfg(target_os = "macos")]
+    return PathBuf::from("/Library/Application Support/NodeFlare/Server");
+    #[cfg(target_os = "freebsd")]
+    return PathBuf::from("/var/db/nodeflare/server");
+    #[cfg(not(any(windows, target_os = "macos", target_os = "freebsd")))]
+    PathBuf::from("/etc/nodeflare")
+}
+
+fn default_config_path() -> PathBuf {
+    default_data_dir().join("config.toml")
+}
+
+fn default_share_dir() -> PathBuf {
+    #[cfg(windows)]
+    return std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+        .join("NodeFlare")
+        .join("share");
+    #[cfg(target_os = "macos")]
+    return PathBuf::from("/usr/local/libexec/nodeflare/share");
+    #[cfg(target_os = "freebsd")]
+    return PathBuf::from("/usr/local/share/nodeflare");
+    #[cfg(not(any(windows, target_os = "macos", target_os = "freebsd")))]
+    PathBuf::from("/opt/nodeflare/share")
+}
+
 fn default_public_frontend_dir() -> PathBuf {
-    PathBuf::from("/opt/nodeflare/share/frontend")
+    default_share_dir().join("frontend")
 }
 
 fn default_admin_frontend_dir() -> PathBuf {
-    PathBuf::from("/opt/nodeflare/share/admin")
+    default_share_dir().join("admin")
 }
 
 fn default_agent_dir() -> PathBuf {
-    PathBuf::from("/opt/nodeflare/share/agent")
+    default_share_dir().join("agent")
 }
 
 fn default_theme_dir() -> PathBuf {
-    PathBuf::from("/etc/nodeflare/themes")
+    default_data_dir().join("themes")
 }
 
 fn default_session_hours() -> i64 {
@@ -203,31 +237,29 @@ fn resolve_database_url(base: &Path, value: &str) -> Result<String> {
 mod tests {
     use super::{
         Args, clear_bootstrap_password, default_admin_frontend_dir, default_agent_dir,
-        default_bind_addr, default_database_url, default_public_frontend_dir, default_theme_dir,
-        is_example_password, resolve_database_url,
+        default_bind_addr, default_config_path, default_data_dir, default_database_url,
+        default_public_frontend_dir, default_share_dir, default_theme_dir, is_example_password,
+        resolve_database_url,
     };
     use clap::Parser;
     use std::path::Path;
 
     #[test]
-    fn defaults_to_system_install_paths() {
+    fn defaults_to_platform_install_paths() {
         let args = Args::try_parse_from(["nodeflare"]).unwrap();
-        assert_eq!(args.config, Path::new("/etc/nodeflare/config.toml"));
-        assert_eq!(
-            default_database_url(),
-            "sqlite:///etc/nodeflare/nodeflare.db"
-        );
+        assert_eq!(args.config, default_config_path());
+        assert_eq!(default_database_url(), "sqlite://nodeflare.db");
         assert_eq!(default_bind_addr(), "127.0.0.1:8080");
         assert_eq!(
             default_public_frontend_dir(),
-            Path::new("/opt/nodeflare/share/frontend")
+            default_share_dir().join("frontend")
         );
         assert_eq!(
             default_admin_frontend_dir(),
-            Path::new("/opt/nodeflare/share/admin")
+            default_share_dir().join("admin")
         );
-        assert_eq!(default_agent_dir(), Path::new("/opt/nodeflare/share/agent"));
-        assert_eq!(default_theme_dir(), Path::new("/etc/nodeflare/themes"));
+        assert_eq!(default_agent_dir(), default_share_dir().join("agent"));
+        assert_eq!(default_theme_dir(), default_data_dir().join("themes"));
     }
 
     #[test]

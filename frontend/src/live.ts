@@ -1,17 +1,10 @@
 import type { LatencySample, LiveLatencyResult, Server } from "./types";
 
-/** A single Agent report as replayed by the NodeFlare server. */
 interface LiveSample {
   ts: number;
   data: Partial<Server> & { latency_results?: LiveLatencyResult[] };
 }
 
-/**
- * The sample currently on screen for one server. `timestamp` is the real
- * sample time used for freshness checks; `displayTimestamp` is the playback
- * cursor, which advances every second so buffered samples are shown at the
- * cadence they were produced instead of all at once.
- */
 export interface LiveMetrics {
   timestamp: number;
   displayTimestamp: number;
@@ -21,7 +14,6 @@ export interface LiveMetrics {
 
 export type LiveMetricsMap = Record<string, LiveMetrics>;
 
-/** Pending samples per server, ordered by sample time. */
 export type PlaybackBuffer = Map<string, LiveSample[]>;
 
 export interface BatchUpdate {
@@ -47,7 +39,6 @@ export function mergeLiveResults(
     .slice(-MAX_LIVE_LATENCY_RESULTS);
 }
 
-/** Overlay the newest live result onto each persisted latency definition. */
 export function mergeLiveLatency(server: Server, results: LiveLatencyResult[]): LatencySample[] {
   const latest = new Map<string, LiveLatencyResult>();
   for (const result of results) {
@@ -77,11 +68,6 @@ function splitSample(sample: LiveSample) {
   return { metrics, latencyResults };
 }
 
-/**
- * Fold a `batchUpdate` frame into the live map, buffering anything newer than
- * the playback cursor. `playback` is mutated in place — it is a ref-held
- * buffer rather than render state, because it changes on every frame.
- */
 export function applyBatch(
   current: LiveMetricsMap,
   updates: readonly BatchUpdate[],
@@ -101,8 +87,6 @@ export function applyBatch(
     const incoming = samples.filter((sample) => sample.ts > appliedTimestamp && !seen.has(sample.ts));
     if (!incoming.length) continue;
 
-    // A cached replay arrives late, so start the cursor past the report age
-    // instead of re-playing the whole window in real time.
     const reportAgeSeconds = context.cached && Number.isFinite(update.reportAgeMs)
       ? Math.max(0, update.reportAgeMs! / 1000)
       : 0;
@@ -133,7 +117,6 @@ export function applyBatch(
   return next;
 }
 
-/** Move every playback cursor forward and release any sample it has reached. */
 export function advancePlayback(
   current: LiveMetricsMap,
   playback: PlaybackBuffer,
@@ -165,10 +148,6 @@ export function advancePlayback(
   return next;
 }
 
-/**
- * Fold the live sample onto its persisted server row, then keep the uptime
- * clock ticking between Agent reports while the sample is still fresh.
- */
 export function mergeServerLive(
   server: Server,
   live: LiveMetrics | undefined,
@@ -189,7 +168,6 @@ export function mergeServerLive(
     : merged;
 }
 
-/** Drop buffered samples the persisted rows have already caught up to. */
 export function pruneStalePlayback(playback: PlaybackBuffer, servers: readonly Server[]) {
   for (const server of servers) {
     const samples = playback.get(server.id);

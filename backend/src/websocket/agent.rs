@@ -114,10 +114,7 @@ async fn run(
         let _ = previous.sender.try_send(AgentCommand::Close);
     }
 
-    // The HTTP upgrade and the async socket task are separate scheduling points.
-    // Revalidate after registration so a token rotated in between cannot leave a
-    // stale authenticated socket alive. Token rotation either closes this entry,
-    // or this check observes the new hash and rejects the connection itself.
+    // Close the token-rotation race between authentication and registration.
     let still_authorized = matches!(
         crate::db::queries::agent_identity(&state.db, &token).await,
         Ok(Some(current)) if current.server_id == identity.server_id
@@ -337,17 +334,15 @@ async fn handle_text(
     }
 }
 
-fn send_task(outbound: &mpsc::Sender<AgentCommand>, task: &RemoteTaskInfo) -> bool {
-    outbound
-        .try_send(AgentCommand::Text(
-            serde_json::json!({
-                "type": "remote_task",
-                "task_id": task.id,
-                "command": task.command,
-            })
-            .to_string(),
-        ))
-        .is_ok()
+fn send_task(outbound: &mpsc::Sender<AgentCommand>, task: &RemoteTaskInfo) {
+    let _ = outbound.try_send(AgentCommand::Text(
+        serde_json::json!({
+            "type": "remote_task",
+            "task_id": task.id,
+            "command": task.command,
+        })
+        .to_string(),
+    ));
 }
 
 fn send_ack(
@@ -459,8 +454,8 @@ fn agent_protocol_supported(headers: &HeaderMap) -> bool {
         .all(|capability| capabilities.contains(capability))
 }
 
-pub fn queue_remote_task(connection: &AgentConnection, task: &RemoteTaskInfo) -> bool {
-    send_task(&connection.sender, task)
+pub fn queue_remote_task(connection: &AgentConnection, task: &RemoteTaskInfo) {
+    send_task(&connection.sender, task);
 }
 
 #[cfg(test)]

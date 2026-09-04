@@ -26,7 +26,6 @@ describe("formatByteSize", () => {
   });
 
   test("normalises negatives to zero", () => {
-    // 0 就是「不限」，没有单独的负数哨兵。
     expect(formatByteSize(0)).toBe("0");
     expect(formatByteSize(-1)).toBe("0");
   });

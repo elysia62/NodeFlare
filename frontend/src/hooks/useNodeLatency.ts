@@ -53,7 +53,6 @@ function mergePoints(...sources: LatencySample[][]): LatencySample[] {
   return Array.from(points.values()).sort((left, right) => left.timestamp - right.timestamp);
 }
 
-/** Backend order, deduplicated — the fallback ordering for carrier slots. */
 function taskRefs(points: readonly LatencySample[]): LatencyTaskRef[] {
   const tasks = new Map<string, LatencyTaskRef>();
   for (const point of points) {
@@ -112,9 +111,7 @@ export function useNodeLatency(
         const result = await api.latencyHistory(server.id, WINDOW_HOURS);
         cache.set(server.id, { at: Date.now(), points: result.points });
         if (!stopped) setFetched(result.points);
-      } catch {
-        // Keep the last successful samples visible during transient failures.
-      } finally {
+      } catch {} finally {
         running = false;
         if (!stopped) setLoading(false);
         schedule();
@@ -143,7 +140,6 @@ export function useNodeLatency(
     };
   }, [enabled, server.id]);
 
-  // 保留历史柱，同时用实时推送覆盖同一任务的最新样本。
   const points = useMemo(() => mergePoints(fetched, server.latency), [server.latency, fetched]);
   const carrierKey = carrierSelection
     ? `${carrierSelection.telecom}\0${carrierSelection.mobile}\0${carrierSelection.unicom}`
@@ -153,8 +149,6 @@ export function useNodeLatency(
     const windowSeconds = WINDOW_HOURS * 3600;
     const placeholder = loading ? ui(locale, "加载中", "Loading") : ui(locale, "无采样数据", "No samples");
 
-    // Tasks that never produced a usable latency reading are excluded before
-    // the summary, so one dead target cannot drag the headline number.
     const byTask = new Map<string, LatencySample[]>();
     for (const point of points) {
       const samples = byTask.get(point.task_id) ?? [];
@@ -194,7 +188,6 @@ export function useNodeLatency(
     }
 
     return {
-      // 与 Komari 原版一致：无数据时汇总显示 "-"，「无采样数据」只出现在空柱的 tooltip 里。
       latencyDisplay: averageLatency === null ? (loading ? placeholder : "-") : `${Math.round(averageLatency)} ms`,
       lossDisplay: averageLoss === null ? (loading ? placeholder : "-") : `${averageLoss.toFixed(1)}%`,
       latencyBars: buckets.length ? latencyBars(buckets, "all", locale) : emptyBars(placeholder),

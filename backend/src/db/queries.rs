@@ -713,7 +713,6 @@ async fn save_history_rows(
              disk_await_ms=excluded.disk_await_ms, disk_utilization=excluded.disk_utilization",
             value_groups.join(",")
         );
-        // SQL identifiers are fixed above; only generated placeholders are interpolated.
         sqlx::query_with(AssertSqlSafe(sql), arguments)
             .execute(&mut **transaction)
             .await?;
@@ -779,7 +778,6 @@ async fn save_latency_rows(
              latency_ms=excluded.latency_ms, packet_loss=excluded.packet_loss",
             value_groups.join(",")
         );
-        // SQL identifiers are fixed above; only generated placeholders are interpolated.
         sqlx::query_with(AssertSqlSafe(sql), arguments)
             .execute(&mut **transaction)
             .await?;
@@ -1381,8 +1379,6 @@ pub async fn evaluate_resource_rules(
             )
         };
         let since = now() - rule.duration_minutes * 60;
-        // `expression` and the placeholder syntax above are selected only from
-        // fixed literals; no request data is interpolated into this SQL.
         let row = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
             .bind(server_id)
             .bind(since)

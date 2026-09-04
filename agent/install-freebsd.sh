@@ -27,7 +27,7 @@ NodeFlare Agent FreeBSD 安装脚本
   install-freebsd.sh --status
   install-freebsd.sh --uninstall
 
-仅支持 FreeBSD amd64。Agent Token 请勿泄露。
+支持 FreeBSD amd64 和 arm64。Agent Token 请勿泄露。
 -m 为可选的 GitHub 下载加速前缀（形如 https://ghproxy.net），
 仅作用于 Release 下载，摘要校验不受影响。
 EOF
@@ -87,8 +87,9 @@ fi
 [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限运行安装"
 [ "$(uname -s)" = "FreeBSD" ] || fail "此脚本仅支持 FreeBSD"
 case "$(uname -m)" in
-  amd64|x86_64) ;;
-  *) fail "仅支持 FreeBSD amd64" ;;
+  amd64|x86_64) arch=x64 ;;
+  arm64|aarch64) arch=aarch64 ;;
+  *) fail "仅支持 FreeBSD amd64 和 arm64" ;;
 esac
 command -v fetch >/dev/null 2>&1 || command -v curl >/dev/null 2>&1 || fail "缺少 fetch 或 curl"
 command -v sha256 >/dev/null 2>&1 || fail "缺少 sha256，无法校验下载文件"
@@ -121,7 +122,9 @@ done
 [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
 endpoint=${endpoint%/}
 [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
-safe_value "$token" && safe_value "$endpoint" || fail "服务地址或 Agent Token 格式无效"
+if ! safe_value "$token" || ! safe_value "$endpoint"; then
+  fail "服务地址或 Agent Token 格式无效"
+fi
 case "$endpoint" in
   https://?*|http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*) ;;
   *) fail "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
@@ -147,7 +150,7 @@ chmod 750 "$STATE_ROOT"
 chmod 750 "$STATE_DIR"
 temporary="$INSTALL_DIR/.agent.$$.download"
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
-artifact="agent-freebsd-x64"
+artifact="agent-freebsd-$arch"
 release_api="https://api.github.com/repos/imengying/NodeFlare/releases/latest"
 log "正在获取 GitHub 最新正式版本（$artifact）"
 release_json=$(download_stdout "$release_api")

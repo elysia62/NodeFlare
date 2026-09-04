@@ -61,8 +61,6 @@ function QualityPanel({ label, value, bars }: {
   value: string;
   bars: LatencyBar[];
 }) {
-  // 不挂 aria-label：label 和 value 已经是下面的可见文本，重复；
-  // 而且整张卡片是 <button>，role=button 的子树在无障碍树里会被整体裁掉，挂了也读不到。
   return (
     <div className="quality-panel">
       <div><span>{label}</span><b>{value}</b></div>
@@ -71,7 +69,6 @@ function QualityPanel({ label, value, bars }: {
   );
 }
 
-/** One column per metric, one row per carrier line. */
 function CarrierPanel({ label, rows, kind, empty }: {
   label: string;
   rows: CarrierLatencyRow[];
@@ -104,8 +101,6 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
   const traffic = server.traffic_limit > 0 ? Math.min(100, (usedTraffic / server.traffic_limit) * 100) : 0;
   const locale = config.locale;
   const showCarriers = themeToggle(config, "showCarrierLatency", false);
-  // The hook keys its memo on the selection values, not the object identity,
-  // so rebuilding this each render is free.
   const quality = useNodeLatency(server, config.show_latency, locale, showCarriers ? carrierSelection(config) : null);
   const price = formatPrice(server, locale);
   const remainingValue = remainingAssetValue(server.price, server.billing_cycle, server.expires_at);
@@ -115,9 +110,6 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
     : ui(locale, "未匹配到线路", "No lines matched");
   const lastUpdated = new Date(number(server.timestamp) * 1000).toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
-  // 名字后面带上在线状态：卡片是 <button>，子树被裁掉，这个 aria-label 是读屏唯一能拿到的字符串。
-  // 状态在视觉上只由 status-dot 的颜色表达（WCAG 1.4.1 靠颜色传达信息），这里补成文字。
-  // 只放名字 + 状态，不塞 CPU/内存：一屏几十张卡，念完就太长了，数值留给详情页。
   return (
     <button className={`node-card glass-panel ${online ? "" : "offline"}`} onClick={onOpen} type="button" aria-label={ui(locale, `${server.name}，${online ? "在线" : "离线"}，查看详情`, `${server.name}, ${online ? "online" : "offline"}, view details`)}>
       <header className="node-header">
@@ -129,8 +121,6 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
 
       <div className="node-body">
         <div className="node-chips">
-          {/* 离线时不显示：uptime 是最后一次上报的存量值，遮罩只有 20% 底色且
-              data-blur=off 时不模糊，「在线 N 天」会透过遮罩和上面的「离线」打脸。 */}
           {config.show_uptime && online ? <span>{ui(locale, `在线 ${Math.floor(number(server.uptime) / 86400)} 天`, `Online ${Math.floor(number(server.uptime) / 86400)} days`)}</span> : null}
           {config.show_price && price ? <span title={price}>{price}</span> : null}
         </div>
@@ -142,10 +132,6 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
           <Metric label={ui(locale, "流量", "Traffic")} value={server.traffic_limit > 0 ? `${traffic.toFixed(1)}%` : "∞"} used={traffic} sub={`${formatBytes(usedTraffic)} / ${server.traffic_limit > 0 ? formatBytes(server.traffic_limit) : "∞"}`} muted={!online} valueTone={server.traffic_limit <= 0 ? "" : traffic >= 95 ? "danger-text" : traffic >= 60 ? "warning-text" : "success-text"} />
         </div>
 
-        {/* 这三个面板不挂 aria-label：无 role 的 div 是 generic，规范禁止命名；就算补上
-            role="group"，整张卡片是 <button>，role=button 的子树在无障碍树里会被整体裁掉，
-            里面加什么都读不到，所以移除而不是修补。读屏用户拿不到这些数值，真正的出路是
-            把卡片从 <button> 改成内容 + 覆盖层按钮，会动 CSS 和焦点行为，暂未做。 */}
         <div className={`data-grid ${showExpiryPanel ? "" : "two-columns"}`}>
           <div className="data-panel" title={ui(locale, "实时速率", "Live speed")}>
             <CompactLine icon={<ChevronUp size={11} />} tone="success-text">{formatSpeed(server.net_out)}</CompactLine>

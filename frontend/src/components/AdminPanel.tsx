@@ -145,7 +145,6 @@ function toInput(server: AdminServer): ServerInput {
   };
 }
 
-// 计费周期下拉预设；存量节点里的自定义天数会以「N 天」选项追加在后面。
 const BILLING_CYCLES: Array<{ days: number; label: string }> = [
   { days: 30, label: "月" },
   { days: 90, label: "季" },
@@ -214,10 +213,7 @@ async function copyText(value: string) {
     try {
       await navigator.clipboard.writeText(value);
       return;
-    } catch {
-      // Clipboard permissions can be denied even on localhost; fall back to a
-      // temporary selection so the copy button still works in those browsers.
-    }
+    } catch {}
   }
   const textarea = document.createElement("textarea");
   textarea.value = value;
@@ -413,7 +409,6 @@ export function AdminPanel({
     setForm(server ? toInput(server) : { ...emptyServer });
     setPriceText(server ? String(server.price) : "0");
     setTrafficLimitText(formatByteSize(server?.traffic_limit ?? 0));
-    // 修正值输入展示“当前累计用量”（已上报 + 已修正），保存时换算回差值。
     const rxCurrent = server?.net_rx_total ?? 0;
     const txCurrent = server?.net_tx_total ?? 0;
     setRxCurrentText(formatByteSize(rxCurrent));
@@ -425,7 +420,6 @@ export function AdminPanel({
     setError("");
   }
 
-  // 价格框放行 "-"、"1." 这类数字骨架中间态，能解析出数字才提交到表单。
   function updatePriceText(raw: string) {
     if (!/^-?\d*\.?\d*$/.test(raw)) return;
     setPriceText(raw);
@@ -433,7 +427,6 @@ export function AdminPanel({
     if (Number.isFinite(parsed)) updateForm("price", parsed);
   }
 
-  // 带单位输入（如 100 G / 0.5 T）：解析不了的中间态留在框里，失焦回显最后一次有效值。
   function sizeInputProps(text: string, setText: (value: string) => void, commit: (bytes: number) => void, current: number) {
     return {
       value: text,
@@ -987,7 +980,6 @@ export function AdminPanel({
 
   return (
     <div className={`admin-page ${dark ? "admin-dark" : ""}`}>
-      {/* toast 的定位是按后台的顶栏算的；登录页没有顶栏，那里的错误走表单内提示 */}
       {authenticated ? (error ? <div className="admin-toast error" role="alert" aria-live="assertive"><CircleAlert aria-hidden="true" /><span>{error}</span></div>
         : notice ? <div className="admin-toast" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{notice}</span></div> : null) : null}
       {!authenticated ? <div className="admin-login-stage">
@@ -1017,9 +1009,6 @@ export function AdminPanel({
 
           <div className="admin-body">
             <aside className="admin-sidebar">
-              {/* 用 nav + aria-current 而不是 role="tablist"：tablist 会盖掉 nav 的导航地标，
-                  且 APG 的 tab 模式要求方向键 + roving tabindex，而主题设置和数据库点了要发请求，
-                  方向键扫过就会连带触发。每项换的是整块内容和它自己的 h1，本质是页内导航，不是 tab 面板。 */}
               <nav className="admin-tabs" aria-label="管理导航">
                 {adminNavigation.map((item) => {
                   const Icon = item.icon;
@@ -1214,7 +1203,7 @@ export function AdminPanel({
         <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={15} />保存节点</button></div>
       </form></div> : null}
 
-      {installCommand ? <div className="submodal-backdrop" role="presentation" onMouseDown={installDialog.onBackdropMouseDown}><section ref={installDialog.dialogRef} className="install-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title" tabIndex={-1}><header><div><span className="eyebrow">Agent 部署</span><h3 id="install-dialog-title">安装命令</h3></div>{/* role="group" 是 aria-label 生效的前提，aria-pressed 表达选中态，理由同侧栏那处注释 */}<div className="segmented install-platform" role="group" aria-label="Agent 平台"><button type="button" className={installPlatform === "linux" ? "active" : ""} aria-pressed={installPlatform === "linux"} onClick={() => setInstallPlatform("linux")}>Linux</button><button type="button" className={installPlatform === "windows" ? "active" : ""} aria-pressed={installPlatform === "windows"} onClick={() => setInstallPlatform("windows")}>Windows</button><button type="button" className={installPlatform === "macos" ? "active" : ""} aria-pressed={installPlatform === "macos"} onClick={() => setInstallPlatform("macos")}>macOS ARM</button><button type="button" className={installPlatform === "freebsd" ? "active" : ""} aria-pressed={installPlatform === "freebsd"} onClick={() => setInstallPlatform("freebsd")}>FreeBSD</button></div></header><div className="install-list"><pre>{installCommand}</pre></div><div className="form-actions"><button className="secondary-btn" type="button" onClick={() => setInstall(null)}>关闭</button><button className="primary-btn" type="button" onClick={() => void copyInstallCommand()}><Copy size={15} />复制</button></div></section></div> : null}
+      {installCommand ? <div className="submodal-backdrop" role="presentation" onMouseDown={installDialog.onBackdropMouseDown}><section ref={installDialog.dialogRef} className="install-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title" tabIndex={-1}><header><div><span className="eyebrow">Agent 部署</span><h3 id="install-dialog-title">安装命令</h3></div><div className="segmented install-platform" role="group" aria-label="Agent 平台"><button type="button" className={installPlatform === "linux" ? "active" : ""} aria-pressed={installPlatform === "linux"} onClick={() => setInstallPlatform("linux")}>Linux</button><button type="button" className={installPlatform === "windows" ? "active" : ""} aria-pressed={installPlatform === "windows"} onClick={() => setInstallPlatform("windows")}>Windows</button><button type="button" className={installPlatform === "macos" ? "active" : ""} aria-pressed={installPlatform === "macos"} onClick={() => setInstallPlatform("macos")}>macOS ARM</button><button type="button" className={installPlatform === "freebsd" ? "active" : ""} aria-pressed={installPlatform === "freebsd"} onClick={() => setInstallPlatform("freebsd")}>FreeBSD</button></div></header><div className="install-list"><pre>{installCommand}</pre></div><div className="form-actions"><button className="secondary-btn" type="button" onClick={() => setInstall(null)}>关闭</button><button className="primary-btn" type="button" onClick={() => void copyInstallCommand()}><Copy size={15} />复制</button></div></section></div> : null}
     </div>
   );
 }

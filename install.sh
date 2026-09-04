@@ -1,35 +1,64 @@
 #!/bin/sh
 set -eu
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-config_dir=/etc/nodeflare
+repository=imengying/NodeFlare
+init_system=""
+systemd_file=/etc/systemd/system/nodeflare.service
+openrc_file=/etc/init.d/nodeflare
+launchd_file=/Library/LaunchDaemons/nodeflare.plist
+freebsd_rc_file=/usr/local/etc/rc.d/nodeflare
+download_dir=""
+package_dir=""
+release_version=""
+config_temp=""
+tty_state=""
+
+case "$(uname -s)" in
+  Linux)
+    platform=linux
+    config_dir=/etc/nodeflare
+    install_dir=/opt/nodeflare
+    share_dir=$install_dir/share
+    default_database_url=sqlite:///etc/nodeflare/nodeflare.db
+    ;;
+  Darwin)
+    platform=macos
+    config_dir="/Library/Application Support/NodeFlare/Server"
+    install_dir=/usr/local/libexec/nodeflare
+    share_dir=$install_dir/share
+    default_database_url=sqlite://nodeflare.db
+    ;;
+  FreeBSD)
+    platform=freebsd
+    config_dir=/var/db/nodeflare/server
+    install_dir=/usr/local/libexec/nodeflare
+    share_dir=/usr/local/share/nodeflare
+    default_database_url=sqlite://nodeflare.db
+    ;;
+  *)
+    printf '[NodeFlare] 错误：当前系统不支持此安装脚本\n' >&2
+    exit 1
+    ;;
+esac
+
 config_file=$config_dir/config.toml
-install_dir=/opt/nodeflare
+server_binary=$install_dir/nodeflare
 theme_dir=$config_dir/themes
-default_database_url=sqlite:///etc/nodeflare/nodeflare.db
-share_dir=$install_dir/share
 public_frontend_dir=$share_dir/frontend
 admin_frontend_dir=$share_dir/admin
 agent_installer_dir=$share_dir/agent
-server_binary=$install_dir/nodeflare
-service_name=nodeflare
-service_file=/etc/systemd/system/nodeflare.service
-build_target_dir=""
-config_temp=""
-tty_state=""
 
 usage() {
   printf '%s\n' \
     'NodeFlare 面板安装脚本' \
     '' \
     '用法：' \
-    '  sudo ./install.sh' \
-    '  sudo ./install.sh --uninstall' \
-    '  sudo ./install.sh --uninstall --purge' \
+    '  sudo sh install.sh' \
+    '  sudo sh install.sh --uninstall' \
+    '  sudo sh install.sh --uninstall --purge' \
     '' \
-    '首次安装会询问管理员用户名、密码和可选数据库连接。' \
-    '数据库设置可直接回车跳过，其他设置也可在安装后编辑。' \
-    '重复运行会保留已有配置和数据库。' \
+    '首次安装会询问管理员用户名、密码和数据库连接。' \
+    '安装和更新均使用 GitHub latest Release，并保留已有配置和数据库。' \
     '--uninstall 保留配置和数据；只有同时指定 --purge 才彻底删除。'
 }
 
@@ -42,6 +71,49 @@ fail() {
   exit 1
 }
 
+detect_glibc_version() {
+  [ -x "$glibc_loader" ] || return
+  LC_ALL=C "$glibc_loader" --version 2>/dev/null | awk '
+    tolower($0) ~ /glibc|gnu libc|gnu c library/ {
+      sub(/\.$/, "")
+      if (match($0, /[0-9]+\.[0-9]+(\.[0-9]+)?$/)) {
+        print substr($0, RSTART, RLENGTH)
+        exit
+      }
+    }
+  '
+}
+
+glibc_is_supported() {
+  glibc_major=${1%%.*}
+  glibc_minor=${1#*.}
+  glibc_minor=${glibc_minor%%.*}
+  case "$glibc_major:$glibc_minor" in
+    *[!0-9:]*|:*) return 1 ;;
+  esac
+  [ "$glibc_major" -gt 2 ] \
+    || { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -ge 28 ]; }
+}
+
+detect_init_system() {
+  case "$platform" in
+    linux)
+      if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        printf systemd
+      elif command -v rc-service >/dev/null 2>&1 && [ -d /etc/init.d ]; then
+        printf openrc
+      else
+        printf unknown
+      fi
+      ;;
+    macos) command -v launchctl >/dev/null 2>&1 && printf launchd || printf unknown ;;
+    freebsd)
+      command -v service >/dev/null 2>&1 && command -v sysrc >/dev/null 2>&1 \
+        && printf freebsd || printf unknown
+      ;;
+  esac
+}
+
 restore_tty() {
   if [ -n "$tty_state" ]; then
     stty "$tty_state" < /dev/tty 2>/dev/null || true
@@ -51,8 +123,8 @@ restore_tty() {
 
 cleanup() {
   restore_tty
-  [ -z "$config_temp" ] || rm -f -- "$config_temp"
-  [ -z "$build_target_dir" ] || rm -rf -- "$build_target_dir"
+  [ -z "$config_temp" ] || rm -f "$config_temp"
+  [ -z "$download_dir" ] || rm -rf "$download_dir"
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -86,16 +158,8 @@ prompt_credentials() {
     admin_username=${prompt_value:-admin}
     username_length=$(printf '%s' "$admin_username" | wc -m | tr -d '[:space:]')
     case "$admin_username" in
-      *[!A-Za-z0-9_.-]*)
-        printf '%s\n' "用户名只能包含字母、数字、点、下划线和连字符。" > /dev/tty
-        ;;
-      *)
-        if [ "$username_length" -gt 64 ]; then
-          printf '%s\n' "用户名不能超过 64 个字符。" > /dev/tty
-        else
-          break
-        fi
-        ;;
+      *[!A-Za-z0-9_.-]*) printf '%s\n' "用户名只能包含字母、数字、点、下划线和连字符。" > /dev/tty ;;
+      *) [ "$username_length" -le 64 ] && break || printf '%s\n' "用户名不能超过 64 个字符。" > /dev/tty ;;
     esac
   done
 
@@ -107,40 +171,24 @@ prompt_credentials() {
       printf '%s\n' "密码长度必须在 8-128 个字符之间。" > /dev/tty
       continue
     fi
-    if LC_ALL=C printf '%s' "$admin_password" | grep -q '[[:cntrl:]]'; then
-      printf '%s\n' "密码不能包含控制字符。" > /dev/tty
-      continue
-    fi
-    normalized_password=$(printf '%s' "$admin_password" | tr '[:upper:]' '[:lower:]')
-    case "$normalized_password" in
-      change_me_with_a_strong_password|change-me-with-a-strong-password)
-        printf '%s\n' "请不要使用示例占位密码。" > /dev/tty
-        continue
-        ;;
-    esac
     prompt_secret "再次输入密码: "
-    [ "$admin_password" = "$prompt_value" ] || {
-      printf '%s\n' "两次输入的密码不一致。" > /dev/tty
-      continue
-    }
-    break
+    if [ "$admin_password" = "$prompt_value" ]; then
+      break
+    fi
+    printf '%s\n' "两次输入的密码不一致。" > /dev/tty
   done
 }
 
 prompt_database() {
+  printf '%s\n' \
+    'SQLite：sqlite:///path/to/database.db' \
+    'PostgreSQL：postgres://用户:密码@ip:端口/数据库?sslmode=require' > /dev/tty
   while :; do
-    printf '%s\n' \
-      "SQLite 示例：sqlite:///path/to/database.db" \
-      "PostgreSQL 示例：postgres://用户:密码@ip:端口/数据库?sslmode=require" > /dev/tty
     prompt_line "数据库 URL [$default_database_url]: "
     database_url=${prompt_value:-$default_database_url}
-    if LC_ALL=C printf '%s' "$database_url" | grep -q '[[:space:][:cntrl:]]'; then
-      printf '%s\n' "数据库 URL 不能包含空白或控制字符。" > /dev/tty
-      continue
-    fi
     case "$database_url" in
       sqlite://*|postgres://*|postgresql://*) break ;;
-      *) printf '%s\n' "数据库 URL 必须使用 sqlite://、postgres:// 或 postgresql://。" > /dev/tty ;;
+      *) printf '%s\n' "数据库 URL 格式无效。" > /dev/tty ;;
     esac
   done
 }
@@ -149,59 +197,238 @@ write_config() {
   escaped_database_url=$(toml_escape "$database_url")
   escaped_username=$(toml_escape "$admin_username")
   escaped_password=$(toml_escape "$admin_password")
+  escaped_frontend_dir=$(toml_escape "$public_frontend_dir")
+  escaped_admin_dir=$(toml_escape "$admin_frontend_dir")
+  escaped_agent_dir=$(toml_escape "$agent_installer_dir")
+  escaped_theme_dir=$(toml_escape "$theme_dir")
   config_temp=$(mktemp "$config_dir/.config.toml.XXXXXX")
   {
-    printf '%s\n' '# NodeFlare 服务端配置'
-    printf '%s\n' '# 修改后运行：systemctl restart nodeflare'
-    printf '\n'
-    printf '%s\n' '# SQLite：sqlite:///path/to/database.db'
-    printf '%s\n' '# PostgreSQL：postgres://用户:密码@ip:端口/数据库?sslmode=require'
-    printf '%s\n' '# URL 中的特殊字符需要进行百分号编码'
     printf 'database_url = "%s"\n' "$escaped_database_url"
     printf 'bind_addr = "127.0.0.1:8080"\n'
     printf 'admin_username = "%s"\n' "$escaped_username"
     printf 'admin_password = "%s"\n' "$escaped_password"
-    printf '\n'
-    printf '%s\n' '# Cloudflare Turnstile：两项留空即禁用'
     printf 'turnstile_site_key = ""\n'
     printf 'turnstile_secret_key = ""\n'
-    printf '\n'
-    printf 'frontend_dir = "/opt/nodeflare/share/frontend"\n'
-    printf 'admin_frontend_dir = "/opt/nodeflare/share/admin"\n'
-    printf 'agent_dir = "/opt/nodeflare/share/agent"\n'
-    printf 'theme_dir = "/etc/nodeflare/themes"\n'
+    printf 'frontend_dir = "%s"\n' "$escaped_frontend_dir"
+    printf 'admin_frontend_dir = "%s"\n' "$escaped_admin_dir"
+    printf 'agent_dir = "%s"\n' "$escaped_agent_dir"
+    printf 'theme_dir = "%s"\n' "$escaped_theme_dir"
     printf 'session_ttl_hours = 168\n'
   } > "$config_temp"
-  chown root:root "$config_temp"
+  chown root "$config_temp"
   chmod 0600 "$config_temp"
-  mv -f -- "$config_temp" "$config_file"
+  mv -f "$config_temp" "$config_file"
   config_temp=""
   admin_password=""
   database_url=""
   prompt_value=""
 }
 
+download_file() {
+  url=$1
+  destination=$2
+  timeout=$3
+  if command -v curl >/dev/null 2>&1; then
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --fail --location --silent --show-error --max-time "$timeout" \
+      "$url" -o "$destination"
+  else
+    fetch -q -T "$timeout" -o "$destination" "$url"
+  fi
+}
+
+verify_checksum() {
+  expected=$(sed -n '1{s/[[:space:]].*//;p;q;}' "$checksum" | tr '[:upper:]' '[:lower:]')
+  [ "${#expected}" -eq 64 ] || fail "Release 校验文件无效"
+  case "$expected" in *[!0-9a-f]*) fail "Release 校验文件无效" ;; esac
+  case "$platform" in
+    linux) actual=$(sha256sum "$archive" | sed 's/[[:space:]].*//') ;;
+    macos) actual=$(shasum -a 256 "$archive" | sed 's/[[:space:]].*//') ;;
+    freebsd) actual=$(sha256 -q "$archive") ;;
+  esac
+  [ "$actual" = "$expected" ] || fail "Release SHA-256 校验失败"
+}
+
+download_release() {
+  case "$platform:$(uname -m)" in
+    linux:x86_64|linux:amd64) arch=x64; glibc_loader=/lib64/ld-linux-x86-64.so.2 ;;
+    linux:aarch64|linux:arm64) arch=aarch64; glibc_loader=/lib/ld-linux-aarch64.so.1 ;;
+    macos:arm64|macos:aarch64) arch=aarch64 ;;
+    freebsd:amd64|freebsd:x86_64) arch=x64 ;;
+    freebsd:arm64|freebsd:aarch64) arch=aarch64 ;;
+    *) fail "暂不支持当前 CPU 架构：$(uname -m)" ;;
+  esac
+
+  case "$platform" in
+    linux)
+      libc=musl
+      glibc_version=$(detect_glibc_version || true)
+      if [ -n "$glibc_version" ] && glibc_is_supported "$glibc_version"; then
+        libc=glibc
+      fi
+      asset="nodeflare-server-linux-$arch-$libc.tar.gz"
+      release_label="$platform $arch $libc"
+      ;;
+    macos)
+      asset=nodeflare-server-macos-aarch64.tar.gz
+      release_label="macOS ARM64"
+      ;;
+    freebsd)
+      asset="nodeflare-server-freebsd-$arch.tar.gz"
+      release_label="FreeBSD $arch"
+      ;;
+  esac
+
+  download_dir=$(mktemp -d "${TMPDIR:-/tmp}/nodeflare-install.XXXXXX")
+  archive=$download_dir/$asset
+  checksum=$download_dir/$asset.sha256
+  release_base="https://github.com/$repository/releases/latest/download"
+  log "下载 latest Release ($release_label)"
+  download_file "$release_base/$asset" "$archive" 120
+  download_file "$release_base/$asset.sha256" "$checksum" 30
+  verify_checksum
+
+  package_dir=$download_dir/package
+  mkdir -p "$package_dir"
+  tar -xzf "$archive" -C "$package_dir"
+  [ -f "$package_dir/nodeflare" ] \
+    && [ -f "$package_dir/share/frontend/index.html" ] \
+    && [ -f "$package_dir/share/admin/admin.html" ] \
+    && [ -f "$package_dir/share/agent/agent.sh" ] \
+    || fail "Release 文件不完整"
+  chmod 0755 "$package_dir/nodeflare"
+  binary_version=$("$package_dir/nodeflare" --version) || fail "服务端文件无法运行"
+  release_version=${binary_version##* }
+  printf '%s\n' "$release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || fail "服务端返回了无效版本号"
+}
+
+write_openrc_service() {
+  cat > "$openrc_file" <<EOF
+#!/sbin/openrc-run
+name="NodeFlare"
+command="$server_binary"
+command_args="--config $config_file"
+command_user="root"
+supervisor="supervise-daemon"
+respawn_delay=5
+depend() { need net; }
+EOF
+  chmod 0755 "$openrc_file"
+}
+
+write_launchd_service() {
+  cat > "$launchd_file" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>nodeflare</string>
+<key>ProgramArguments</key><array><string>$server_binary</string><string>--config</string><string>$config_file</string></array>
+<key>WorkingDirectory</key><string>$config_dir</string>
+<key>KeepAlive</key><true/><key>RunAtLoad</key><true/>
+<key>StandardOutPath</key><string>/var/log/nodeflare.log</string>
+<key>StandardErrorPath</key><string>/var/log/nodeflare.log</string>
+</dict></plist>
+EOF
+  chmod 0600 "$launchd_file"
+}
+
+write_freebsd_service() {
+  cat > "$freebsd_rc_file" <<EOF
+#!/bin/sh
+# PROVIDE: nodeflare
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+. /etc/rc.subr
+name="nodeflare"
+rcvar="nodeflare_enable"
+pidfile="/var/run/\${name}.pid"
+command="/usr/sbin/daemon"
+command_args="-P \${pidfile} -r -R 5 -S -T \${name} $server_binary --config $config_file"
+load_rc_config "\${name}"
+: \${nodeflare_enable:="NO"}
+run_rc_command "\$1"
+EOF
+  chmod 0755 "$freebsd_rc_file"
+}
+
+stop_server() {
+  case "$init_system" in
+    systemd) systemctl stop nodeflare.service >/dev/null 2>&1 || true ;;
+    openrc) rc-service nodeflare stop >/dev/null 2>&1 || true ;;
+    launchd) launchctl bootout system "$launchd_file" >/dev/null 2>&1 || true ;;
+    freebsd) service nodeflare stop >/dev/null 2>&1 || true ;;
+  esac
+}
+
+install_service() {
+  case "$init_system" in
+    systemd) install -m 0644 "$package_dir/nodeflare.service" "$systemd_file" ;;
+    openrc) write_openrc_service ;;
+    launchd) write_launchd_service ;;
+    freebsd) write_freebsd_service ;;
+  esac
+}
+
+start_server() {
+  case "$init_system" in
+    systemd)
+      systemctl daemon-reload
+      systemctl enable nodeflare.service >/dev/null
+      systemctl restart nodeflare.service
+      systemctl is-active --quiet nodeflare.service
+      ;;
+    openrc)
+      rc-update add nodeflare default >/dev/null
+      rc-service nodeflare start
+      rc-service nodeflare status >/dev/null
+      ;;
+    launchd)
+      launchctl bootstrap system "$launchd_file"
+      launchctl print system/nodeflare >/dev/null
+      ;;
+    freebsd)
+      sysrc nodeflare_enable=YES >/dev/null
+      service nodeflare start
+      service nodeflare status >/dev/null
+      ;;
+  esac
+}
+
 uninstall_server() {
   purge=$1
   log "停止并移除 NodeFlare 面板服务"
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl disable --now "$service_name.service" >/dev/null 2>&1 || true
-  fi
-  rm -f -- "$service_file" "$server_binary"
-  rm -rf -- "$share_dir"
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed "$service_name.service" >/dev/null 2>&1 || true
-  fi
+  stop_server
+  case "$init_system" in
+    systemd)
+      systemctl disable nodeflare.service >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      rc-update del nodeflare default >/dev/null 2>&1 || true
+      ;;
+    launchd) ;;
+    freebsd)
+      sysrc -x nodeflare_enable >/dev/null 2>&1 || true
+      ;;
+  esac
+  case "$platform" in
+    linux)
+      rm -f "$systemd_file" "$openrc_file"
+      command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
+      ;;
+    macos) rm -f "$launchd_file" ;;
+    freebsd) rm -f "$freebsd_rc_file" ;;
+  esac
+  rm -f "$server_binary"
+  rm -rf "$share_dir"
+  rmdir "$install_dir" 2>/dev/null || true
 
   if [ "$purge" = true ]; then
-    rm -rf -- "$config_dir"
+    rm -rf "$config_dir"
     log "已删除配置和全部服务端持久数据"
   else
     log "已保留配置和服务端持久数据：$config_dir"
-    log "如需彻底删除，运行：sudo ./install.sh --uninstall --purge"
   fi
-  rmdir "$install_dir" 2>/dev/null || true
   log "卸载完成"
 }
 
@@ -215,16 +442,34 @@ case "$#:${1:-}:${2:-}" in
   *) usage >&2; fail "参数无效" ;;
 esac
 
-[ "$(id -u)" -eq 0 ] || fail "请使用 root 权限运行：sudo ./install.sh"
+[ "$(id -u)" -eq 0 ] || fail "请使用 root 权限运行"
+init_system=$(detect_init_system)
 if [ "$mode" = uninstall ]; then
   uninstall_server "$purge"
   exit 0
 fi
-[ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 \
-  || fail "当前系统未使用 systemd"
-for required_command in bun install mktemp sed grep wc tr id chown chmod mv cp stty; do
+[ "$init_system" != unknown ] || fail "未检测到受支持的服务管理器"
+
+for required_command in tar install mktemp sed grep wc tr id chown chmod mv cp stty uname cat; do
   command -v "$required_command" >/dev/null 2>&1 || fail "缺少命令：$required_command"
 done
+case "$platform" in
+  linux)
+    command -v curl >/dev/null 2>&1 || fail "缺少命令：curl"
+    command -v sha256sum >/dev/null 2>&1 || fail "缺少命令：sha256sum"
+    ;;
+  macos)
+    if ! command -v curl >/dev/null 2>&1 || ! command -v shasum >/dev/null 2>&1; then
+      fail "缺少 curl 或 shasum"
+    fi
+    ;;
+  freebsd)
+    command -v fetch >/dev/null 2>&1 || command -v curl >/dev/null 2>&1 || fail "缺少 fetch 或 curl"
+    command -v sha256 >/dev/null 2>&1 || fail "缺少命令：sha256"
+    ;;
+esac
+
+download_release
 
 new_config=false
 if [ ! -f "$config_file" ]; then
@@ -235,53 +480,35 @@ else
   log "保留已有配置：$config_file"
 fi
 
-log "构建前端和服务端"
-build_target_dir=$(mktemp -d /tmp/nodeflare-build.XXXXXX)
-CARGO_TARGET_DIR=$build_target_dir/cargo
-export CARGO_TARGET_DIR
-sh "$script_dir/scripts/build-frontend.sh"
-sh "$script_dir/scripts/build-backend.sh"
-
-install -d -m 0700 -o root -g root "$config_dir"
-install -d -m 0700 -o root -g root "$theme_dir"
-install -d -m 0755 -o root -g root "$install_dir"
-chown -R root:root "$config_dir"
-install -d -m 0755 -o root -g root "$share_dir"
-rm -rf -- "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
-install -d -m 0755 -o root -g root "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
-cp -a "$script_dir/frontend/dist/." "$public_frontend_dir/"
-cp -a "$script_dir/frontend/admin-dist/." "$admin_frontend_dir/"
-install -m 0755 "$script_dir/agent/agent.sh" "$agent_installer_dir/agent.sh"
-install -m 0755 "$script_dir/agent/install-macos.sh" "$agent_installer_dir/install-macos.sh"
-install -m 0755 "$script_dir/agent/install-freebsd.sh" "$agent_installer_dir/install-freebsd.sh"
-install -m 0644 "$script_dir/agent/install.ps1" "$agent_installer_dir/install.ps1"
-chown -R root:root "$share_dir"
-chmod -R u=rwX,go=rX "$share_dir"
-install -m 0755 "$CARGO_TARGET_DIR/release/nodeflare" "$server_binary"
-install -m 0644 "$script_dir/deploy/nodeflare.service" "$service_file"
+log "安装 NodeFlare $release_version"
+stop_server
+install -d -m 0700 "$config_dir" "$theme_dir"
+install -d -m 0755 "$install_dir" "$share_dir"
+rm -rf "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
+install -d -m 0755 "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
+cp -R "$package_dir/share/frontend/." "$public_frontend_dir/"
+cp -R "$package_dir/share/admin/." "$admin_frontend_dir/"
+cp -R "$package_dir/share/agent/." "$agent_installer_dir/"
+chmod 0755 "$agent_installer_dir/"*.sh
+chmod 0644 "$agent_installer_dir/install.ps1"
+install -m 0755 "$package_dir/nodeflare" "$server_binary"
+install_service
 
 if [ "$new_config" = true ]; then
   write_config
 else
-  chown root:root "$config_file"
+  chown root "$config_file"
   chmod 0600 "$config_file"
 fi
 
-systemctl daemon-reload
-systemctl enable "$service_name.service" >/dev/null
-if ! systemctl restart "$service_name.service"; then
-  journalctl -u "$service_name.service" -n 30 --no-pager >&2 || true
+if ! start_server; then
   fail "NodeFlare 服务启动失败"
-fi
-if ! systemctl is-active --quiet "$service_name.service"; then
-  journalctl -u "$service_name.service" -n 30 --no-pager >&2 || true
-  fail "NodeFlare 服务未进入运行状态"
 fi
 
 log "安装完成"
 printf '%s\n' \
-  "配置文件：$config_file" \
-  "程序目录：$install_dir" \
-  "持久数据：$config_dir" \
-  '服务状态：systemctl status nodeflare' \
+  "版本：$release_version" \
+  "配置和数据：$config_dir" \
+  "程序：$server_binary" \
+  "服务系统：$init_system" \
   '默认访问：http://127.0.0.1:8080'

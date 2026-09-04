@@ -129,7 +129,6 @@ fn table_entry_name(table: &str) -> String {
 
 async fn table_columns(db: &Database, table: &str) -> Result<Vec<BackupColumn>> {
     let sql = format!("SELECT * FROM {table} LIMIT 0");
-    // `table` only comes from BACKUP_TABLES. No request data enters this SQL.
     let description = db
         .pool()
         .describe(AssertSqlSafe(sql).into_sql_str())
@@ -248,7 +247,6 @@ pub async fn export_archive(db: &Database) -> Result<DatabaseArchive> {
         writer.write_all(b"\n")?;
 
         let sql = format!("SELECT * FROM {table}");
-        // `table` only comes from BACKUP_TABLES. No request data enters this SQL.
         let mut rows = sqlx::query(AssertSqlSafe(sql)).fetch(&mut *transaction);
         while let Some(row) = rows.try_next().await? {
             serde_json::to_writer(&mut writer, &row_values(&row, columns)?)?;
@@ -413,7 +411,6 @@ async fn insert_rows(
         "INSERT INTO {table} ({column_names}) VALUES {}",
         placeholders.join(",")
     );
-    // Table and column names were matched against the current database schema.
     sqlx::query_with(AssertSqlSafe(sql), arguments)
         .execute(&mut **transaction)
         .await?;
@@ -490,7 +487,6 @@ pub async fn restore_archive(db: &Database, archive: &[u8]) -> Result<usize> {
     }
     for table in CLEAR_TABLES {
         let sql = format!("DELETE FROM {table}");
-        // `table` only comes from CLEAR_TABLES. No request data enters this SQL.
         sqlx::query(AssertSqlSafe(sql))
             .execute(&mut *transaction)
             .await?;

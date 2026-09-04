@@ -16,9 +16,6 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
         return local_file(&state.config.admin_frontend_dir, "admin.html", false).await;
     }
     if let Some(relative) = path.strip_prefix("/admin-assets/") {
-        // Admin assets intentionally bypass browser caches. The panel is a
-        // privileged control surface, so serving the newest UI is more
-        // important than saving a small static transfer.
         return local_file(&state.config.admin_frontend_dir, relative, false).await;
     }
     if let Some(relative) = path.strip_prefix("/agent/") {

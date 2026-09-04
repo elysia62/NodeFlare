@@ -15,7 +15,6 @@ export function SiteLogo({ src = "", ...props }: SiteLogoProps) {
     {...props}
     src={resolved}
     onError={() => {
-      // Do not retry the built-in fallback forever when it is unavailable.
       if (resolved !== DEFAULT_LOGO) setFailedSource(requested);
     }}
   />;

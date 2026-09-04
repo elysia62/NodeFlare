@@ -63,7 +63,6 @@ describe("bucketSamples", () => {
   });
 
   test("leaves older buckets empty when a node only just came back", () => {
-    // Five minutes of samples at the end of a one-hour window.
     const points = Array.from({ length: 5 }, (_, index) => sample("a", now - 300 + 60 * index));
     const buckets = bucketSamples(points, 3_600, now);
     const filled = buckets.filter((bucket) => bucket.latency !== null);
@@ -73,13 +72,10 @@ describe("bucketSamples", () => {
   });
 
   test("bridges buckets for a task slower than one bucket", () => {
-    // One sample every 10 minutes cannot fill 20 three-minute buckets, so each
-    // reading carries forward rather than alternating filled/empty bars.
     const points = Array.from({ length: 6 }, (_, index) => sample("a", now - 3_000 + 600 * index));
     const buckets = bucketSamples(points, 3_600, now);
     const filled = buckets.filter((bucket) => bucket.latency !== null);
     expect(filled.length).toBeGreaterThan(6);
-    // Nothing is invented before the first sample.
     expect(buckets[0].latency).toBeNull();
     expect(buckets[buckets.length - 1].latency).not.toBeNull();
   });

@@ -4,11 +4,6 @@ interface TimedPoint {
   timestamp: number;
 }
 
-/**
- * Lower quartile of the observed sampling deltas. A quartile keeps repeated
- * outages from inflating what we treat as the normal cadence, which is what
- * decides where a timeline break belongs.
- */
 export function typicalInterval(points: readonly TimedPoint[]): number | null {
   const intervals = points
     .slice(1)
@@ -18,11 +13,6 @@ export function typicalInterval(points: readonly TimedPoint[]): number | null {
   return intervals.length ? intervals[Math.floor((intervals.length - 1) / 4)] : null;
 }
 
-/**
- * Insert a break point whenever the timeline skips more than the expected
- * cadence, so a chart never draws a straight line across an outage.
- * `minGap`/`maxGap` use the same unit as `timestamp`.
- */
 export function insertTimelineGaps<T extends TimedPoint>(
   points: readonly T[],
   createGap: (timestamp: number) => T,
@@ -44,7 +34,6 @@ export function insertTimelineGaps<T extends TimedPoint>(
   return result;
 }
 
-/** Widest break a chart of this span should draw, in milliseconds. */
 export function chartGapLimit(hours: number): number {
   if (hours <= 0) return 30_000;
   return Math.max(5 * 60_000, (hours * 60 * 60_000) / 36);

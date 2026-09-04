@@ -586,8 +586,6 @@ try {
     throw new Error(`Invalid Agent metric ACK: ${JSON.stringify(ack)}`);
   }
 
-  // 稳定硬件身份不随实时样本重复发送，而由 bootstrap 提供。公网 IP 同样不进入
-  // 实时样本，但属于管理数据，只能从鉴权后的管理接口读取。
   const publicIdentityFields = [
     "cpu_model",
     "os",

@@ -23,10 +23,6 @@ import { derivePassword } from "./password";
 
 const search = new URLSearchParams(window.location.search);
 export const demoMode = import.meta.env.DEV && search.has("demo");
-/**
- * `?demo=1&carrier=1` previews the per-carrier card layout locally. Gated on
- * `demoMode` so a stray `?carrier=1` cannot affect a real deployment.
- */
 const demoViewConfig: Config = demoMode && search.has("carrier")
   ? { ...demoConfig, theme_options: { ...demoConfig.theme_options, showCarrierLatency: true } }
   : demoConfig;
@@ -165,9 +161,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     pruneStalePlayback(playbackRef.current, servers);
   }, [servers]);
 
-  // Komari-style refresh discipline: recursive scheduling prevents overlapping
-  // requests, hidden/offline pages stay idle, and returning to the page forces
-  // one immediate bootstrap sync. WebSocket data remains the fast path.
   useEffect(() => {
     if (access !== "ok" || demoMode) return;
     let stopped = false;

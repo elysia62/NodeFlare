@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+root_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 
 raw=${NODEFLARE_VERSION:-}
 if [ -z "$raw" ]; then

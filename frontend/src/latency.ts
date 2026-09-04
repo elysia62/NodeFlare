@@ -18,11 +18,6 @@ export interface CarrierSlotKey {
 
 export const BAR_COUNT = 20;
 
-/**
- * Carrier lines, in display order. Aliases cover the Chinese names plus the
- * common latin spellings and operator codes, so an admin who names a task
- * "CT-Guangzhou" or "电信广州" lands in the same slot without extra config.
- */
 export const CARRIER_SLOTS = [
   { key: "telecom" as const, label: "电信", labelEn: "Telecom", color: "#fb7185", aliases: ["电信", "chinatelecom", "telecom", "ctcc", "ct"] },
   { key: "mobile" as const, label: "移动", labelEn: "Mobile", color: "#34d399", aliases: ["移动", "chinamobile", "mobile", "cmcc", "cm"] },
@@ -60,11 +55,6 @@ export interface LatencyTaskRef {
   name: string;
 }
 
-/**
- * Resolve the three carrier slots. Explicit names win; when every name is
- * blank we match on the task name, then fill any slot still empty using the
- * backend order so a two-task setup still renders two lines.
- */
 export function selectCarrierTasks(
   tasks: readonly LatencyTaskRef[],
   configured: CarrierSlotKey,
@@ -117,16 +107,6 @@ function validValue(value: number): number | null {
   return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-/**
- * Bucket samples across the requested window rather than across the extent of
- * whatever data came back. A node that only reported for the last five minutes
- * of an hour shows fifteen empty buckets instead of twenty healthy ones.
- *
- * The grid always spans exactly `windowSeconds`, so a bar's position means the
- * same thing on every card. When a task samples more slowly than one bucket,
- * its last reading carries forward for one cadence — otherwise a 10-minute
- * task would alternate between filled and empty bars and read as flapping.
- */
 export function bucketSamples(points: readonly LatencySample[], windowSeconds: number, now = Date.now() / 1000): LatencyBucket[] {
   const samples = points
     .filter((point) => Number.isFinite(point.timestamp) && point.timestamp > 0)
@@ -145,7 +125,6 @@ export function bucketSamples(points: readonly LatencySample[], windowSeconds: n
   const bucketSize = span / BAR_COUNT;
   const end = Math.max(now, samples[samples.length - 1].timestamp);
   const start = end - span;
-  // Only bridge buckets when the task genuinely samples slower than the grid.
   const carryFor = cadence > bucketSize ? cadence * 1.5 : 0;
 
   const buckets: LatencyBucket[] = [];
@@ -160,8 +139,6 @@ export function bucketSamples(points: readonly LatencySample[], windowSeconds: n
 
   for (let index = 0; index < BAR_COUNT; index += 1) {
     const bucketStart = start + bucketSize * index;
-    // The final bucket includes its upper bound so a sample landing exactly on
-    // `end` is not dropped.
     const bucketEnd = bucketStart + bucketSize;
     const inclusive = index === BAR_COUNT - 1;
     let latencySum = 0;

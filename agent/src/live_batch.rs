@@ -5,7 +5,6 @@ use super::Report;
 pub(crate) const MAX_LIVE_BATCH_BYTES: usize = 768 * 1024;
 
 pub(crate) fn batch_len(queue: &VecDeque<Report>) -> usize {
-    // Allow room for the JSON envelope, commas, and future small protocol fields.
     let mut encoded_bytes = 64_usize;
     let mut count = 0_usize;
     for report in queue {

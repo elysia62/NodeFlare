@@ -115,8 +115,6 @@ function HomeView() {
       <StatsBar servers={servers} config={config} exchangeRates={exchangeRates} />
       {config.show_search || config.show_groups ? <div className="toolbar">
         {config.show_search ? <div className="search-box"><Search size={16} /><input aria-label={ui(locale, "搜索节点", "Search servers")} placeholder={ui(locale, "搜索节点", "Search servers")} value={query} onChange={(event) => setQuery(event.target.value)} /></div> : null}
-        {/* role="group" 让 aria-label 生效（无 role 的 div 是 generic，规范禁止命名，标签会被丢掉）；
-            选中态用 aria-pressed，不用 role="radio"，避免欠下方向键 + roving tabindex 的实现。 */}
         {config.show_groups ? <div className="group-tabs" role="group" aria-label={ui(locale, "节点分组", "Server groups")}>{groups.map((item) => <button className={group === item ? "active" : ""} aria-pressed={group === item} key={item} onClick={() => setGroup(item)}>{item === "__all__" ? ui(locale, "全部", "All") : item}</button>)}</div> : null}
         <span className="result-count">{ui(locale, `${visible.length} 个节点`, `${visible.length} servers`)}</span>
       </div> : null}

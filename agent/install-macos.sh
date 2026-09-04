@@ -89,7 +89,9 @@ done
 [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
 endpoint=${endpoint%/}
 [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
-safe_value "$token" && safe_value "$endpoint" || fail "服务地址或 Agent Token 格式无效"
+if ! safe_value "$token" || ! safe_value "$endpoint"; then
+  fail "服务地址或 Agent Token 格式无效"
+fi
 case "$endpoint" in
   https://?*|http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*) ;;
   *) fail "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;

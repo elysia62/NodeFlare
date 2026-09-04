@@ -25,7 +25,9 @@ admin_token=
 server_id=
 latency_task_id=
 alert_rule_id=
+backup_file=
 cleanup() {
+  [ -z "$backup_file" ] || rm -f -- "$backup_file"
   if [ "${MONITOR_KEEP_RESOURCES:-0}" != "1" ] && [ -n "$admin_token" ]; then
     if [ -n "$alert_rule_id" ]; then
       monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
@@ -92,15 +94,15 @@ printf '%s' "$admin_headers" | grep -qi '^cache-control:.*no-store'
 
 step "login and settings"
 login_payload=$(jq -nc --arg username "$MONITOR_ADMIN_USERNAME" --arg password_derived "$password_derived" --arg turnstile_token "$MONITOR_TURNSTILE_TOKEN" '{username:$username,password_derived:$password_derived,turnstile_token:$turnstile_token}')
-login_json=$(request -H 'Content-Type: application/json' \
-  --data "$login_payload" \
-  "$MONITOR_BASE_URL/api/admin/login")
+login_admin() {
+  request -H 'Content-Type: application/json' --data "$login_payload" \
+    "$MONITOR_BASE_URL/api/admin/login"
+}
+login_json=$(login_admin)
 admin_token=$(printf '%s' "$login_json" | jq -er '.token')
 
 step "login devices"
-second_login_json=$(request -H 'Content-Type: application/json' \
-  --data "$login_payload" \
-  "$MONITOR_BASE_URL/api/admin/login")
+second_login_json=$(login_admin)
 second_admin_token=$(printf '%s' "$second_login_json" | jq -er '.token')
 sessions_json=$(request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/sessions")
@@ -118,8 +120,6 @@ revoked_session_status=$(monitor_curl --silent --output /dev/null --write-out '%
   -H "Authorization: Bearer $second_admin_token" "$MONITOR_BASE_URL/api/admin/settings")
 [ "$revoked_session_status" = "401" ]
 
-# Login protection defaults to enabled, but without a complete Turnstile pair it
-# remains inactive so the first admin settings save must still work.
 settings_payload=$(request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/settings" | \
   jq -c '.site_description = "Smoke settings" | del(.admin_password_configured, .totp_login_enabled)')
@@ -134,6 +134,26 @@ request -H "Authorization: Bearer $admin_token" \
 request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/themes" | \
   jq -e '.themes | any(.builtin == true and .id == "builtin-nodeflare-glass" and .name == "NodeFlare Glass" and .active == true)' >/dev/null
+
+step "database backup and restore"
+backup_file=$(mktemp /tmp/nodeflare-backup.XXXXXX.zip)
+request -H "Authorization: Bearer $admin_token" \
+  "$MONITOR_BASE_URL/api/admin/database/backup" > "$backup_file"
+[ -s "$backup_file" ]
+changed_settings=$(printf '%s' "$settings_payload" | jq -c '.site_description = "Changed after backup"')
+request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
+  --data "$changed_settings" "$MONITOR_BASE_URL/api/admin/settings" >/dev/null
+restore_json=$(request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/zip' \
+  --data-binary "@$backup_file" "$MONITOR_BASE_URL/api/admin/database/restore?filename=smoke.zip")
+printf '%s' "$restore_json" | jq -e '.restored_rows > 0' >/dev/null
+restored_session_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/settings")
+[ "$restored_session_status" = "401" ]
+admin_token=$(login_admin | jq -er '.token')
+request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/bootstrap" | \
+  jq -e '.config.site_description == "Smoke settings"' >/dev/null
+rm -f -- "$backup_file"
+backup_file=
 
 server_input='{"name":"Smoke Test Node","region":"JP","group_name":"Test","tags":"smoke","hidden":false,"expires_at":1893456000,"traffic_limit":107374182400,"traffic_limit_type":"max","price":9.9,"billing_cycle":30,"currency":"USD","auto_renewal":true,"network_interface":"","reset_day":1,"report_interval":60,"collect_interval":5,"rx_correction":0,"tx_correction":0,"agent_mirror":"https://mirror.example.com","offline_notify_disabled":false,"auto_update":true}'
 
@@ -186,8 +206,6 @@ fi
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/history/$server_id?hours=1" | jq -e '.points | length >= 1 and any(.gpu_usage == 32.5)' >/dev/null
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/latency/$server_id?hours=1" | jq -e --arg task_id "$latency_task_id" '(.tasks | any(.id == $task_id)) and (.points | any(.task_id == $task_id and .latency_ms > 38.399 and .latency_ms < 38.401 and .packet_loss > 49.999 and .packet_loss < 50.001))' >/dev/null
 
-# An Agent may have already measured a task when the administrator removes its
-# assignment. The stale result must not block delivery of the new task list.
 request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
   --data '{"name":"Smoke TCP","task_type":"tcp","target":"example.com","port":443,"interval_seconds":60,"default_enabled":true,"server_ids":[]}' \
   "$MONITOR_BASE_URL/api/admin/latency-tasks/$latency_task_id" >/dev/null

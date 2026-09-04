@@ -36,6 +36,30 @@ fail() {
   exit 1
 }
 
+detect_glibc_version() {
+  [ -x "$glibc_loader" ] || return
+  LC_ALL=C "$glibc_loader" --version 2>/dev/null | awk '
+    tolower($0) ~ /glibc|gnu libc|gnu c library/ {
+      sub(/\.$/, "")
+      if (match($0, /[0-9]+\.[0-9]+(\.[0-9]+)?$/)) {
+        print substr($0, RSTART, RLENGTH)
+        exit
+      }
+    }
+  '
+}
+
+glibc_is_supported() {
+  glibc_major=${1%%.*}
+  glibc_minor=${1#*.}
+  glibc_minor=${glibc_minor%%.*}
+  case "$glibc_major:$glibc_minor" in
+    *[!0-9:]*|:*) return 1 ;;
+  esac
+  [ "$glibc_major" -gt 2 ] \
+    || { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -ge 28 ]; }
+}
+
 safe_value() {
   case "$1" in *[!A-Za-z0-9_./:@-]*|'') return 1 ;; esac
 }
@@ -113,7 +137,9 @@ install_agent() {
   [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
   endpoint=${endpoint%/}
   [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
-  safe_value "$token" && safe_value "$endpoint" || fail "服务地址或 Agent Token 格式无效"
+  if ! safe_value "$token" || ! safe_value "$endpoint"; then
+    fail "服务地址或 Agent Token 格式无效"
+  fi
   case "$endpoint" in
     https://?*|http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*) ;;
     *) fail "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
@@ -132,7 +158,16 @@ install_agent() {
     esac
     case "$mirror" in *@*) fail "下载加速前缀不能包含用户信息" ;; esac
   fi
-  case "$(uname -m)" in x86_64|amd64) arch="x64" ;; aarch64|arm64) arch="aarch64" ;; *) fail "暂不支持当前 CPU 架构：$(uname -m)" ;; esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x64"; glibc_loader=/lib64/ld-linux-x86-64.so.2 ;;
+    aarch64|arm64) arch="aarch64"; glibc_loader=/lib/ld-linux-aarch64.so.1 ;;
+    *) fail "暂不支持当前 CPU 架构：$(uname -m)" ;;
+  esac
+  libc=musl
+  glibc_version=$(detect_glibc_version || true)
+  if [ -n "$glibc_version" ] && glibc_is_supported "$glibc_version"; then
+    libc=glibc
+  fi
   init_system=$(detect_init_system)
   [ "$init_system" != "unknown" ] || fail "未检测到正在运行的 systemd 或 OpenRC"
 
@@ -142,7 +177,7 @@ install_agent() {
   chmod 750 "$STATE_DIR"
   temporary="$INSTALL_DIR/.agent.$$.download"
   trap 'rm -f "$temporary"' EXIT HUP INT TERM
-  artifact="agent-linux-$arch"
+  artifact="agent-linux-$arch-$libc"
   release_api="https://api.github.com/repos/imengying/NodeFlare/releases/latest"
   log "正在获取 GitHub 最新正式版本（$artifact）"
   release_json=$(curl --fail --location --silent --show-error --max-time 30 \

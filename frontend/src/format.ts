@@ -40,7 +40,6 @@ export function formatSpeedParts(value: number | null | undefined): FormattedByt
   return { ...formatted, unit: `${formatted.unit}/s` };
 }
 
-// 节点编辑框的手动单位输入："100 G"、"0.5 T"；不带单位按 GB。
 const BYTE_UNIT_FACTORS: Record<string, number> = {
   "": 1024 ** 3,
   b: 1,
@@ -50,7 +49,6 @@ const BYTE_UNIT_FACTORS: Record<string, number> = {
   t: 1024 ** 4, tb: 1024 ** 4, tib: 1024 ** 4,
 };
 
-/** 解析 "100 G" 风格的流量输入为字节数，非法输入返回 null。 */
 export function parseByteSize(text: string): number | null {
   const match = /^(\d+(?:\.\d+)?)\s*([a-zA-Z]*)$/.exec(text.trim());
   if (!match) return null;
@@ -58,7 +56,6 @@ export function parseByteSize(text: string): number | null {
   return factor === undefined ? null : Math.round(Number(match[1]) * factor);
 }
 
-/** 字节数 → "100 G" 风格短文本，编辑框失焦时回显。0 表示不限，负数归零。 */
 export function formatByteSize(bytes: number): string {
   const size = Math.max(0, Math.round(number(bytes)));
   if (size === 0) return "0";

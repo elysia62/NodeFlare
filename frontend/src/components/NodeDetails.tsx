@@ -101,8 +101,6 @@ function networkAxisMaximum(points: LoadChartPoint[]): number {
   ), 0);
   if (peak <= 0) return 1024;
 
-  // Four readable intervals plus headroom keep the peak line and top label
-  // away from the SVG edge. Decimal nice steps work well with byte labels.
   const roughStep = peak * 1.15 / 4;
   const magnitude = 10 ** Math.floor(Math.log10(roughStep));
   const normalized = roughStep / magnitude;
@@ -249,10 +247,6 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
     return () => { active = false; };
   }, [server.id, loadHours, demo, locale]);
 
-  // 「实时」档要跟着上报往前走，否则挂载之后这张图就冻住了。依赖只取
-  // `server.timestamp`：`server` 每次渲染都是新对象，挂它会让 effect 空转。
-  // 上面那个 fetch 落地时已经带了一个快照，这里只负责后续追加；
-  // `appendRealtimePoint` 自带去重、按 1 小时窗裁剪和 720 点封顶。
   const liveTimestamp = server.timestamp;
   useEffect(() => {
     if (demo || loadHours !== 0) return;
@@ -337,7 +331,6 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
     [hiddenLatencyTaskIds, latencySeries],
   );
   const latencyData = useMemo(() => {
-    // 共享时间轴取全部任务（含已隐藏），全部隐藏时图表仍渲染空轴 + 覆盖提示。
     const timestamps = new Set<number>();
     for (const series of latencySeries) {
       for (const point of series.points) timestamps.add(point.timestamp);
@@ -385,10 +378,6 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
 
       <section className="chart-section">
         <div className="chart-controls">
-          {/* role="group" 是让 aria-label 生效的前提：无 role 的 div 是 generic，
-              规范禁止给它命名，浏览器会把 aria-label 丢掉。下面几处同理。
-              选中态用 aria-pressed 而不是 role="radio"：radio 组要求方向键 + roving tabindex，
-              这里保持 Tab 逐个走的现状。同文件延迟任务图例用的也是 aria-pressed。 */}
           <div className="segmented" role="group" aria-label={ui(locale, "图表类型", "Chart type")}>
             <button className={chartType === "load" ? "active" : ""} aria-pressed={chartType === "load"} onClick={() => setChartType("load")}><Activity size={14} />{ui(locale, "负载", "Load")}</button>
             {pingEnabled ? <button className={chartType === "latency" ? "active" : ""} aria-pressed={chartType === "latency"} onClick={() => setChartType("latency")}><RadioTower size={14} />{ui(locale, "延迟", "Latency")}</button> : null}

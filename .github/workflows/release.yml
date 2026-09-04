@@ -107,6 +107,19 @@ jobs:
         run: bun test --cwd frontend
       - name: Build frontend
         run: bun run build:frontend
+      - name: Check shell scripts
+        run: sh -n install.sh agent/agent.sh agent/install-macos.sh agent/install-freebsd.sh scripts/*.sh start.sh dev.sh
+      - name: Check PowerShell scripts
+        shell: pwsh
+        run: |
+          $allErrors = @()
+          foreach ($file in @("install.ps1", "agent/install.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) > $null
+            $allErrors += $errors
+          }
+          if ($allErrors.Count) { $allErrors | ForEach-Object { Write-Error $_ }; exit 1 }
       - name: Check backend formatting
         run: cargo fmt --manifest-path backend/Cargo.toml -- --check
       - name: Check Agent formatting
@@ -197,7 +210,7 @@ jobs:
     name: Server (${{ matrix.platform }})
     needs: metadata
     if: needs.metadata.outputs.release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
       attestations: write
@@ -210,14 +223,100 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: Linux x64
-            target: x86_64-unknown-linux-musl
-            asset: nodeflare-linux-x64
+          - platform: Linux x64 glibc 2.28+
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: nodeflare-linux-x64-glibc
+            extension: ""
+            cross: false
+            glibc: true
+            glibc_image: quay.io/pypa/manylinux_2_28_x86_64@sha256:0536c364004fa2a3c5041120b6fe35d84fc5bfe31f04c6a6304f13eac4a67b63
+            native: true
+            static_linux: false
             emulate: false
-          - platform: Linux ARM64
+            freebsd_vm: false
+            freebsd_arm: false
+          - platform: Linux x64 musl
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: nodeflare-linux-x64-musl
+            extension: ""
+            cross: true
+            native: true
+            static_linux: true
+            emulate: false
+            freebsd_vm: false
+            freebsd_arm: false
+          - platform: Linux ARM64 glibc 2.28+
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: nodeflare-linux-aarch64-glibc
+            extension: ""
+            cross: false
+            glibc: true
+            glibc_image: quay.io/pypa/manylinux_2_28_aarch64@sha256:1676a4f178dc6cf8a1d1e3b7e1d71fca891a466ebde72a33880ccda8af3383d8
+            native: true
+            static_linux: false
+            emulate: false
+            freebsd_vm: false
+            freebsd_arm: false
+          - platform: Linux ARM64 musl
+            runner: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            asset: nodeflare-linux-aarch64
+            asset: nodeflare-linux-aarch64-musl
+            extension: ""
+            cross: true
+            native: false
+            static_linux: true
             emulate: true
+            freebsd_vm: false
+            freebsd_arm: false
+          - platform: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: nodeflare-windows-x64.exe
+            extension: .exe
+            cross: false
+            native: true
+            static_linux: false
+            emulate: false
+            freebsd_vm: false
+            freebsd_arm: false
+            rustflags: -C target-feature=+crt-static
+          - platform: macOS ARM64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            asset: nodeflare-macos-aarch64
+            extension: ""
+            cross: false
+            native: true
+            static_linux: false
+            emulate: false
+            freebsd_vm: false
+            freebsd_arm: false
+            rustflags: ""
+          - platform: FreeBSD x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            asset: nodeflare-freebsd-x64
+            extension: ""
+            cross: true
+            native: false
+            static_linux: false
+            emulate: false
+            freebsd_vm: true
+            freebsd_arm: false
+          - platform: FreeBSD ARM64
+            runner: ubuntu-latest
+            target: aarch64-unknown-freebsd
+            asset: nodeflare-freebsd-aarch64
+            extension: ""
+            cross: true
+            native: false
+            static_linux: false
+            emulate: false
+            freebsd_vm: false
+            freebsd_arm: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -226,38 +325,96 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Install cross compiler
-        run: cargo install cross --version 0.2.5 --locked
-      - name: Build server
-        run: CROSS_CONFIG=agent/Cross.toml cross build --manifest-path backend/Cargo.toml --release --locked --target ${{ matrix.target }}
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27 --locked
+      - name: Build server for glibc 2.28
+        if: matrix.glibc == true
+        shell: bash
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --env CARGO_HOME=/opt/cargo \
+            --env RUSTUP_HOME=/opt/rustup \
+            --env RUSTUP_TOOLCHAIN=stable \
+            --env HOME=/tmp \
+            --env CARGO_TARGET_DIR \
+            --env NODEFLARE_VERSION \
+            --volume "$HOME/.cargo:/opt/cargo" \
+            --volume "$HOME/.rustup:/opt/rustup" \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            --workdir "$GITHUB_WORKSPACE" \
+            --entrypoint /opt/cargo/bin/cargo \
+            "${{ matrix.glibc_image }}" \
+            build --manifest-path backend/Cargo.toml --release --locked --target "${{ matrix.target }}"
+      - name: Build server with cross
+        if: matrix.cross
+        run: CROSS_CONFIG=Cross.toml cross build --manifest-path backend/Cargo.toml --release --locked --target ${{ matrix.target }}
+      - name: Build server with Cargo
+        if: matrix.cross == false && matrix.glibc != true
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --manifest-path backend/Cargo.toml --release --locked --target ${{ matrix.target }}
       - name: Stage server binary
+        shell: bash
         run: |
           mkdir -p release
-          cp "target/server/${{ matrix.target }}/release/nodeflare" "release/${{ matrix.asset }}"
+          cp "target/server/${{ matrix.target }}/release/nodeflare${{ matrix.extension }}" "release/${{ matrix.asset }}"
           chmod +x "release/${{ matrix.asset }}"
       - name: Install ARM64 emulator
         if: matrix.emulate
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends qemu-user-static
-      - name: Verify server version
+          sudo apt-get install --yes --no-install-recommends qemu-user-static libc6-arm64-cross libgcc-s1-arm64-cross
+      - name: Verify server version natively
+        if: matrix.native
         shell: bash
         run: |
-          if [ "${{ matrix.emulate }}" = "true" ]; then
-            version_output=$(qemu-aarch64-static "release/${{ matrix.asset }}" --version)
-          else
-            version_output=$("release/${{ matrix.asset }}" --version)
+          version_output=$("release/${{ matrix.asset }}" --version)
+          actual_version="${version_output##* }"
+          if [ "$actual_version" != "${{ needs.metadata.outputs.version }}" ]; then
+            echo "Server version $actual_version does not match tag ${{ needs.metadata.outputs.version }}" >&2
+            exit 1
           fi
+      - name: Verify emulated server version
+        if: matrix.emulate
+        shell: bash
+        run: |
+          version_output=$(qemu-aarch64-static -L /usr/aarch64-linux-gnu "release/${{ matrix.asset }}" --version)
           actual_version="${version_output##* }"
           if [ "$actual_version" != "${{ needs.metadata.outputs.version }}" ]; then
             echo "Server version $actual_version does not match tag ${{ needs.metadata.outputs.version }}" >&2
             exit 1
           fi
       - name: Verify static server binary
+        if: matrix.static_linux
+        shell: bash
         run: |
           if readelf -l "release/${{ matrix.asset }}" | grep -q 'Requesting program interpreter'; then
             echo "Linux server must be statically linked" >&2
             exit 1
           fi
+      - name: Verify glibc server binary
+        if: endsWith(matrix.target, '-unknown-linux-gnu')
+        shell: bash
+        run: |
+          readelf -l "release/${{ matrix.asset }}" | grep -q 'Requesting program interpreter'
+          scripts/check-glibc-version.sh "release/${{ matrix.asset }}" 2.28
+      - name: Verify FreeBSD server
+        if: matrix.freebsd_vm || matrix.freebsd_arm
+        uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
+        with:
+          release: "15"
+          arch: ${{ matrix.freebsd_arm && 'aarch64' || 'x86_64' }}
+          envs: NODEFLARE_VERSION
+          copyback: false
+          run: |
+            set -eu
+            version_output=$(./release/${{ matrix.asset }} --version)
+            actual_version=${version_output##* }
+            if [ "$actual_version" != "$NODEFLARE_VERSION" ]; then
+              echo "Server version $actual_version does not match tag $NODEFLARE_VERSION" >&2
+              exit 1
+            fi
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: release/${{ matrix.asset }}
@@ -284,19 +441,45 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: Linux x64
+          - platform: Linux x64 glibc 2.28+
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: agent-linux-x64-glibc
+            extension: ""
+            cross: false
+            glibc: true
+            glibc_image: quay.io/pypa/manylinux_2_28_x86_64@sha256:0536c364004fa2a3c5041120b6fe35d84fc5bfe31f04c6a6304f13eac4a67b63
+            native: true
+            emulate: false
+            static_linux: false
+          - platform: Linux x64 musl
             runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            asset: agent-linux-x64
+            asset: agent-linux-x64-musl
             extension: ""
             cross: true
+            native: true
+            emulate: false
             static_linux: true
-          - platform: Linux ARM64
+          - platform: Linux ARM64 glibc 2.28+
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: agent-linux-aarch64-glibc
+            extension: ""
+            cross: false
+            glibc: true
+            glibc_image: quay.io/pypa/manylinux_2_28_aarch64@sha256:1676a4f178dc6cf8a1d1e3b7e1d71fca891a466ebde72a33880ccda8af3383d8
+            native: true
+            emulate: false
+            static_linux: false
+          - platform: Linux ARM64 musl
             runner: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            asset: agent-linux-aarch64
+            asset: agent-linux-aarch64-musl
             extension: ""
             cross: true
+            native: false
+            emulate: true
             static_linux: true
           - platform: Windows x64
             runner: windows-latest
@@ -304,18 +487,38 @@ jobs:
             asset: agent-windows-x64.exe
             extension: .exe
             cross: false
+            native: true
+            emulate: false
+            static_linux: false
+            rustflags: -C target-feature=+crt-static
           - platform: macOS ARM64
             runner: macos-14
             target: aarch64-apple-darwin
             asset: agent-macos-aarch64
             extension: ""
             cross: false
+            native: true
+            emulate: false
+            static_linux: false
+            rustflags: ""
           - platform: FreeBSD x64
             runner: ubuntu-latest
             target: x86_64-unknown-freebsd
             asset: agent-freebsd-x64
             extension: ""
             cross: true
+            native: false
+            emulate: false
+            static_linux: false
+          - platform: FreeBSD ARM64
+            runner: ubuntu-latest
+            target: aarch64-unknown-freebsd
+            asset: agent-freebsd-aarch64
+            extension: ""
+            cross: true
+            native: false
+            emulate: false
+            static_linux: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -325,12 +528,33 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install cross compiler
         if: matrix.cross
-        run: cargo install cross --version 0.2.5 --locked
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27 --locked
+      - name: Build Rust Agent for glibc 2.28
+        if: matrix.glibc == true
+        shell: bash
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --env CARGO_HOME=/opt/cargo \
+            --env RUSTUP_HOME=/opt/rustup \
+            --env RUSTUP_TOOLCHAIN=stable \
+            --env HOME=/tmp \
+            --env CARGO_TARGET_DIR \
+            --env NODEFLARE_VERSION \
+            --volume "$HOME/.cargo:/opt/cargo" \
+            --volume "$HOME/.rustup:/opt/rustup" \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            --workdir "$GITHUB_WORKSPACE" \
+            --entrypoint /opt/cargo/bin/cargo \
+            "${{ matrix.glibc_image }}" \
+            build --manifest-path agent/Cargo.toml --release --locked --target "${{ matrix.target }}"
       - name: Build Rust Agent with cross
         if: matrix.cross
-        run: CROSS_CONFIG=agent/Cross.toml cross build --manifest-path agent/Cargo.toml --release --locked --target ${{ matrix.target }}
+        run: CROSS_CONFIG=Cross.toml cross build --manifest-path agent/Cargo.toml --release --locked --target ${{ matrix.target }}
       - name: Build Rust Agent with Cargo
-        if: matrix.cross == false
+        if: matrix.cross == false && matrix.glibc != true
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --manifest-path agent/Cargo.toml --release --locked --target ${{ matrix.target }}
       - name: Stage Agent binary
         shell: bash
@@ -339,12 +563,12 @@ jobs:
           cp "target/agent/${{ matrix.target }}/release/nodeflare-agent${{ matrix.extension }}" "release/${{ matrix.asset }}"
           chmod +x "release/${{ matrix.asset }}"
       - name: Install ARM64 emulator
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.emulate
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends qemu-user-static
-      - name: Verify Linux Agent version
-        if: matrix.cross && matrix.target == 'x86_64-unknown-linux-musl'
+          sudo apt-get install --yes --no-install-recommends qemu-user-static libc6-arm64-cross libgcc-s1-arm64-cross
+      - name: Verify Agent version natively
+        if: matrix.native
         shell: bash
         run: |
           version_output=$("release/${{ matrix.asset }}" --version)
@@ -353,21 +577,11 @@ jobs:
             echo "Agent version $actual_version does not match tag ${{ needs.metadata.outputs.version }}" >&2
             exit 1
           fi
-      - name: Verify Linux ARM64 Agent version
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+      - name: Verify emulated Agent version
+        if: matrix.emulate
         shell: bash
         run: |
-          version_output=$(qemu-aarch64-static "release/${{ matrix.asset }}" --version)
-          actual_version="${version_output##* }"
-          if [ "$actual_version" != "${{ needs.metadata.outputs.version }}" ]; then
-            echo "Agent version $actual_version does not match tag ${{ needs.metadata.outputs.version }}" >&2
-            exit 1
-          fi
-      - name: Verify Agent version
-        if: matrix.cross == false
-        shell: bash
-        run: |
-          version_output=$("release/${{ matrix.asset }}" --version)
+          version_output=$(qemu-aarch64-static -L /usr/aarch64-linux-gnu "release/${{ matrix.asset }}" --version)
           actual_version="${version_output##* }"
           if [ "$actual_version" != "${{ needs.metadata.outputs.version }}" ]; then
             echo "Agent version $actual_version does not match tag ${{ needs.metadata.outputs.version }}" >&2
@@ -381,16 +595,23 @@ jobs:
             echo "Linux Agent must be statically linked" >&2
             exit 1
           fi
+      - name: Verify glibc Agent binary
+        if: endsWith(matrix.target, '-unknown-linux-gnu')
+        shell: bash
+        run: |
+          readelf -l "release/${{ matrix.asset }}" | grep -q 'Requesting program interpreter'
+          scripts/check-glibc-version.sh "release/${{ matrix.asset }}" 2.28
       - name: Verify FreeBSD Agent in FreeBSD
-        if: matrix.target == 'x86_64-unknown-freebsd'
+        if: endsWith(matrix.target, '-unknown-freebsd')
         uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
         with:
           release: "15"
+          arch: ${{ matrix.target == 'aarch64-unknown-freebsd' && 'aarch64' || 'x86_64' }}
           envs: NODEFLARE_VERSION
           copyback: false
           run: |
             set -eu
-            version_output=$(./release/agent-freebsd-x64 --version)
+            version_output=$(./release/${{ matrix.asset }} --version)
             actual_version=${version_output##* }
             if [ "$actual_version" != "$NODEFLARE_VERSION" ]; then
               echo "Agent version $actual_version does not match tag $NODEFLARE_VERSION" >&2
@@ -440,10 +661,119 @@ jobs:
           path: nodeflare-frontend-${{ needs.metadata.outputs.version }}.tar.gz
           if-no-files-found: error
 
+  server-bundle:
+    name: Server bundle (${{ matrix.platform }})
+    needs: [metadata, server, frontend]
+    if: needs.metadata.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x64 glibc 2.28+
+            binary: nodeflare-linux-x64-glibc
+            package_binary: nodeflare
+            asset: nodeflare-server-linux-x64-glibc.tar.gz
+            format: tar
+          - platform: Linux x64 musl
+            binary: nodeflare-linux-x64-musl
+            package_binary: nodeflare
+            asset: nodeflare-server-linux-x64-musl.tar.gz
+            format: tar
+          - platform: Linux ARM64 glibc 2.28+
+            binary: nodeflare-linux-aarch64-glibc
+            package_binary: nodeflare
+            asset: nodeflare-server-linux-aarch64-glibc.tar.gz
+            format: tar
+          - platform: Linux ARM64 musl
+            binary: nodeflare-linux-aarch64-musl
+            package_binary: nodeflare
+            asset: nodeflare-server-linux-aarch64-musl.tar.gz
+            format: tar
+          - platform: Windows x64
+            binary: nodeflare-windows-x64.exe
+            package_binary: nodeflare.exe
+            asset: nodeflare-server-windows-x64.zip
+            format: zip
+          - platform: macOS ARM64
+            binary: nodeflare-macos-aarch64
+            package_binary: nodeflare
+            asset: nodeflare-server-macos-aarch64.tar.gz
+            format: tar
+          - platform: FreeBSD x64
+            binary: nodeflare-freebsd-x64
+            package_binary: nodeflare
+            asset: nodeflare-server-freebsd-x64.tar.gz
+            format: tar
+          - platform: FreeBSD ARM64
+            binary: nodeflare-freebsd-aarch64
+            package_binary: nodeflare
+            asset: nodeflare-server-freebsd-aarch64.tar.gz
+            format: tar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.binary }}
+          path: inputs/server
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: frontend
+          path: inputs/frontend
+      - name: Install ZIP tool
+        if: matrix.format == 'zip'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends zip unzip
+      - name: Package server
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          BINARY: ${{ matrix.binary }}
+          PACKAGE_BINARY: ${{ matrix.package_binary }}
+          ASSET: ${{ matrix.asset }}
+          FORMAT: ${{ matrix.format }}
+        run: |
+          set -euo pipefail
+          mkdir -p package/share/frontend package/share/admin package/share/agent release inputs/frontend/unpacked
+          cp "inputs/server/$BINARY" "package/$PACKAGE_BINARY"
+          tar -xzf "inputs/frontend/nodeflare-frontend-$VERSION.tar.gz" -C inputs/frontend/unpacked
+          cp -a inputs/frontend/unpacked/dist/. package/share/frontend/
+          cp -a inputs/frontend/unpacked/admin-dist/. package/share/admin/
+          cp agent/agent.sh agent/install-macos.sh agent/install-freebsd.sh agent/install.ps1 package/share/agent/
+          cp deploy/nodeflare.service package/nodeflare.service
+          chmod 0755 "package/$PACKAGE_BINARY" package/share/agent/*.sh
+          chmod 0644 package/nodeflare.service package/share/agent/install.ps1
+          if [ "$FORMAT" = zip ]; then
+            (cd package && zip -qr "../release/$ASSET" .)
+            unzip -tq "release/$ASSET"
+          else
+            tar -czf "release/$ASSET" -C package .
+            tar -tzf "release/$ASSET" >/dev/null
+          fi
+          (cd release && sha256sum "$ASSET" > "$ASSET.sha256")
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release/${{ matrix.asset }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: server-bundle-${{ matrix.binary }}
+          path: |
+            release/${{ matrix.asset }}
+            release/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [metadata, security, quality, server, agent, frontend]
+    needs: [metadata, security, quality, agent, server-bundle]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -473,6 +803,8 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Include installer
+        run: cp install.sh install.ps1 release-assets/
       - uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
         with:
           body_path: CHANGELOG.md

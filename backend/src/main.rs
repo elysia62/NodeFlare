@@ -91,12 +91,10 @@ impl AppState {
             .try_send(websocket::AgentCommand::Text(payload));
     }
 
-    pub async fn send_remote_task(&self, task: &models::RemoteTaskInfo) -> bool {
-        self.agents
-            .read()
-            .await
-            .get(&task.server_id)
-            .is_some_and(|connection| websocket::agent::queue_remote_task(connection, task))
+    pub async fn send_remote_task(&self, task: &models::RemoteTaskInfo) {
+        if let Some(connection) = self.agents.read().await.get(&task.server_id) {
+            websocket::agent::queue_remote_task(connection, task);
+        }
     }
 }
 

@@ -22,11 +22,6 @@ function themeText(config: Config, key: string) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-/**
- * Carrier line names as configured in the theme settings. Blank entries are
- * intentional: the latency layer falls back to name matching when all three
- * are empty, so an unconfigured site still shows sensible lines.
- */
 export function carrierSelection(config: Config): CarrierSlotKey {
   return {
     telecom: themeText(config, "telecomLatencyTask"),

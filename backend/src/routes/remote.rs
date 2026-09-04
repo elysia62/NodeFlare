@@ -26,7 +26,7 @@ fn remote_server_ids(input: &CreateRemoteTaskRequest) -> Vec<String> {
         .map(String::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .filter(|id| seen.insert((*id).to_string()))
+        .filter(|id| seen.insert(*id))
         .map(str::to_string)
         .collect()
 }
@@ -41,8 +41,6 @@ fn validate_remote_totp(status: Option<(&str, bool)>, code: &str) -> Result<(), 
     if code.trim().is_empty()
         || !crate::totp::verify_totp(secret, code.trim()).map_err(ApiResponse::internal)?
     {
-        // 远程任务接口带管理员认证；这里不能返回 401，否则前端会把
-        // “验证码错误”误判成登录会话失效并清除管理员令牌。
         return Err(ApiResponse::unprocessable("两步验证码错误"));
     }
     Ok(())
