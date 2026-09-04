@@ -10,6 +10,7 @@ import {
   type PlaybackBuffer,
 } from "./live";
 import { ui } from "./locale";
+import { useFavicon, useStoredAppearance, useSystemDark } from "./hooks/useBrowserAppearance";
 import { resolveBackground, themeToggle } from "./theme";
 import {
   BOOTSTRAP_POLL_INTERVAL_MS,
@@ -82,11 +83,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState("");
   const [access, setAccess] = useState<Access>("ok");
   const [selectedId, setSelectedId] = useState<string | null>(routeServerId);
-  const [appearance, setAppearance] = useState<"light" | "dark" | null>(() => {
-    const stored = localStorage.getItem("nodeflare-theme");
-    return stored === "light" || stored === "dark" ? stored : null;
-  });
-  const [systemDark, setSystemDark] = useState(() => matchMedia("(prefers-color-scheme: dark)").matches);
+  const [appearance, setAppearance] = useStoredAppearance("nodeflare-theme");
+  const systemDark = useSystemDark();
   const liveConnectedRef = useRef(false);
   const playbackRef = useRef<PlaybackBuffer>(new Map());
   const serversRef = useRef<Server[]>([]);
@@ -99,6 +97,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const background = resolveBackground(config.background_url, dark);
   const blur = themeToggle(config, "enableBlur");
   const carrierLatency = config.show_latency && themeToggle(config, "showCarrierLatency", false);
+  useFavicon(config.logo_url);
 
   if (!reloadQueueRef.current) {
     reloadQueueRef.current = createRefreshQueue(async (quiet) => {
@@ -267,24 +266,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [blur, config.locale, dark]);
 
   useEffect(() => {
-    let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-    if (!link) {
-      link = document.createElement("link");
-      link.rel = "icon";
-      document.head.append(link);
-    }
-    link.removeAttribute("type");
-    link.href = config.logo_url || "/logo.svg";
-  }, [config.logo_url]);
-
-  useEffect(() => {
-    const media = matchMedia("(prefers-color-scheme: dark)");
-    const update = () => setSystemDark(media.matches);
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
-
-  useEffect(() => {
     const onPop = () => setSelectedId(routeServerId());
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -317,7 +298,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setAppearance((current) => {
       const resolved = current ?? (dark ? "dark" : "light");
       const next = resolved === "dark" ? "light" : "dark";
-      localStorage.setItem("nodeflare-theme", next);
       return next;
     });
   }, [dark]);

@@ -570,7 +570,7 @@ async fn load_traffic_state(
         })
     })
     .transpose()
-    .map(|state| state.unwrap_or_default())
+    .map(Option::unwrap_or_default)
     .map_err(Into::into)
 }
 
@@ -870,7 +870,7 @@ pub async fn cleanup_database(db: &Database, retention_days: i64) -> Result<()> 
     sqlx::query(db.sql(
         "UPDATE remote_tasks SET status='failed', completed_at=?, \
          result=CASE WHEN result='' THEN '任务等待超过 24 小时，已自动取消' ELSE result END \
-         WHERE status IN ('pending','sent','running') AND requested_at<?",
+         WHERE status IN ('pending','sent') AND requested_at<?",
     ))
     .bind(current)
     .bind(active_task_cutoff)
@@ -1530,7 +1530,8 @@ pub async fn remote_task(db: &Database, id: &str) -> Result<Option<RemoteTaskInf
     .bind(id)
     .fetch_optional(db.pool())
     .await?;
-    row.map(remote_task_from_row)
+    row.as_ref()
+        .map(remote_task_from_row)
         .transpose()
         .map_err(Into::into)
 }
@@ -1558,14 +1559,14 @@ pub async fn pending_remote_tasks(db: &Database, server_id: &str) -> Result<Vec<
     .fetch_all(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    rows.into_iter()
+    rows.iter()
         .map(remote_task_from_row)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
 fn remote_task_from_row(
-    row: sqlx::any::AnyRow,
+    row: &sqlx::any::AnyRow,
 ) -> std::result::Result<RemoteTaskInfo, sqlx::Error> {
     Ok(RemoteTaskInfo {
         id: row.try_get("id")?,
@@ -1604,7 +1605,7 @@ pub async fn update_remote_task_result(
 ) -> Result<bool> {
     let result = sqlx::query(db.sql(
         "UPDATE remote_tasks SET status=?, result=?, exit_code=?, completed_at=? \
-         WHERE id=? AND server_id=? AND status IN ('pending','sent','running')",
+         WHERE id=? AND server_id=? AND status IN ('pending','sent')",
     ))
     .bind(status)
     .bind(result)

@@ -2,7 +2,7 @@ import { clockLabel } from "./chart";
 import { ui, type UiLocale } from "./locale";
 import type { LatencySample } from "./types";
 
-export type LatencyTone = "good" | "fair" | "warning" | "poor" | "danger" | "empty";
+type LatencyTone = "good" | "fair" | "warning" | "poor" | "danger" | "empty";
 
 export interface LatencyBar {
   key: string;
@@ -31,7 +31,7 @@ export const CARRIER_SLOTS = [
 
 export type CarrierSlot = typeof CARRIER_SLOTS[number];
 
-export function latencyTone(value: number): LatencyTone {
+function latencyTone(value: number): LatencyTone {
   if (value <= 60) return "good";
   if (value <= 100) return "fair";
   if (value <= 160) return "warning";
@@ -39,7 +39,7 @@ export function latencyTone(value: number): LatencyTone {
   return "danger";
 }
 
-export function lossTone(value: number): LatencyTone {
+function lossTone(value: number): LatencyTone {
   if (value <= 1) return "good";
   if (value <= 3) return "fair";
   if (value <= 6) return "warning";

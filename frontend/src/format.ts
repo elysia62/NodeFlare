@@ -15,7 +15,7 @@ export interface FormattedBytes {
   unit: string;
 }
 
-export function formatBytesParts(value: number | null | undefined, decimals = 1): FormattedBytes {
+function formatBytesParts(value: number | null | undefined, decimals = 1): FormattedBytes {
   const size = Math.max(0, number(value));
   if (size === 0) return { value: "0", unit: "B" };
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];

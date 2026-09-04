@@ -359,7 +359,7 @@ pub async fn initialize(pool: &Database, config: &Config) -> Result<()> {
         sqlx::query("DELETE FROM settings WHERE key LIKE 'session_%'")
             .execute(&mut *transaction)
             .await?;
-        tracing::info!(timestamp = now, "initialized standalone password scheme");
+        tracing::info!(timestamp = now, "initialized password scheme");
     }
     transaction.commit().await?;
     Ok(())

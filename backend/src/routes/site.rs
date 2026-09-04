@@ -44,14 +44,10 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
             Ok(settings) => settings,
             Err(error) => return ApiResponse::internal(error).into_response(),
         };
-        let base = match crate::db::queries::theme_resolved_url(
-            &state.db,
-            &settings.active_theme_id,
-        )
-        .await
-        {
-            Ok(Some(base)) => base,
-            _ => return StatusCode::NOT_FOUND.into_response(),
+        let Ok(Some(base)) =
+            crate::db::queries::theme_resolved_url(&state.db, &settings.active_theme_id).await
+        else {
+            return StatusCode::NOT_FOUND.into_response();
         };
         return theme_file(&state, &base, relative, "/__theme-active").await;
     }
@@ -97,7 +93,7 @@ async fn local_file(root: &Path, relative: &str, cache: bool) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     };
     match tokio::fs::read(&path).await {
-        Ok(body) => response(body, content_type(&path), cache),
+        Ok(body) => response(body, crate::mime::content_type(&path), cache),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -148,27 +144,4 @@ fn response(body: Vec<u8>, content_type: &str, cache: bool) -> Response {
         );
     }
     response
-}
-
-fn content_type(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-    {
-        "html" => "text/html; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "woff2" => "font/woff2",
-        "wasm" => "application/wasm",
-        "sh" => "text/x-shellscript; charset=utf-8",
-        "ps1" => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
-    }
 }

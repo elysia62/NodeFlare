@@ -55,8 +55,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, server_id: Option<String>)
                         break;
                     }
                 }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
             incoming = receiver.next() => match incoming {

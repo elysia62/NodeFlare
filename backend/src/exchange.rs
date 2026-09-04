@@ -75,7 +75,6 @@ async fn fetch_json(client: &reqwest::Client, url: &str) -> Result<Value> {
     let response = client
         .get(url)
         .header("Accept", "application/json")
-        .header("User-Agent", "NodeFlare-Standalone")
         .timeout(Duration::from_secs(8))
         .send()
         .await?

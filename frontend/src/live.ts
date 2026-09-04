@@ -1,7 +1,7 @@
 import type { LatencySample, LiveLatencyResult, Server } from "./types";
 
 /** A single Agent report as replayed by the NodeFlare server. */
-export interface LiveSample {
+interface LiveSample {
   ts: number;
   data: Partial<Server> & { latency_results?: LiveLatencyResult[] };
 }
@@ -30,7 +30,7 @@ export interface BatchUpdate {
   reportAgeMs?: number;
 }
 
-export const MAX_PLAYBACK_SAMPLES_PER_SERVER = 600;
+const MAX_PLAYBACK_SAMPLES_PER_SERVER = 600;
 const MAX_LIVE_LATENCY_RESULTS = 4096;
 
 export function mergeLiveResults(

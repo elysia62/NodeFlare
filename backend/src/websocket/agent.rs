@@ -180,12 +180,14 @@ async fn run(
         }
     }
     writer.abort();
-    let mut agents = state.agents.write().await;
-    if agents
-        .get(&identity.server_id)
-        .is_some_and(|connection| connection.connection_id == connection_id)
     {
-        agents.remove(&identity.server_id);
+        let mut agents = state.agents.write().await;
+        if agents
+            .get(&identity.server_id)
+            .is_some_and(|connection| connection.connection_id == connection_id)
+        {
+            agents.remove(&identity.server_id);
+        }
     }
     tracing::info!(server_id = %identity.server_id, "Agent disconnected");
 }

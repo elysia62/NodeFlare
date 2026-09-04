@@ -161,8 +161,7 @@ pub async fn settings_patch(
     let next_username = input
         .admin_username
         .as_deref()
-        .map(str::trim)
-        .unwrap_or(&current.admin_username)
+        .map_or(current.admin_username.as_str(), str::trim)
         .to_string();
     let username_changed = next_username != user.username;
     if !username_changed {

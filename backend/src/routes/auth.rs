@@ -294,14 +294,16 @@ pub(crate) fn session_device(headers: &HeaderMap, peer: SocketAddr) -> crate::db
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| {
-            value
-                .chars()
-                .filter(|character| !character.is_control())
-                .take(512)
-                .collect()
-        })
-        .unwrap_or_else(|| "未知客户端".to_string());
+        .map_or_else(
+            || "未知客户端".to_string(),
+            |value| {
+                value
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .take(512)
+                    .collect()
+            },
+        );
     crate::db::SessionDevice {
         ip_address,
         user_agent,

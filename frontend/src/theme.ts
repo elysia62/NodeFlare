@@ -17,7 +17,7 @@ export function themeToggle(config: Config, key: string, fallback = true) {
   return typeof value === "boolean" ? value : fallback;
 }
 
-export function themeText(config: Config, key: string) {
+function themeText(config: Config, key: string) {
   const value = option(config, key);
   return typeof value === "string" ? value.trim() : "";
 }

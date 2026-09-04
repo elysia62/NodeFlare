@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod exchange;
 mod middleware;
+mod mime;
 mod models;
 mod notify;
 mod routes;
@@ -64,7 +65,8 @@ impl AppState {
     }
 
     pub async fn disconnect_agent(&self, server_id: &str) {
-        if let Some(connection) = self.agents.write().await.remove(server_id) {
+        let connection = self.agents.write().await.remove(server_id);
+        if let Some(connection) = connection {
             let _ = connection.sender.try_send(websocket::AgentCommand::Close);
         }
     }
@@ -136,7 +138,7 @@ async fn main() -> Result<()> {
     }
 
     let http = reqwest::Client::builder()
-        .user_agent("NodeFlare-Standalone")
+        .user_agent(format!("NodeFlare/{}", config::VERSION))
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()?;
     let (dashboard_tx, _) = broadcast::channel(2048);

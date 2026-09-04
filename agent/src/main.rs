@@ -300,6 +300,7 @@ impl PublicIpProbe {
             let mut state = state.lock().unwrap();
             state.v4.observe(v4, observed_at);
             state.v6.observe(v6, observed_at);
+            drop(state);
             probing.store(false, Ordering::SeqCst);
         });
     }
@@ -753,8 +754,10 @@ fn os_name() -> String {
     text("/etc/os-release")
         .lines()
         .find_map(|line| line.strip_prefix("PRETTY_NAME="))
-        .map(|value| value.trim_matches('"').to_string())
-        .unwrap_or_else(|| command("uname", &["-s"]))
+        .map_or_else(
+            || command("uname", &["-s"]),
+            |value| value.trim_matches('"').to_string(),
+        )
 }
 
 #[cfg(target_os = "linux")]
@@ -1143,7 +1146,7 @@ fn sysfs_gpu_names() -> Vec<String> {
         return Vec::new();
     };
     entries
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -1208,10 +1211,7 @@ fn parse_pciconf_gpu_names(output: &str) -> Vec<String> {
     let mut block = Vec::new();
     for line in output.lines() {
         if !line.is_empty()
-            && !line
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_whitespace())
+            && !line.chars().next().is_some_and(char::is_whitespace)
             && !block.is_empty()
         {
             if let Some(name) = block_name(&block) {
@@ -1345,9 +1345,7 @@ impl Collector {
     fn refresh_basic(&mut self) {
         let gpus = gpu_info();
         self.basic = BasicMetrics {
-            cpu_cores: thread::available_parallelism()
-                .map(|value| value.get() as i64)
-                .unwrap_or(1),
+            cpu_cores: thread::available_parallelism().map_or(1, |value| value.get() as i64),
             cpu_model: cpu_model(),
             os: os_name(),
             kernel: command("uname", &["-r"]),
@@ -1365,19 +1363,17 @@ impl Collector {
     }
 
     fn refresh_slow(&mut self) {
-        let processes = fs::read_dir("/proc")
-            .map(|items| {
-                items
-                    .filter_map(|item| item.ok())
-                    .filter(|item| {
-                        item.file_name()
-                            .to_string_lossy()
-                            .chars()
-                            .all(|ch| ch.is_ascii_digit())
-                    })
-                    .count() as i64
-            })
-            .unwrap_or(0);
+        let processes = fs::read_dir("/proc").map_or(0, |items| {
+            items
+                .filter_map(std::result::Result::ok)
+                .filter(|item| {
+                    item.file_name()
+                        .to_string_lossy()
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit())
+                })
+                .count() as i64
+        });
         self.slow = SlowMetrics {
             disks: disk_usage(),
             processes,
@@ -1891,7 +1887,7 @@ fn receive_remote_output(
     }
 }
 
-fn remote_result_text(stdout: CapturedOutput, stderr: CapturedOutput) -> String {
+fn remote_result_text(stdout: &CapturedOutput, stderr: &CapturedOutput) -> String {
     let truncated = stdout.truncated || stderr.truncated;
     let stdout = String::from_utf8_lossy(&stdout.bytes);
     let stderr = String::from_utf8_lossy(&stderr.bytes);
@@ -1989,7 +1985,7 @@ fn execute_remote_task_with_timeout(
             terminate_remote_process_tree(&mut child);
             let stdout = receive_remote_output(&stdout, &mut child);
             let stderr = receive_remote_output(&stderr, &mut child);
-            let output = remote_result_text(stdout, stderr);
+            let output = remote_result_text(&stdout, &stderr);
             return TaskResultMessage {
                 message_type: "task_result".to_string(),
                 task_id,
@@ -2005,7 +2001,7 @@ fn execute_remote_task_with_timeout(
     };
     let stdout = receive_remote_output(&stdout, &mut child);
     let stderr = receive_remote_output(&stderr, &mut child);
-    let output = remote_result_text(stdout, stderr);
+    let output = remote_result_text(&stdout, &stderr);
 
     let Some(status) = status else {
         let timeout_seconds = timeout.as_secs().max(1);
@@ -2279,8 +2275,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
     let mut socket: Option<LiveSocket> = None;
     let mut wss_interval = configured_interval
         .lock()
-        .map(|interval| *interval)
-        .unwrap_or(Duration::from_secs(1));
+        .map_or(Duration::from_secs(1), |interval| *interval);
     let mut accepted_through = persisted_through.load(Ordering::Acquire);
     let mut next_send_at = Instant::now();
     let mut next_probe_at = Instant::now();
@@ -2326,9 +2321,8 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         }
 
         let (queue_lock, ready) = &*pending;
-        let mut queue = match queue_lock.lock() {
-            Ok(queue) => queue,
-            Err(_) => return,
+        let Ok(mut queue) = queue_lock.lock() else {
+            return;
         };
         let batch = loop {
             let now = Instant::now();
@@ -2684,7 +2678,8 @@ fn rewrite_pending_spool(path: &Path, samples: &[Report]) -> Result<()> {
 }
 
 fn normalized_version(value: &str) -> &str {
-    value.trim().strip_prefix('v').unwrap_or(value.trim())
+    let value = value.trim();
+    value.strip_prefix('v').unwrap_or(value)
 }
 
 fn version_triplet(value: &str) -> Option<(u64, u64, u64)> {
@@ -3343,11 +3338,11 @@ mod tests {
     #[test]
     fn remote_command_output_is_bounded() {
         let result = remote_result_text(
-            CapturedOutput {
+            &CapturedOutput {
                 bytes: vec![b'x'; REMOTE_RESULT_OUTPUT_BYTES + 100],
                 truncated: true,
             },
-            CapturedOutput::default(),
+            &CapturedOutput::default(),
         );
         assert!(result.len() < REMOTE_RESULT_OUTPUT_BYTES + 64);
         assert!(result.ends_with("[输出已截断]"));

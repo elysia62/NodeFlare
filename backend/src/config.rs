@@ -10,7 +10,7 @@ pub const VERSION: &str = match option_env!("NODEFLARE_VERSION") {
 };
 
 #[derive(Debug, Parser)]
-#[command(version = VERSION, about = "NodeFlare standalone monitoring server")]
+#[command(version = VERSION, about = "NodeFlare monitoring server")]
 pub struct Args {
     /// Path to the TOML configuration file.
     #[arg(short, long, default_value = "/etc/nodeflare/config.toml")]
@@ -81,7 +81,7 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read configuration {}", path.display()))?;
-        let mut config: Config = toml::from_str(&content)
+        let mut config: Self = toml::from_str(&content)
             .with_context(|| format!("failed to parse configuration {}", path.display()))?;
         let base = path
             .parent()

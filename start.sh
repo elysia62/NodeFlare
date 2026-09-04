@@ -10,7 +10,7 @@ if [ -z "$config_path" ]; then
     config_path=/etc/nodeflare/config.toml
   elif [ -f backend/config.toml ]; then
     config_path=backend/config.toml
-    echo "正在使用兼容的本地配置 backend/config.toml"
+    echo "正在使用本地开发配置 backend/config.toml"
   else
     echo "未找到 /etc/nodeflare/config.toml" >&2
     echo "请先运行 sudo ./install.sh，安装时会询问管理员用户名和密码。" >&2

@@ -168,20 +168,16 @@ fn row_values(row: &AnyRow, columns: &[BackupColumn]) -> Result<Vec<Value>> {
             Ok(match column.kind {
                 BackupKind::Bool => row
                     .try_get::<Option<bool>, _>(index)?
-                    .map(Value::Bool)
-                    .unwrap_or(Value::Null),
+                    .map_or(Value::Null, Value::Bool),
                 BackupKind::SmallInt => row
                     .try_get::<Option<i16>, _>(index)?
-                    .map(|value| Value::Number(i64::from(value).into()))
-                    .unwrap_or(Value::Null),
+                    .map_or(Value::Null, |value| Value::Number(i64::from(value).into())),
                 BackupKind::Integer => row
                     .try_get::<Option<i32>, _>(index)?
-                    .map(|value| Value::Number(i64::from(value).into()))
-                    .unwrap_or(Value::Null),
+                    .map_or(Value::Null, |value| Value::Number(i64::from(value).into())),
                 BackupKind::BigInt => row
                     .try_get::<Option<i64>, _>(index)?
-                    .map(|value| Value::Number(value.into()))
-                    .unwrap_or(Value::Null),
+                    .map_or(Value::Null, |value| Value::Number(value.into())),
                 BackupKind::Real => match row.try_get::<Option<f32>, _>(index)? {
                     Some(value) => finite_json_number(f64::from(value))?,
                     None => Value::Null,
@@ -192,12 +188,10 @@ fn row_values(row: &AnyRow, columns: &[BackupColumn]) -> Result<Vec<Value>> {
                 },
                 BackupKind::Text => row
                     .try_get::<Option<String>, _>(index)?
-                    .map(Value::String)
-                    .unwrap_or(Value::Null),
+                    .map_or(Value::Null, Value::String),
                 BackupKind::Blob => row
                     .try_get::<Option<Vec<u8>>, _>(index)?
-                    .map(|value| Value::String(hex::encode(value)))
-                    .unwrap_or(Value::Null),
+                    .map_or(Value::Null, |value| Value::String(hex::encode(value))),
             })
         })
         .collect()
@@ -518,7 +512,7 @@ pub async fn restore_archive(db: &Database, archive: &[u8]) -> Result<usize> {
     sqlx::query(db.sql(
         "UPDATE remote_tasks SET status='failed', completed_at=?, \
          result=CASE WHEN result='' THEN '数据库恢复后已取消未完成任务' ELSE result END \
-         WHERE status IN ('pending','sent','running')",
+         WHERE status IN ('pending','sent')",
     ))
     .bind(crate::db::now())
     .execute(&mut *transaction)

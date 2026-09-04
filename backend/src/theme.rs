@@ -141,7 +141,7 @@ fn validate_release_asset_url(value: &str, owner: &str, repository: &str) -> Res
     let parsed = Url::parse(value).context("Release ZIP 下载地址无效")?;
     let parts = parsed
         .path_segments()
-        .map(|parts| parts.collect::<Vec<_>>())
+        .map(Iterator::collect::<Vec<_>>)
         .unwrap_or_default();
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("github.com")
@@ -227,7 +227,7 @@ pub async fn fetch_theme_path(
     };
     let root = local_root(theme_dir, base)?;
     let body = read_local(&root, target, limit).await?;
-    let content_type = content_type(Path::new(target)).to_string();
+    let content_type = crate::mime::content_type(Path::new(target)).to_string();
     if target == "index.html" {
         let html = String::from_utf8(body)?;
         return Ok((rewrite_index(&html, prefix).into_bytes(), content_type));
@@ -276,7 +276,8 @@ fn empty_settings_schema() -> Value {
 }
 
 fn sanitize_version(value: &str) -> Option<String> {
-    let version = value.trim().strip_prefix('v').unwrap_or(value.trim());
+    let value = value.trim();
+    let version = value.strip_prefix('v').unwrap_or(value);
     (!version.is_empty()
         && version.len() <= 40
         && version
@@ -332,31 +333,6 @@ async fn read_local_optional(root: &Path, relative: &str, limit: usize) -> Resul
         anyhow::bail!("本地主题资源过大");
     }
     Ok(Some(body))
-}
-
-fn content_type(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-    {
-        "html" => "text/html; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "wasm" => "application/wasm",
-        "map" => "application/json; charset=utf-8",
-        _ => "application/octet-stream",
-    }
 }
 
 fn install_archive_blocking(theme_dir: &Path, id: &str, archive: Vec<u8>) -> Result<()> {
