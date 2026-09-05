@@ -170,6 +170,7 @@ jobs:
             'turnstile_secret_key = ""' \
             "frontend_dir = \"$GITHUB_WORKSPACE/frontend/dist\"" \
             "admin_frontend_dir = \"$GITHUB_WORKSPACE/frontend/admin-dist\"" \
+            "theme_dir = \"$sqlite_dir/themes\"" \
             "agent_dir = \"$GITHUB_WORKSPACE/agent\"" > "$sqlite_config"
           target/backend/debug/nodeflare --config "$sqlite_config" > "$sqlite_dir/server.log" 2>&1 &
           sqlite_pid=$!
@@ -198,6 +199,7 @@ jobs:
             'turnstile_secret_key = ""' \
             "frontend_dir = \"$GITHUB_WORKSPACE/frontend/dist\"" \
             "admin_frontend_dir = \"$GITHUB_WORKSPACE/frontend/admin-dist\"" \
+            "theme_dir = \"$postgres_dir/themes\"" \
             "agent_dir = \"$GITHUB_WORKSPACE/agent\"" > "$postgres_config"
           target/backend/debug/nodeflare --config "$postgres_config" > "$postgres_dir/server.log" 2>&1 &
           postgres_pid=$!

@@ -14,7 +14,18 @@ monitor_curl() {
 }
 
 request() {
-  monitor_curl --fail --location --silent --show-error "$@"
+  response_file=$(mktemp /tmp/nodeflare-response.XXXXXX)
+  if monitor_curl --fail-with-body --location --silent --show-error \
+    --output "$response_file" "$@"; then
+    cat "$response_file"
+    rm -f -- "$response_file"
+  else
+    request_status=$?
+    cat "$response_file" >&2
+    printf '\n' >&2
+    rm -f -- "$response_file"
+    return "$request_status"
+  fi
 }
 
 step() {
