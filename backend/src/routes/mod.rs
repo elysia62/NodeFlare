@@ -93,32 +93,54 @@ pub fn hostname(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-pub fn forwarded_ip(headers: &HeaderMap) -> Option<String> {
-    ["x-real-ip", "cf-connecting-ip"].iter().find_map(|name| {
-        headers
-            .get(*name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|value| value.parse::<std::net::IpAddr>().is_ok())
-            .map(str::to_string)
-    })
+fn trusted_proxy(address: std::net::IpAddr, trusted: &[ipnet::IpNet]) -> bool {
+    trusted.iter().any(|network| network.contains(&address))
 }
 
-pub fn client_ip(headers: &HeaderMap, peer: std::net::SocketAddr) -> String {
-    if peer.ip().is_loopback()
-        && let Some(forwarded) = forwarded_ip(headers)
-    {
-        return forwarded;
+pub fn client_ip(
+    headers: &HeaderMap,
+    peer: std::net::SocketAddr,
+    trusted: &[ipnet::IpNet],
+) -> String {
+    if !trusted_proxy(peer.ip(), trusted) {
+        return peer.ip().to_string();
     }
-    peer.ip().to_string()
+    let mut chain = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        let Ok(value) = value.to_str() else {
+            return peer.ip().to_string();
+        };
+        for address in value.split(',') {
+            let Ok(address) = address.trim().parse::<std::net::IpAddr>() else {
+                return peer.ip().to_string();
+            };
+            chain.push(address);
+            if chain.len() > 32 {
+                return peer.ip().to_string();
+            }
+        }
+    }
+    chain
+        .iter()
+        .rev()
+        .find(|address| !trusted_proxy(**address, trusted))
+        .or_else(|| chain.first())
+        .copied()
+        .unwrap_or_else(|| peer.ip())
+        .to_string()
 }
 
-pub fn request_is_secure(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
+pub fn request_is_secure(
+    headers: &HeaderMap,
+    peer: std::net::SocketAddr,
+    trusted: &[ipnet::IpNet],
+) -> bool {
+    trusted_proxy(peer.ip(), trusted)
+        && headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
 }
 
 pub fn admin_cookie(token: &str, max_age: i64, secure: bool) -> String {
@@ -135,19 +157,38 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
-    fn forwarded_ip_prefers_the_reverse_proxy_value() {
+    fn trusted_proxy_uses_the_normalized_forwarded_chain() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
-        headers.insert("cf-connecting-ip", HeaderValue::from_static("198.51.100.9"));
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.7, 192.0.2.10"),
+        );
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
-        assert_eq!(client_ip(&headers, peer), "203.0.113.7");
+        let trusted = [
+            "127.0.0.1/32".parse().unwrap(),
+            "192.0.2.0/24".parse().unwrap(),
+        ];
+        assert_eq!(client_ip(&headers, peer, &trusted), "203.0.113.7");
     }
 
     #[test]
     fn public_peers_cannot_spoof_forwarded_headers() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
+        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.8"));
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)), 12345);
-        assert_eq!(client_ip(&headers, peer), "198.51.100.20");
+        let trusted = ["127.0.0.1/32".parse().unwrap()];
+        assert_eq!(client_ip(&headers, peer, &trusted), "198.51.100.20");
+    }
+
+    #[test]
+    fn spoofable_vendor_headers_are_ignored() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("198.51.100.9"));
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+        let trusted = ["127.0.0.1/32".parse().unwrap()];
+        assert_eq!(client_ip(&headers, peer, &trusted), "127.0.0.1");
     }
 }

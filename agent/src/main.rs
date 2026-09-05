@@ -2567,14 +2567,13 @@ fn live_batch_after(queue: &VecDeque<Report>, timestamp: i64) -> Vec<Report> {
     candidates.into_iter().take(count).collect()
 }
 
-fn live_persistence_probe(queue: &VecDeque<Report>, persisted_through: i64) -> Vec<Report> {
-    queue
+fn live_persistence_batch(queue: &VecDeque<Report>, timestamp: i64) -> Vec<Report> {
+    let candidates = queue
         .iter()
-        .rev()
-        .find(|report| report.timestamp > persisted_through)
+        .filter(|report| report.timestamp > timestamp)
         .cloned()
-        .into_iter()
-        .collect()
+        .collect::<VecDeque<_>>();
+    live_batch::latest(&candidates)
 }
 
 fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
@@ -2639,16 +2638,16 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         };
         let batch = loop {
             let now = Instant::now();
-            let unsent = live_batch_after(&queue, accepted_through);
-            if !unsent.is_empty() && (now >= next_send_at || now >= next_probe_at) {
-                break unsent;
-            }
             let persisted = persisted_through.load(Ordering::Acquire);
-            if unsent.is_empty() && now >= next_probe_at {
-                let probe = live_persistence_probe(&queue, persisted);
-                if !probe.is_empty() {
-                    break probe;
+            if now >= next_probe_at {
+                let persistence_batch = live_persistence_batch(&queue, persisted);
+                if !persistence_batch.is_empty() {
+                    break persistence_batch;
                 }
+            }
+            let unsent = live_batch_after(&queue, accepted_through);
+            if !unsent.is_empty() && now >= next_send_at {
+                break unsent;
             }
 
             let wake_at = if !unsent.is_empty() {
@@ -2676,6 +2675,10 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                 } else {
                     match read_live_ack(connected) {
                         Ok(LiveRead::Closed) => drop_socket = true,
+                        Ok(LiveRead::Ack(ack)) if ack.realtime_hint => {
+                            wss_interval = ack_wss_interval(&ack);
+                            next_send_at = Instant::now() + wss_interval;
+                        }
                         Ok(LiveRead::Ack(ack)) => {
                             observe_persisted_through(&persisted_through, &ack);
                             if ack.persistence_error {

@@ -8,6 +8,12 @@ AGENT_FILE="$INSTALL_DIR/agent"
 STATE_ROOT="/var/db/nodeflare"
 STATE_DIR="$STATE_ROOT/agent"
 SERVICE_FILE="/usr/local/etc/rc.d/$SERVICE_NAME"
+temporary=""
+backup_agent=""
+backup_service=""
+rollback_agent=false
+had_agent=false
+had_service=false
 
 log() {
   printf '[NodeFlare] %s\n' "$1"
@@ -18,12 +24,34 @@ fail() {
   exit 1
 }
 
+cleanup_agent_install() {
+  if [ "$rollback_agent" = true ]; then
+    rollback_agent=false
+    log "安装未完成，正在恢复上一版本"
+    service "$SERVICE_NAME" stop 2>/dev/null || true
+    if [ "$had_agent" = true ]; then
+      cp -p "$backup_agent" "$AGENT_FILE" 2>/dev/null || true
+    else
+      rm -f "$AGENT_FILE"
+    fi
+    if [ "$had_service" = true ]; then
+      cp -p "$backup_service" "$SERVICE_FILE" 2>/dev/null || true
+      service "$SERVICE_NAME" start 2>/dev/null || true
+    else
+      rm -f "$SERVICE_FILE"
+    fi
+  fi
+  [ -z "$temporary" ] || rm -f "$temporary"
+  [ -z "$backup_agent" ] || rm -f "$backup_agent"
+  [ -z "$backup_service" ] || rm -f "$backup_service"
+}
+
 usage() {
   cat <<'EOF'
 NodeFlare Agent FreeBSD 安装脚本
 
 用法：
-  install-freebsd.sh -e <NodeFlare URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
+  install-freebsd.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>]
   install-freebsd.sh --status
   install-freebsd.sh --uninstall
 
@@ -130,8 +158,8 @@ case "$endpoint" in
   *) fail "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
 esac
 case "$endpoint" in *@*) fail "服务地址不能包含用户信息" ;; esac
-case "$interval" in ''|*[!0-9]*) fail "上报间隔必须是整数" ;; esac
-[ "$interval" -ge 15 ] && [ "$interval" -le 3600 ] || fail "上报间隔必须在 15-3600 秒之间"
+case "$interval" in ''|*[!0-9]*) fail "历史保存间隔必须是整数" ;; esac
+[ "$interval" -ge 15 ] && [ "$interval" -le 3600 ] || fail "历史保存间隔必须在 15-3600 秒之间"
 mirror=${mirror%/}
 if [ -n "$mirror" ]; then
   [ ${#mirror} -le 2048 ] || fail "下载加速前缀长度超出限制"
@@ -149,7 +177,7 @@ chmod 755 "$INSTALL_DIR"
 chmod 750 "$STATE_ROOT"
 chmod 750 "$STATE_DIR"
 temporary="$INSTALL_DIR/.agent.$$.download"
-trap 'rm -f "$temporary"' EXIT HUP INT TERM
+trap cleanup_agent_install EXIT HUP INT TERM
 artifact="agent-freebsd-$arch"
 release_api="https://api.github.com/repos/imengying/NodeFlare/releases/latest"
 log "正在获取 GitHub 最新正式版本（$artifact）"
@@ -192,10 +220,21 @@ installed_version=$("$temporary" --version) || fail "下载的 Agent 无法在�
 installed_version=${installed_version##* }
 [ "$installed_version" = "${release_tag#v}" ] || fail "Release $release_tag 与 Agent 版本 $installed_version 不一致"
 
+backup_agent="$STATE_DIR/.agent.$$.previous"
+backup_service="$STATE_DIR/.service.$$.previous"
+if [ -f "$AGENT_FILE" ]; then
+  cp -p "$AGENT_FILE" "$backup_agent"
+  had_agent=true
+fi
+if [ -f "$SERVICE_FILE" ]; then
+  cp -p "$SERVICE_FILE" "$backup_service"
+  had_service=true
+fi
+rollback_agent=true
+
 log "正在配置并启动 FreeBSD rc.d 服务"
 service "$SERVICE_NAME" stop 2>/dev/null || true
 mv "$temporary" "$AGENT_FILE"
-trap - EXIT HUP INT TERM
 cat > "$SERVICE_FILE" <<EOF
 #!/bin/sh
 # PROVIDE: nodeflare_agent
@@ -224,6 +263,10 @@ service "$SERVICE_NAME" status >/dev/null || {
   service "$SERVICE_NAME" status >&2 || true
   fail "NodeFlare 服务启动失败，请查看 /var/log/messages"
 }
+
+rollback_agent=false
+cleanup_agent_install
+trap - EXIT HUP INT TERM
 
 printf '\nNodeFlare Agent 安装完成\n'
 printf '  版本：%s\n' "$installed_version"

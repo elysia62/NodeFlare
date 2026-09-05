@@ -18,6 +18,38 @@ pub struct AttemptLimiter {
     retention: Duration,
 }
 
+pub struct IntervalLimiter {
+    entries: Mutex<HashMap<String, Instant>>,
+    minimum_interval: Duration,
+    retention: Duration,
+}
+
+impl IntervalLimiter {
+    pub fn new(minimum_interval: Duration) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            minimum_interval,
+            retention: minimum_interval.saturating_mul(3_600),
+        }
+    }
+
+    pub fn allow(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        entries.retain(|_, seen| now.duration_since(*seen) <= self.retention);
+        if entries
+            .get(key)
+            .is_some_and(|seen| now.duration_since(*seen) < self.minimum_interval)
+        {
+            return false;
+        }
+        entries.insert(key.to_string(), now);
+        true
+    }
+}
+
 impl AttemptLimiter {
     pub fn new(maximum_failures: u32, window: Duration, block_for: Duration) -> Self {
         Self {
@@ -90,5 +122,13 @@ mod tests {
         assert!(limiter.retry_after("client").is_some());
         limiter.clear("client");
         assert_eq!(limiter.retry_after("client"), None);
+    }
+
+    #[test]
+    fn interval_limiter_coalesces_repeated_requests() {
+        let limiter = IntervalLimiter::new(Duration::from_secs(60));
+        assert!(limiter.allow("client"));
+        assert!(!limiter.allow("client"));
+        assert!(limiter.allow("other"));
     }
 }

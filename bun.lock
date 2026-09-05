@@ -10,7 +10,7 @@
     },
     "frontend": {
       "name": "nodeflare-ui",
-      "version": "0.0.1",
+      "version": "1.0.0",
       "dependencies": {
         "lucide-react": "^1.40.0",
         "react": "^19.2.8",

@@ -286,7 +286,7 @@ fn sanitize_version(value: &str) -> Option<String> {
     .then(|| version.to_string())
 }
 
-fn validate_local_id(id: &str) -> Result<()> {
+pub(crate) fn validate_local_id(id: &str) -> Result<()> {
     if !(8..=80).contains(&id.len())
         || !id.starts_with("theme-")
         || !id

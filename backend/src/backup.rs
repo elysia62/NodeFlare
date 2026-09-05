@@ -6,18 +6,20 @@ use serde_json::{Number, Value};
 use sqlx::any::{AnyArguments, AnyRow, AnyTypeInfoKind};
 use sqlx::{Arguments, AssertSqlSafe, Column, Executor, Row, SqlSafeStr};
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const DATABASE_BACKUP_MAX_BYTES: usize = 512 * 1024 * 1024;
 const DATABASE_BACKUP_MAX_EXTRACTED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const DATABASE_BACKUP_MAX_ENTRIES: usize = 64;
+const DATABASE_BACKUP_MAX_ENTRIES: usize = 16_384;
 const DATABASE_BACKUP_FORMAT: &str = "nodeflare-database-backup";
-const DATABASE_BACKUP_VERSION: u32 = 1;
+const DATABASE_BACKUP_VERSION: u32 = 2;
 const INSERT_BATCH_ROWS: usize = 100;
 const MAX_NDJSON_LINE_BYTES: usize = 16 * 1024 * 1024;
+const THEME_BACKUP_FILE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 const BACKUP_TABLES: &[&str] = &[
     "settings",
@@ -73,12 +75,14 @@ pub struct DatabaseArchive {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BackupManifest {
     format: String,
     version: u32,
     created_at: i64,
     source: String,
     tables: Vec<String>,
+    theme_files: Vec<String>,
     excluded_ephemeral_tables: Vec<String>,
 }
 
@@ -125,6 +129,103 @@ struct BackupTableHeader {
 
 fn table_entry_name(table: &str) -> String {
     format!("tables/{table}.ndjson")
+}
+
+fn theme_entry_name(relative: &str) -> String {
+    format!("themes/{relative}")
+}
+
+fn validate_theme_relative_path(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 2048
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+    {
+        bail!("主题备份路径无效");
+    }
+    let path = Path::new(value);
+    let components = path.components().collect::<Vec<_>>();
+    if path.is_absolute()
+        || components.len() < 2
+        || components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!("主题备份路径无效");
+    }
+    let Some(Component::Normal(id)) = components.first() else {
+        bail!("主题备份路径无效");
+    };
+    let id = id.to_str().context("主题目录名称不是 UTF-8")?;
+    crate::theme::validate_local_id(id).context("主题备份目录名称无效")
+}
+
+fn collect_theme_files(theme_dir: Option<&Path>) -> Result<Vec<(String, PathBuf, u64)>> {
+    let Some(theme_dir) = theme_dir else {
+        return Ok(Vec::new());
+    };
+    let metadata = match fs::symlink_metadata(theme_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("主题目录不是普通目录");
+    }
+
+    let mut stack = Vec::new();
+    for entry in fs::read_dir(theme_dir)? {
+        let entry = entry?;
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if crate::theme::validate_local_id(&id).is_err() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("主题目录包含非法条目：{id}");
+        }
+        stack.push(entry.path());
+    }
+
+    let mut files = Vec::new();
+    let mut total = 0_u64;
+    while let Some(directory) = stack.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                bail!("主题目录不能包含符号链接");
+            }
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() || metadata.len() > THEME_BACKUP_FILE_MAX_BYTES {
+                bail!("主题文件无效或超过 32 MiB");
+            }
+            let relative = path
+                .strip_prefix(theme_dir)?
+                .to_str()
+                .context("主题文件路径不是 UTF-8")?
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            validate_theme_relative_path(&relative)?;
+            total = total
+                .checked_add(metadata.len())
+                .context("主题文件大小溢出")?;
+            if total > DATABASE_BACKUP_MAX_EXTRACTED_BYTES {
+                bail!("主题文件总大小不能超过 4 GiB");
+            }
+            files.push((relative, path, metadata.len()));
+            if files.len() + BACKUP_TABLES.len() + 1 > DATABASE_BACKUP_MAX_ENTRIES {
+                bail!("主题文件数量过多");
+            }
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(files)
 }
 
 async fn table_columns(db: &Database, table: &str) -> Result<Vec<BackupColumn>> {
@@ -196,8 +297,9 @@ fn row_values(row: &AnyRow, columns: &[BackupColumn]) -> Result<Vec<Value>> {
         .collect()
 }
 
-pub async fn export_archive(db: &Database) -> Result<DatabaseArchive> {
+async fn export(db: &Database, theme_dir: Option<&Path>) -> Result<DatabaseArchive> {
     let schema = database_schema(db).await?;
+    let theme_files = collect_theme_files(theme_dir)?;
     let created_at = crate::db::now();
     let manifest = BackupManifest {
         format: DATABASE_BACKUP_FORMAT.to_string(),
@@ -211,6 +313,10 @@ pub async fn export_archive(db: &Database) -> Result<DatabaseArchive> {
         tables: BACKUP_TABLES
             .iter()
             .map(|table| (*table).to_string())
+            .collect(),
+        theme_files: theme_files
+            .iter()
+            .map(|(relative, _, _)| relative.clone())
             .collect(),
         excluded_ephemeral_tables: vec![
             "sessions".to_string(),
@@ -257,6 +363,21 @@ pub async fn export_archive(db: &Database) -> Result<DatabaseArchive> {
     }
 
     transaction.commit().await?;
+    let theme_options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    for (relative, path, expected_size) in theme_files {
+        writer.start_file(theme_entry_name(&relative), theme_options)?;
+        let mut source =
+            File::open(&path).with_context(|| format!("无法读取主题文件 {}", path.display()))?;
+        let copied = std::io::copy(
+            &mut Read::by_ref(&mut source).take(expected_size.saturating_add(1)),
+            &mut writer,
+        )?;
+        if copied != expected_size {
+            bail!("备份期间主题文件发生变化：{}", path.display());
+        }
+    }
     let mut file = writer.finish()?;
     let size = file.metadata()?.len();
     file.seek(SeekFrom::Start(0))?;
@@ -267,15 +388,52 @@ pub async fn export_archive(db: &Database) -> Result<DatabaseArchive> {
     })
 }
 
+pub async fn export_archive(db: &Database, theme_dir: &Path) -> Result<DatabaseArchive> {
+    export(db, Some(theme_dir)).await
+}
+
 fn validate_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<BackupManifest> {
     if archive.is_empty() || archive.len() > DATABASE_BACKUP_MAX_ENTRIES {
         bail!("备份 ZIP 文件条目数量无效");
     }
+    let manifest = {
+        let mut entry = archive.by_name("manifest.json")?;
+        if entry.size() > 64 * 1024 {
+            bail!("备份清单过大");
+        }
+        let expected = entry.size();
+        let mut content = String::new();
+        let read = entry
+            .by_ref()
+            .take(64 * 1024 + 1)
+            .read_to_string(&mut content)?;
+        if read as u64 != expected {
+            bail!("备份清单大小不匹配");
+        }
+        serde_json::from_str::<BackupManifest>(&content).context("备份清单格式无效")?
+    };
+    if manifest.format != DATABASE_BACKUP_FORMAT
+        || manifest.version != DATABASE_BACKUP_VERSION
+        || manifest.tables
+            != BACKUP_TABLES
+                .iter()
+                .map(|table| (*table).to_string())
+                .collect::<Vec<_>>()
+    {
+        bail!("不是受支持的 NodeFlare 数据库备份");
+    }
+
     let mut expected = BACKUP_TABLES
         .iter()
         .map(|table| table_entry_name(table))
         .collect::<HashSet<_>>();
     expected.insert("manifest.json".to_string());
+    for relative in &manifest.theme_files {
+        validate_theme_relative_path(relative)?;
+        if !expected.insert(theme_entry_name(relative)) {
+            bail!("备份清单包含重复的主题文件");
+        }
+    }
     let mut seen = HashSet::new();
     let mut extracted_bytes = 0_u64;
     for index in 0..archive.len() {
@@ -287,6 +445,9 @@ fn validate_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Backu
         if entry.is_dir() || !expected.contains(&name) || !seen.insert(name) {
             bail!("备份 ZIP 文件结构无效");
         }
+        if entry.name().starts_with("themes/") && entry.size() > THEME_BACKUP_FILE_MAX_BYTES {
+            bail!("主题备份文件超过 32 MiB");
+        }
         extracted_bytes = extracted_bytes
             .checked_add(entry.size())
             .context("备份 ZIP 解压大小溢出")?;
@@ -296,24 +457,6 @@ fn validate_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Backu
     }
     if seen != expected {
         bail!("备份 ZIP 缺少必要文件");
-    }
-
-    let mut entry = archive.by_name("manifest.json")?;
-    if entry.size() > 64 * 1024 {
-        bail!("备份清单过大");
-    }
-    let mut content = String::new();
-    entry.read_to_string(&mut content)?;
-    let manifest: BackupManifest = serde_json::from_str(&content).context("备份清单格式无效")?;
-    if manifest.format != DATABASE_BACKUP_FORMAT
-        || manifest.version != DATABASE_BACKUP_VERSION
-        || manifest.tables
-            != BACKUP_TABLES
-                .iter()
-                .map(|table| (*table).to_string())
-                .collect::<Vec<_>>()
-    {
-        bail!("不是受支持的 NodeFlare 数据库备份");
     }
     Ok(manifest)
 }
@@ -419,10 +562,183 @@ async fn insert_rows(
 
 fn extract_table_entry<R: Read + Seek>(archive: &mut ZipArchive<R>, table: &str) -> Result<File> {
     let mut entry = archive.by_name(&table_entry_name(table))?;
+    let expected = entry.size();
     let mut extracted = tempfile::tempfile().context("无法创建恢复临时文件")?;
-    std::io::copy(&mut entry, &mut extracted)?;
+    let copied = std::io::copy(
+        &mut entry.by_ref().take(expected.saturating_add(1)),
+        &mut extracted,
+    )?;
+    if copied != expected {
+        bail!("{table} 备份文件大小不匹配");
+    }
     extracted.seek(SeekFrom::Start(0))?;
     Ok(extracted)
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut String) -> Result<usize> {
+    line.clear();
+    let read = reader
+        .take(MAX_NDJSON_LINE_BYTES as u64 + 1)
+        .read_line(line)?;
+    if read > MAX_NDJSON_LINE_BYTES {
+        bail!("备份记录过大");
+    }
+    Ok(read)
+}
+
+struct StagedThemeDirectory {
+    path: PathBuf,
+}
+
+impl Drop for StagedThemeDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+struct ThemeDirectorySwap {
+    target: PathBuf,
+    previous: Option<PathBuf>,
+    committed: bool,
+}
+
+impl ThemeDirectorySwap {
+    fn commit(mut self) {
+        self.committed = true;
+        if let Some(previous) = self.previous.take() {
+            let _ = fs::remove_dir_all(previous);
+        }
+    }
+}
+
+impl Drop for ThemeDirectorySwap {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = fs::remove_dir_all(&self.target);
+        if let Some(previous) = self.previous.take() {
+            let _ = fs::rename(previous, &self.target);
+        }
+    }
+}
+
+fn sibling_temporary_path(target: &Path, label: &str) -> Result<PathBuf> {
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("主题目录缺少父目录")?;
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("主题目录名称无效")?;
+    Ok(parent.join(format!(".{name}.{label}.{}", uuid::Uuid::new_v4())))
+}
+
+fn extract_theme_files<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    manifest: &BackupManifest,
+    theme_dir: &Path,
+) -> Result<StagedThemeDirectory> {
+    let parent = theme_dir.parent().context("主题目录缺少父目录")?;
+    fs::create_dir_all(parent)?;
+    let staging = sibling_temporary_path(theme_dir, "restore")?;
+    fs::create_dir(&staging)?;
+    let staged = StagedThemeDirectory { path: staging };
+    for relative in &manifest.theme_files {
+        validate_theme_relative_path(relative)?;
+        let destination = staged.path.join(relative);
+        let parent = destination.parent().context("主题文件缺少父目录")?;
+        fs::create_dir_all(parent)?;
+        let mut entry = archive.by_name(&theme_entry_name(relative))?;
+        let expected = entry.size();
+        if expected > THEME_BACKUP_FILE_MAX_BYTES {
+            bail!("主题备份文件超过 32 MiB");
+        }
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)?;
+        let copied = std::io::copy(
+            &mut entry.by_ref().take(expected.saturating_add(1)),
+            &mut output,
+        )?;
+        if copied != expected {
+            bail!("主题备份文件大小不匹配");
+        }
+        output.sync_all()?;
+    }
+    Ok(staged)
+}
+
+fn activate_theme_directory(
+    staged: &StagedThemeDirectory,
+    theme_dir: &Path,
+) -> Result<ThemeDirectorySwap> {
+    let previous = if theme_dir.exists() {
+        let metadata = fs::symlink_metadata(theme_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("当前主题目录不是普通目录");
+        }
+        let previous = sibling_temporary_path(theme_dir, "previous")?;
+        fs::rename(theme_dir, &previous)?;
+        Some(previous)
+    } else {
+        None
+    };
+    if let Err(error) = fs::rename(&staged.path, theme_dir) {
+        if let Some(previous) = previous.as_ref() {
+            let _ = fs::rename(previous, theme_dir);
+        }
+        return Err(error.into());
+    }
+    Ok(ThemeDirectorySwap {
+        target: theme_dir.to_path_buf(),
+        previous,
+        committed: false,
+    })
+}
+
+async fn validate_restored_themes(
+    db: &Database,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Any>,
+    staged: &StagedThemeDirectory,
+) -> Result<()> {
+    let references = sqlx::query_scalar::<_, String>("SELECT resolved_url FROM themes")
+        .fetch_all(&mut **transaction)
+        .await?;
+    for reference in references {
+        let id = reference
+            .strip_prefix("local://")
+            .context("备份包含不受支持的主题来源")?;
+        crate::theme::validate_local_id(id)?;
+        let index = staged.path.join(id).join("index.html");
+        let metadata = fs::symlink_metadata(&index)
+            .with_context(|| format!("备份缺少主题 {id} 的 index.html"))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > 4 * 1024 * 1024
+        {
+            bail!("主题 {id} 的 index.html 无效");
+        }
+    }
+
+    let active =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key='active_theme_id'")
+            .fetch_optional(&mut **transaction)
+            .await?
+            .unwrap_or_else(|| crate::theme::BUILTIN_THEME_ID.to_string());
+    if active != crate::theme::BUILTIN_THEME_ID {
+        let exists = sqlx::query_scalar::<_, i64>(db.sql("SELECT COUNT(*) FROM themes WHERE id=?"))
+            .bind(&active)
+            .fetch_one(&mut **transaction)
+            .await?;
+        if exists != 1 {
+            bail!("备份中的活动主题不存在");
+        }
+    }
+    Ok(())
 }
 
 async fn restore_table<R: Read + Seek + Send>(
@@ -434,7 +750,7 @@ async fn restore_table<R: Read + Seek + Send>(
 ) -> Result<usize> {
     let mut reader = BufReader::new(extract_table_entry(archive, table)?);
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 || line.len() > MAX_NDJSON_LINE_BYTES {
+    if read_bounded_line(&mut reader, &mut line)? == 0 {
         bail!("{table} 备份表头无效");
     }
     let header: BackupTableHeader = serde_json::from_str(line.trim_end())?;
@@ -444,24 +760,23 @@ async fn restore_table<R: Read + Seek + Send>(
 
     let mut restored = 0_usize;
     let mut batch = Vec::with_capacity(INSERT_BATCH_ROWS);
+    let mut batch_bytes = 0_usize;
     loop {
-        line.clear();
-        let read = reader.read_line(&mut line)?;
+        let read = read_bounded_line(&mut reader, &mut line)?;
         if read == 0 {
             break;
-        }
-        if line.len() > MAX_NDJSON_LINE_BYTES {
-            bail!("{table} 备份记录过大");
         }
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
             continue;
         }
         batch.push(serde_json::from_str::<Vec<Value>>(trimmed)?);
-        if batch.len() >= INSERT_BATCH_ROWS {
+        batch_bytes = batch_bytes.saturating_add(read);
+        if batch.len() >= INSERT_BATCH_ROWS || batch_bytes >= MAX_NDJSON_LINE_BYTES {
             insert_rows(db, transaction, table, columns, &batch).await?;
             restored += batch.len();
             batch.clear();
+            batch_bytes = 0;
         }
     }
     if !batch.is_empty() {
@@ -471,9 +786,18 @@ async fn restore_table<R: Read + Seek + Send>(
     Ok(restored)
 }
 
-async fn restore<R: Read + Seek + Send>(db: &Database, source: R) -> Result<usize> {
+async fn restore<R: Read + Seek + Send>(
+    db: &Database,
+    source: R,
+    theme_dir: Option<&Path>,
+) -> Result<usize> {
     let mut archive = ZipArchive::new(source).context("文件不是有效的 ZIP")?;
-    let _manifest = validate_archive(&mut archive)?;
+    let manifest = validate_archive(&mut archive)?;
+    let staged_themes = match theme_dir {
+        Some(theme_dir) => Some(extract_theme_files(&mut archive, &manifest, theme_dir)?),
+        None if manifest.theme_files.is_empty() => None,
+        None => bail!("数据库迁移备份不能包含主题文件"),
+    };
     let schema = database_schema(db).await?;
 
     let mut transaction = db.pool().begin().await?;
@@ -502,6 +826,9 @@ async fn restore<R: Read + Seek + Send>(db: &Database, source: R) -> Result<usiz
     if required_settings != 4 {
         bail!("备份缺少管理员登录设置");
     }
+    if let Some(staged) = staged_themes.as_ref() {
+        validate_restored_themes(db, &mut transaction, staged).await?;
+    }
     sqlx::query(db.sql(
         "UPDATE remote_tasks SET status='failed', completed_at=?, \
          result=CASE WHEN result='' THEN '数据库恢复后已取消未完成任务' ELSE result END \
@@ -510,20 +837,30 @@ async fn restore<R: Read + Seek + Send>(db: &Database, source: R) -> Result<usiz
     .bind(crate::db::now())
     .execute(&mut *transaction)
     .await?;
-    transaction.commit().await?;
+    let theme_swap = match (staged_themes.as_ref(), theme_dir) {
+        (Some(staged), Some(theme_dir)) => Some(activate_theme_directory(staged, theme_dir)?),
+        _ => None,
+    };
+    if let Err(error) = transaction.commit().await {
+        drop(theme_swap);
+        return Err(error.into());
+    }
+    if let Some(theme_swap) = theme_swap {
+        theme_swap.commit();
+    }
     Ok(restored)
 }
 
-pub async fn restore_archive(db: &Database, archive: &[u8]) -> Result<usize> {
+pub async fn restore_archive(db: &Database, theme_dir: &Path, archive: &[u8]) -> Result<usize> {
     if archive.is_empty() || archive.len() > DATABASE_BACKUP_MAX_BYTES {
         bail!("数据库备份 ZIP 大小无效");
     }
-    restore(db, Cursor::new(archive)).await
+    restore(db, Cursor::new(archive), Some(theme_dir)).await
 }
 
 pub async fn copy_database(source: &Database, target: &Database) -> Result<usize> {
-    let archive = export_archive(source).await?;
-    restore(target, archive.file).await
+    let archive = export(source, None).await?;
+    restore(target, archive.file, None).await
 }
 
 #[cfg(test)]
@@ -561,19 +898,38 @@ mod tests {
     async fn sqlite_backup_round_trip_restores_data_and_clears_sessions() {
         let db = crate::db::connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let theme_dir = directory.path().join("themes");
+        let installed_theme = theme_dir.join("theme-12345678");
+        std::fs::create_dir_all(installed_theme.join("assets")).unwrap();
+        std::fs::write(installed_theme.join("index.html"), b"<main>backup</main>").unwrap();
+        std::fs::write(
+            installed_theme.join("assets/app.css"),
+            b"main { color: red; }",
+        )
+        .unwrap();
         sqlx::query(
             "INSERT INTO settings(key, value) VALUES \
              ('site_name', 'Before backup'), \
              ('admin_username', 'admin'), \
              ('admin_password_hash', 'hash'), \
              ('password_client_salt', 'salt'), \
-             ('password_scheme', 'argon2-client-pbkdf2-v1')",
+             ('password_scheme', 'argon2-client-pbkdf2-v1'), \
+             ('active_theme_id', 'theme-12345678')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO themes(id, name, description, url, resolved_url, version, created_at) \
+             VALUES ('theme-12345678', 'Backup theme', '', 'upload:theme.zip', \
+             'local://theme-12345678', '1', 1)",
         )
         .execute(db.pool())
         .await
         .unwrap();
 
-        let mut exported = export_archive(&db).await.unwrap();
+        let mut exported = export_archive(&db, &theme_dir).await.unwrap();
         let mut bytes = Vec::new();
         exported.file.read_to_end(&mut bytes).unwrap();
 
@@ -589,8 +945,11 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
+        std::fs::remove_dir_all(&theme_dir).unwrap();
+        std::fs::create_dir_all(&theme_dir).unwrap();
+        std::fs::write(theme_dir.join("stale.txt"), b"stale").unwrap();
 
-        assert_eq!(restore_archive(&db, &bytes).await.unwrap(), 5);
+        assert_eq!(restore_archive(&db, &theme_dir, &bytes).await.unwrap(), 7);
         let site_name =
             sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key='site_name'")
                 .fetch_one(db.pool())
@@ -602,12 +961,21 @@ mod tests {
             .unwrap();
         assert_eq!(site_name, "Before backup");
         assert_eq!(sessions, 0);
+        assert_eq!(
+            std::fs::read_to_string(theme_dir.join("theme-12345678/index.html")).unwrap(),
+            "<main>backup</main>"
+        );
+        assert!(!theme_dir.join("stale.txt").exists());
     }
 
     #[tokio::test]
     async fn invalid_backup_rolls_back_existing_database() {
         let db = crate::db::connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let theme_dir = directory.path().join("themes");
+        std::fs::create_dir_all(&theme_dir).unwrap();
+        std::fs::write(theme_dir.join("current.txt"), b"current").unwrap();
         sqlx::query(
             "INSERT INTO settings(key, value) VALUES \
              ('site_name', 'Invalid backup'), \
@@ -617,7 +985,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut exported = export_archive(&db).await.unwrap();
+        let mut exported = export_archive(&db, &theme_dir).await.unwrap();
         let mut bytes = Vec::new();
         exported.file.read_to_end(&mut bytes).unwrap();
 
@@ -634,7 +1002,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(restore_archive(&db, &bytes).await.is_err());
+        assert!(restore_archive(&db, &theme_dir, &bytes).await.is_err());
         let site_name =
             sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key='site_name'")
                 .fetch_one(db.pool())
@@ -646,5 +1014,9 @@ mod tests {
             .unwrap();
         assert_eq!(site_name, "Current database");
         assert_eq!(sessions, 1);
+        assert_eq!(
+            std::fs::read_to_string(theme_dir.join("current.txt")).unwrap(),
+            "current"
+        );
     }
 }

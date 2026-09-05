@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 const MAX_DASHBOARD_MESSAGE_BYTES: usize = 8 * 1024;
 
@@ -36,17 +37,51 @@ pub async fn handle(
         }
         Err(error) => return error.into_response(),
     }
-    let server_id = query
-        .server_id
-        .filter(|value| !value.is_empty() && value.len() <= 80 && !value.contains('/'));
+    let server_id = match query.server_id {
+        Some(value) if value.is_empty() || value.len() > 80 || value.contains('/') => {
+            return ApiResponse::bad_request("节点 ID 无效").into_response();
+        }
+        Some(value) => match crate::db::queries::public_server_exists(&state.db, &value).await {
+            Ok(true) => Some(value),
+            Ok(false) => return ApiResponse::not_found("节点不存在").into_response(),
+            Err(error) => return ApiResponse::internal(error).into_response(),
+        },
+        None => None,
+    };
     ws.max_message_size(MAX_DASHBOARD_MESSAGE_BYTES)
         .max_frame_size(MAX_DASHBOARD_MESSAGE_BYTES)
-        .on_upgrade(move |socket| run(socket, state, server_id))
+        .on_upgrade(move |socket| run(socket, state, server_id, headers))
 }
 
-async fn run(socket: WebSocket, state: Arc<AppState>, server_id: Option<String>) {
+async fn still_authorized(state: &AppState, headers: &HeaderMap, server_id: Option<&str>) -> bool {
+    let Ok(settings) = crate::db::load_settings(&state.db).await else {
+        return false;
+    };
+    if !matches!(
+        dashboard_access(state, headers, &settings).await,
+        Ok(DashboardAccess::Ok)
+    ) {
+        return false;
+    }
+    match server_id {
+        Some(server_id) => crate::db::queries::public_server_exists(&state.db, server_id)
+            .await
+            .unwrap_or(false),
+        None => true,
+    }
+}
+
+async fn run(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    server_id: Option<String>,
+    headers: HeaderMap,
+) {
     let (mut sender, mut receiver) = socket.split();
     let mut updates = state.dashboard_tx.subscribe();
+    let mut authorization_check = tokio::time::interval(Duration::from_secs(15));
+    authorization_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    authorization_check.tick().await;
     loop {
         tokio::select! {
             update = updates.recv() => match update {
@@ -71,7 +106,13 @@ async fn run(socket: WebSocket, state: Arc<AppState>, server_id: Option<String>)
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 _ => {}
-            }
+            },
+            _ = authorization_check.tick() => {
+                if !still_authorized(&state, &headers, server_id.as_deref()).await {
+                    let _ = sender.send(Message::Close(None)).await;
+                    break;
+                }
+            },
         }
     }
 }

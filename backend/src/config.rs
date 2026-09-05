@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
 use std::io::Write;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 pub const VERSION: &str = match option_env!("NODEFLARE_VERSION") {
@@ -49,6 +49,8 @@ pub struct Config {
     pub theme_dir: PathBuf,
     #[serde(default = "default_session_hours")]
     pub session_ttl_hours: i64,
+    #[serde(default = "default_trusted_proxies")]
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 fn default_database_url() -> String {
@@ -113,6 +115,15 @@ fn default_session_hours() -> i64 {
     7 * 24
 }
 
+fn default_trusted_proxies() -> Vec<ipnet::IpNet> {
+    vec![
+        ipnet::IpNet::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)
+            .expect("valid IPv4 loopback network"),
+        ipnet::IpNet::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 128)
+            .expect("valid IPv6 loopback network"),
+    ]
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
@@ -129,6 +140,9 @@ impl Config {
         config.theme_dir = resolve_path(base, &config.theme_dir);
         config.database_url = resolve_database_url(base, &config.database_url)?;
         config.session_ttl_hours = config.session_ttl_hours.clamp(1, 24 * 90);
+        if config.trusted_proxies.len() > 64 {
+            anyhow::bail!("trusted_proxies cannot contain more than 64 networks");
+        }
         if config.admin_username.trim().is_empty()
             || config.admin_username.chars().any(char::is_whitespace)
             || config.admin_username.chars().count() > 64

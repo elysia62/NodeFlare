@@ -1,13 +1,14 @@
-use super::{ApiResponse, bearer_or_cookie, cookie};
+use super::{ApiResponse, bearer_or_cookie, client_ip, cookie};
 use crate::AppState;
 use crate::db::Settings;
 use crate::models::{PublicConfig, WakeServersInput};
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[derive(Serialize)]
@@ -182,12 +183,17 @@ pub async fn exchange_rates(State(state): State<Arc<AppState>>) -> Result<Respon
 
 pub async fn wake_servers(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(input): Json<WakeServersInput>,
 ) -> Result<Response, ApiResponse> {
     require_dashboard(&state, &headers).await?;
     if input.server_ids.len() > 500 {
         return Err(ApiResponse::bad_request("服务器列表过长"));
+    }
+    let client = client_ip(&headers, peer, &state.config.trusted_proxies);
+    if !state.wake_requests.allow(&client) {
+        return Ok(StatusCode::NO_CONTENT.into_response());
     }
     for server_id in input.server_ids {
         state.wake_agent(&server_id).await;

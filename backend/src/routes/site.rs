@@ -19,7 +19,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
         return local_file(&state.config.admin_frontend_dir, relative, false).await;
     }
     if let Some(relative) = path.strip_prefix("/agent/") {
-        return local_file(&state.config.agent_dir, relative, true).await;
+        return local_file(&state.config.agent_dir, relative, false).await;
     }
     if let Some(preview) = path.strip_prefix("/__theme-preview/") {
         let (token, relative) = preview.split_once('/').unwrap_or((preview, ""));
@@ -33,20 +33,34 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
             &base,
             relative,
             &format!("/__theme-preview/{token}"),
+            !relative.is_empty() && relative != "index.html",
         )
         .await;
     }
-    if let Some(relative) = path.strip_prefix("/__theme-active/") {
+    if let Some(active_path) = path.strip_prefix("/__theme-active/") {
+        let Some((cache_key, relative)) = active_path.split_once('/') else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
         let settings = match crate::db::load_settings(&state.db).await {
             Ok(settings) => settings,
             Err(error) => return ApiResponse::internal(error).into_response(),
         };
-        let Ok(Some(base)) =
-            crate::db::queries::theme_resolved_url(&state.db, &settings.active_theme_id).await
+        let Ok(Some((base, current_key))) =
+            crate::db::queries::theme_asset(&state.db, &settings.active_theme_id).await
         else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        return theme_file(&state, &base, relative, "/__theme-active").await;
+        if cache_key != current_key {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        return theme_file(
+            &state,
+            &base,
+            relative,
+            &format!("/__theme-active/{current_key}"),
+            !relative.is_empty() && relative != "index.html",
+        )
+        .await;
     }
 
     let settings = match crate::db::load_settings(&state.db).await {
@@ -54,11 +68,18 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
         Err(error) => return ApiResponse::internal(error).into_response(),
     };
     if settings.active_theme_id != crate::theme::BUILTIN_THEME_ID
-        && let Ok(Some(base)) =
-            crate::db::queries::theme_resolved_url(&state.db, &settings.active_theme_id).await
+        && let Ok(Some((base, cache_key))) =
+            crate::db::queries::theme_asset(&state.db, &settings.active_theme_id).await
     {
         let relative = path.trim_start_matches('/');
-        return theme_file(&state, &base, relative, "/__theme-active").await;
+        return theme_file(
+            &state,
+            &base,
+            relative,
+            &format!("/__theme-active/{cache_key}"),
+            false,
+        )
+        .await;
     }
 
     let relative = path.trim_start_matches('/');
@@ -75,9 +96,15 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
     }
 }
 
-async fn theme_file(state: &AppState, base: &str, relative: &str, prefix: &str) -> Response {
+async fn theme_file(
+    state: &AppState,
+    base: &str,
+    relative: &str,
+    prefix: &str,
+    cache: bool,
+) -> Response {
     match crate::theme::fetch_theme_path(&state.config.theme_dir, base, relative, prefix).await {
-        Ok((body, content_type)) => response(body, &content_type, true),
+        Ok((body, content_type)) => response(body, &content_type, cache),
         Err(error) => {
             tracing::warn!(%error, path = relative, "theme asset failed");
             StatusCode::NOT_FOUND.into_response()

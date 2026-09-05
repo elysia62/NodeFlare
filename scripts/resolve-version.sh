@@ -9,9 +9,6 @@ if [ -z "$raw" ]; then
   raw=$(git -C "$root_dir" describe --tags --exact-match --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
 fi
 if [ -z "$raw" ]; then
-  raw=$(git -C "$root_dir" describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
-fi
-if [ -z "$raw" ]; then
   raw=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)",*$/\1/p' "$root_dir/package.json" | sed -n '1p')
 fi
 

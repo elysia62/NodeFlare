@@ -117,6 +117,8 @@
 .section-head span { color: var(--admin-muted); font-size: 12px; }
 .row-actions { display: flex; align-items: center; gap: 3px; }
 .section-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; margin: -1px; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+.compact-verification-input { width: 130px; min-height: 34px; padding: 6px 9px; }
 .batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; justify-content: space-between; min-height: 44px; border-block: 1px solid var(--admin-border); color: var(--admin-muted); font-size: 13px; }
 .select-all { display: inline-flex; align-items: center; flex-direction: row; gap: 7px; color: var(--admin-text); font-size: 13px; }
 
@@ -432,6 +434,8 @@
   .remote-confirm-row { grid-template-columns: 1fr; }
   .remote-submit { width: 100%; }
   .database-section-head .section-actions, .usage-head-actions { width: 100%; }
+  .database-section-head .section-actions > label { width: 100%; }
+  .compact-verification-input { width: 100%; }
   .database-section-head .section-actions > button, .usage-head-actions > button { flex: 1; }
   .database-storage { align-items: stretch; flex-direction: column; }
   .database-storage button { width: 100%; }

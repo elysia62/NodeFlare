@@ -26,11 +26,31 @@ pub(crate) fn batch_len(queue: &VecDeque<Report>) -> usize {
     count.min(super::LIVE_QUEUE_CAPACITY)
 }
 
+pub(crate) fn latest(queue: &VecDeque<Report>) -> Vec<Report> {
+    let mut encoded_bytes = 64_usize;
+    let mut reports = Vec::new();
+    for report in queue.iter().rev() {
+        let Ok(report_bytes) = serde_json::to_vec(report) else {
+            break;
+        };
+        let next_bytes = encoded_bytes
+            .saturating_add(report_bytes.len())
+            .saturating_add(usize::from(!reports.is_empty()));
+        if next_bytes > MAX_LIVE_BATCH_BYTES {
+            break;
+        }
+        encoded_bytes = next_bytes;
+        reports.push(report.clone());
+    }
+    reports.reverse();
+    reports
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{MAX_LIVE_BATCH_BYTES, batch_len};
+    use super::{MAX_LIVE_BATCH_BYTES, batch_len, latest};
     use crate::Report;
 
     #[test]
@@ -46,5 +66,25 @@ mod tests {
             crate::live_update_payload(&queue.iter().take(count).cloned().collect::<Vec<_>>())
                 .unwrap();
         assert!(payload.len() <= MAX_LIVE_BATCH_BYTES);
+    }
+
+    #[test]
+    fn persistence_batch_keeps_the_newest_samples() {
+        let queue = (0..10)
+            .map(|timestamp| Report {
+                timestamp,
+                cpu_model: "x".repeat(128 * 1024),
+                ..Report::default()
+            })
+            .collect::<VecDeque<_>>();
+        let reports = latest(&queue);
+        assert!(!reports.is_empty());
+        assert!(reports.len() < queue.len());
+        assert_eq!(reports.last().unwrap().timestamp, 9);
+        assert!(
+            reports
+                .windows(2)
+                .all(|pair| pair[0].timestamp < pair[1].timestamp)
+        );
     }
 }

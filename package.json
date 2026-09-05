@@ -1,6 +1,6 @@
 {
   "name": "nodeflare",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "private": true,
   "repository": "https://github.com/imengying/NodeFlare",
   "packageManager": "bun@1.4.0",

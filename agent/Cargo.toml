@@ -1,6 +1,6 @@
 [package]
 name = "nodeflare-agent"
-version = "0.0.1"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 description = "Independent Rust telemetry agent for NodeFlare"

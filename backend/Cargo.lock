@@ -1007,6 +1007,9 @@ name = "ipnet"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -1180,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "nodeflare"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1189,6 +1192,7 @@ dependencies = [
  "data-encoding",
  "futures-util",
  "hex",
+ "ipnet",
  "pbkdf2",
  "rand 0.10.2",
  "reqwest",

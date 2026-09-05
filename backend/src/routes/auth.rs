@@ -23,7 +23,7 @@ pub async fn login(
     headers: HeaderMap,
     Json(input): Json<LoginRequest>,
 ) -> Result<Response, ApiResponse> {
-    let client_ip = client_ip(&headers, peer);
+    let client_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
     if let Some(seconds) = state.login_attempts.retry_after(&client_ip) {
         return Err(ApiResponse::error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -98,7 +98,7 @@ pub async fn login(
         &state.db,
         &settings.admin_username,
         state.config.session_ttl_hours,
-        &session_device(&headers, peer),
+        &session_device(&headers, peer, &state.config.trusted_proxies),
     )
     .await
     .map_err(ApiResponse::internal)?;
@@ -111,7 +111,7 @@ pub async fn login(
         HeaderValue::from_str(&admin_cookie(
             &token,
             state.config.session_ttl_hours * 3600,
-            request_is_secure(&headers),
+            request_is_secure(&headers, peer, &state.config.trusted_proxies),
         ))
         .map_err(ApiResponse::internal)?,
     );
@@ -147,6 +147,7 @@ pub async fn session_delete(
 
 pub async fn logout(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Result<Response, ApiResponse> {
     if let Some(token) = bearer_or_cookie(&headers) {
@@ -157,8 +158,12 @@ pub async fn logout(
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().append(
         SET_COOKIE,
-        HeaderValue::from_str(&admin_cookie("", 0, request_is_secure(&headers)))
-            .map_err(ApiResponse::internal)?,
+        HeaderValue::from_str(&admin_cookie(
+            "",
+            0,
+            request_is_secure(&headers, peer, &state.config.trusted_proxies),
+        ))
+        .map_err(ApiResponse::internal)?,
     );
     Ok(response)
 }
@@ -176,7 +181,7 @@ pub async fn verify_turnstile(
         return Err(ApiResponse::bad_request("公开仪表盘未启用人机验证"));
     }
     let host = hostname(&headers).ok_or_else(|| ApiResponse::bad_request("请求主机名无效"))?;
-    let client_ip = client_ip(&headers, peer);
+    let client_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
     if !crate::turnstile::verify(
         &state.http,
         &input.token,
@@ -193,7 +198,7 @@ pub async fn verify_turnstile(
         .await
         .map_err(ApiResponse::internal)?;
     let mut response = StatusCode::NO_CONTENT.into_response();
-    let secure = if request_is_secure(&headers) {
+    let secure = if request_is_secure(&headers, peer, &state.config.trusted_proxies) {
         "; Secure"
     } else {
         ""
@@ -224,6 +229,7 @@ pub async fn get_2fa_status(
 pub async fn setup_2fa(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> Result<Json<TotpSetupResponse>, ApiResponse> {
     if crate::db::queries::get_totp_secret(&state.db, &user.username)
         .await
@@ -234,6 +240,7 @@ pub async fn setup_2fa(
             "请先使用当前验证码禁用两步验证，再重新生成密钥",
         ));
     }
+    require_sensitive_headers(&state, &user, &headers).await?;
     let secret = crate::totp::generate_secret();
     crate::db::queries::save_totp_secret(&state.db, &user.username, &secret, false)
         .await
@@ -249,13 +256,21 @@ pub async fn enable_2fa(
     Extension(user): Extension<AuthenticatedUser>,
     Json(input): Json<Enable2FaRequest>,
 ) -> Result<Response, ApiResponse> {
+    if let Some(seconds) = state.sensitive_attempts.retry_after(&user.session_id) {
+        return Err(ApiResponse::error(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("验证码尝试过多，请在 {seconds} 秒后重试"),
+        ));
+    }
     let (secret, _) = crate::db::queries::get_totp_secret(&state.db, &user.username)
         .await
         .map_err(ApiResponse::internal)?
         .ok_or_else(|| ApiResponse::bad_request("请先生成两步验证密钥"))?;
     if !crate::totp::verify_totp(&secret, input.totp_code.trim()).map_err(ApiResponse::internal)? {
-        return Err(ApiResponse::bad_request("两步验证码错误"));
+        state.sensitive_attempts.record_failure(&user.session_id);
+        return Err(ApiResponse::unprocessable("两步验证码错误"));
     }
+    state.sensitive_attempts.clear(&user.session_id);
     crate::db::queries::set_totp_enabled(&state.db, &user.username, true)
         .await
         .map_err(ApiResponse::internal)?;
@@ -274,21 +289,105 @@ pub async fn disable_2fa(
     if !enabled {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    if !crate::totp::verify_totp(&secret, input.totp_code.trim()).map_err(ApiResponse::internal)? {
-        return Err(ApiResponse::bad_request("两步验证码错误"));
+    if let Some(seconds) = state.sensitive_attempts.retry_after(&user.session_id) {
+        return Err(ApiResponse::error(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("验证码尝试过多，请在 {seconds} 秒后重试"),
+        ));
     }
+    if !crate::totp::verify_totp(&secret, input.totp_code.trim()).map_err(ApiResponse::internal)? {
+        state.sensitive_attempts.record_failure(&user.session_id);
+        return Err(ApiResponse::unprocessable("两步验证码错误"));
+    }
+    state.sensitive_attempts.clear(&user.session_id);
     crate::db::queries::set_totp_enabled(&state.db, &user.username, false)
         .await
         .map_err(ApiResponse::internal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+pub(crate) async fn require_sensitive_auth(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    totp_code: &str,
+    password_derived: &str,
+) -> Result<(), ApiResponse> {
+    let totp_code = totp_code.trim();
+    let password_derived = password_derived.trim();
+    if let Some(seconds) = state.sensitive_attempts.retry_after(&user.session_id) {
+        return Err(ApiResponse::error(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("验证尝试过多，请在 {seconds} 秒后重试"),
+        ));
+    }
+
+    let settings = crate::db::load_settings(&state.db)
+        .await
+        .map_err(ApiResponse::internal)?;
+    let totp = crate::db::queries::get_totp_secret(&state.db, &user.username)
+        .await
+        .map_err(ApiResponse::internal)?;
+    let totp_enabled = totp.as_ref().is_some_and(|(_, enabled)| *enabled);
+    let valid = if let Some((secret, true)) = totp {
+        totp_code.len() == 6
+            && totp_code.bytes().all(|byte| byte.is_ascii_digit())
+            && crate::totp::verify_totp(&secret, totp_code).map_err(ApiResponse::internal)?
+    } else if crate::auth::valid_password_derived(password_derived) {
+        let password_derived = password_derived.to_string();
+        let password_hash = settings.admin_password_hash;
+        let permit = Arc::clone(&state.password_verifications)
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiResponse::error(StatusCode::TOO_MANY_REQUESTS, "密码验证繁忙，请稍后重试")
+            })?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            crate::auth::verify_password(&password_derived, &password_hash)
+        })
+        .await
+        .map_err(ApiResponse::internal)?
+    } else {
+        false
+    };
+
+    if !valid {
+        state.sensitive_attempts.record_failure(&user.session_id);
+        return Err(ApiResponse::unprocessable(if totp_enabled {
+            "两步验证码错误"
+        } else {
+            "当前密码错误"
+        }));
+    }
+    state.sensitive_attempts.clear(&user.session_id);
+    Ok(())
+}
+
+pub(crate) async fn require_sensitive_headers(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<(), ApiResponse> {
+    let totp_code = headers
+        .get("x-nodeflare-totp")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let password_derived = headers
+        .get("x-nodeflare-password")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    require_sensitive_auth(state, user, totp_code, password_derived).await
+}
+
 fn secure_eq(left: &str, right: &str) -> bool {
     crate::auth::token_hash(left) == crate::auth::token_hash(right)
 }
 
-pub(crate) fn session_device(headers: &HeaderMap, peer: SocketAddr) -> crate::db::SessionDevice {
-    let ip_address = client_ip(headers, peer);
+pub(crate) fn session_device(
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    trusted_proxies: &[ipnet::IpNet],
+) -> crate::db::SessionDevice {
+    let ip_address = client_ip(headers, peer, trusted_proxies);
     let user_agent = headers
         .get(USER_AGENT)
         .and_then(|value| value.to_str().ok())

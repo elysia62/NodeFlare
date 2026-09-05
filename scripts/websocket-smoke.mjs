@@ -2,6 +2,8 @@ import WebSocket from "ws";
 
 const baseUrl = process.env.MONITOR_BASE_URL;
 const adminToken = process.env.MONITOR_ADMIN_TOKEN;
+const adminUsername = process.env.MONITOR_ADMIN_USERNAME;
+const passwordDerived = process.env.MONITOR_PASSWORD_DERIVED;
 const agentToken = process.env.MONITOR_AGENT_TOKEN;
 const serverId = process.env.MONITOR_SERVER_ID;
 const latencyTaskId = process.env.MONITOR_LATENCY_TASK_ID;
@@ -253,7 +255,7 @@ function closeSocket(socket) {
   });
 }
 
-function waitForSocketClose(socket, expected) {
+function waitForSocketClose(socket, expected, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       clearTimeout(timer);
@@ -271,7 +273,7 @@ function waitForSocketClose(socket, expected) {
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error(`WebSocket did not close after ${expected}`));
-    }, 5_000);
+    }, timeoutMs);
     socket.once("close", onClose);
     socket.once("error", onError);
   });
@@ -317,7 +319,7 @@ try {
     await oversizedClosed;
   }
 
-  agent = await openSocket("/api/agent/ws", agentToken, { "CF-Connecting-IP": "8.8.8.8" });
+  agent = await openSocket("/api/agent/ws", agentToken, { "X-Forwarded-For": "8.8.8.8" });
   const config = await waitForJsonMessage(
     agent,
     "Agent config",
@@ -380,9 +382,13 @@ try {
     await closeSocket(rotatedSocket);
     process.stdout.write(`${rotatedToken}\n`);
   } else if (!configOnly) {
+  if (!passwordDerived) throw new Error("MONITOR_PASSWORD_DERIVED is required for TOTP setup");
   const setupResponse = await fetch(new URL("/api/admin/2fa/setup", baseUrl), {
     method: "POST",
-    headers: { Authorization: `Bearer ${adminToken}` },
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "X-NodeFlare-Password": passwordDerived,
+    },
   });
   if (!setupResponse.ok) {
     throw new Error(`TOTP setup returned HTTP ${setupResponse.status}: ${await setupResponse.text()}`);
@@ -453,6 +459,69 @@ try {
 
   await setTotpEnabled(setup.secret, false);
   enabledTotpSecret = "";
+
+  if (!adminUsername || !passwordDerived) {
+    throw new Error("MONITOR_ADMIN_USERNAME and MONITOR_PASSWORD_DERIVED are required");
+  }
+  const privateResponse = await fetch(new URL("/api/admin/settings", baseUrl), {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ public_dashboard: false }),
+  });
+  if (!privateResponse.ok) {
+    throw new Error(`Private dashboard update returned HTTP ${privateResponse.status}`);
+  }
+  try {
+    const secondaryLogin = await fetch(new URL("/api/admin/login", baseUrl), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: adminUsername,
+        password_derived: passwordDerived,
+        turnstile_token: "",
+        totp_code: "",
+      }),
+    });
+    if (!secondaryLogin.ok) {
+      throw new Error(`Secondary login returned HTTP ${secondaryLogin.status}`);
+    }
+    const secondaryToken = (await secondaryLogin.json()).token;
+    const revokedDashboard = await openSocket("/api/ws", secondaryToken);
+    const sessionsResponse = await fetch(new URL("/api/admin/sessions", baseUrl), {
+      headers: { Authorization: `Bearer ${secondaryToken}` },
+    });
+    const sessions = await sessionsResponse.json();
+    const secondarySessionId = sessions.sessions?.find((session) => session.current)?.id;
+    if (!secondarySessionId) throw new Error("Secondary session was not listed");
+    const revoked = waitForSocketClose(
+      revokedDashboard,
+      "its login session was revoked",
+      20_000,
+    );
+    const revokeResponse = await fetch(
+      new URL(`/api/admin/sessions/${encodeURIComponent(secondarySessionId)}`, baseUrl),
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${adminToken}` },
+      },
+    );
+    if (!revokeResponse.ok) {
+      throw new Error(`Session revocation returned HTTP ${revokeResponse.status}`);
+    }
+    await revoked;
+  } finally {
+    await fetch(new URL("/api/admin/settings", baseUrl), {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ public_dashboard: true }),
+    });
+  }
 
   const wakeHintPromise = waitForJsonMessage(
     agent,

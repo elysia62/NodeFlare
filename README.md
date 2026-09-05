@@ -23,7 +23,7 @@ fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/install.s
 Windows PowerShell（管理员）：
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/imengying/NodeFlare/main/install.ps1 -OutFile "$env:TEMP\nodeflare-install.ps1"
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/imengying/NodeFlare/main/install.ps1 -OutFile "$env:TEMP\nodeflare-install.ps1"
 Unblock-File "$env:TEMP\nodeflare-install.ps1"
 & "$env:TEMP\nodeflare-install.ps1"
 ```
@@ -34,6 +34,8 @@ Unblock-File "$env:TEMP\nodeflare-install.ps1"
 postgres://用户:密码@127.0.0.1:5432/nodeflare?sslmode=prefer
 ```
 
+PostgreSQL 用户名或密码中的 `@`、`:`、`/`、`?` 等字符需要先进行 URL 百分号编码。
+
 安装完成后访问 `http://服务器地址:8080/admin/login`。默认只监听 `127.0.0.1:8080`，对外使用时请配置 HTTPS 反向代理，例如 Caddy：
 
 ```caddy
@@ -41,6 +43,8 @@ monitor.example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
+
+NodeFlare 默认只信任本机反向代理写入的 `X-Forwarded-For`。反向代理位于容器或其他主机时，在 `config.toml` 的 `trusted_proxies` 中填写其 IP 或 CIDR，未受信任来源提交的转发头会被忽略。
 
 Linux systemd 常用命令：
 
@@ -76,12 +80,15 @@ Windows 使用 `install.ps1 -Uninstall`，彻底删除数据时再加 `-Purge`�
 
 管理后台的“数据库”页面可查看占用空间、手动回收空间、导出或恢复 ZIP，SQLite 和 PostgreSQL 都支持。
 
-- 备份包含设置、节点、监控历史、通知、主题、远程任务和安全配置。
+- 备份包含设置、节点、监控历史、通知、主题记录及主题文件、远程任务和安全配置。
 - 登录会话等临时数据不会导出；恢复完成后需要重新登录。
+- 导出、恢复和迁移数据库前需要提交当前 TOTP；未启用 TOTP 时提交当前管理员密码。
 - 建议使用相同版本的 NodeFlare 恢复备份。
 - `pg_dump` 和 SQLite `.backup` 仍可作为额外的数据库原生备份方式，但不是使用内置 ZIP 功能的前提。
 
 “数据库迁移”可在 SQLite 和 PostgreSQL 之间复制全部持久数据。迁移会覆盖目标库中已有的 NodeFlare 数据并更新 `database_url`，完成后重启 NodeFlare。
+
+第三方主题会作为与管理后台同源的前端代码运行，只安装你信任的主题包或仓库。
 
 ## 安装 Agent
 

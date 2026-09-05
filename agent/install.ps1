@@ -14,6 +14,16 @@ $InstallDir = Join-Path $env:ProgramFiles "NodeFlare"
 $DataDir = Join-Path $env:ProgramData "NodeFlare"
 $StateDir = Join-Path $DataDir "Agent"
 $AgentFile = Join-Path $InstallDir "agent.exe"
+$ConfigFile = Join-Path $StateDir "config.json"
+$LauncherFile = Join-Path $InstallDir "run-agent.ps1"
+$PreviousAgent = Join-Path $env:TEMP "nodeflare-agent-$PID.previous.exe"
+$PreviousConfig = Join-Path $env:TEMP "nodeflare-agent-$PID.previous.json"
+$PreviousLauncher = Join-Path $env:TEMP "nodeflare-agent-$PID.previous.ps1"
+$HadPreviousAgent = $false
+$HadPreviousConfig = $false
+$HadPreviousLauncher = $false
+$PreviousTaskXml = $null
+$InstallChanged = $false
 
 function Write-Step([string]$Message) {
   Write-Host "[NodeFlare] $Message"
@@ -110,8 +120,10 @@ $Endpoint = $Endpoint.TrimEnd('/')
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
 New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
-& icacls.exe $InstallDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
-& icacls.exe $StateDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+& icacls.exe $InstallDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-InstallError "无法限制程序目录权限" }
+& icacls.exe $StateDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-InstallError "无法限制 Agent 数据目录权限" }
 $Temporary = "$AgentFile.$PID.download.exe"
 $ReleaseApi = "https://api.github.com/repos/imengying/NodeFlare/releases/latest"
 $Artifact = "agent-windows-x64.exe"
@@ -134,11 +146,12 @@ try {
   } else {
     Write-Step "正在下载 NodeFlare Agent $($Release.tag_name)"
   }
-  Invoke-WebRequest -Uri $DownloadUrl -OutFile $Temporary -TimeoutSec 120
+  Invoke-WebRequest -UseBasicParsing -Uri $DownloadUrl -OutFile $Temporary -TimeoutSec 120
   $ActualChecksum = (Get-FileHash -LiteralPath $Temporary -Algorithm SHA256).Hash
   if ($ActualChecksum -ne $ExpectedChecksum) {
     Write-InstallError "Agent SHA-256 校验失败，已停止安装"
   }
+  Unblock-File -LiteralPath $Temporary
   Write-Step "下载校验通过，正在验证可执行文件"
   $InstalledVersion = (& $Temporary --version | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) {
@@ -149,31 +162,93 @@ try {
   if ($InstalledVersion -ne $ExpectedVersion) {
     Write-InstallError "Release $($Release.tag_name) 与 Agent 版本 $InstalledVersion 不一致"
   }
+  $HadPreviousAgent = Test-Path -LiteralPath $AgentFile -PathType Leaf
+  $HadPreviousConfig = Test-Path -LiteralPath $ConfigFile -PathType Leaf
+  $HadPreviousLauncher = Test-Path -LiteralPath $LauncherFile -PathType Leaf
+  if ($HadPreviousAgent) { Copy-Item -LiteralPath $AgentFile -Destination $PreviousAgent -Force }
+  if ($HadPreviousConfig) { Copy-Item -LiteralPath $ConfigFile -Destination $PreviousConfig -Force }
+  if ($HadPreviousLauncher) { Copy-Item -LiteralPath $LauncherFile -Destination $PreviousLauncher -Force }
+  $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if ($null -ne $ExistingTask) { $PreviousTaskXml = Export-ScheduledTask -TaskName $TaskName }
+  $InstallChanged = $true
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Move-Item -LiteralPath $Temporary -Destination $AgentFile -Force
+
+  $AgentConfig = [ordered]@{
+    endpoint = $Endpoint
+    token = $Token
+    interval = $Interval
+  }
+  $AgentConfig | ConvertTo-Json -Compress | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
+  $Launcher = @'
+$ErrorActionPreference = "Stop"
+$InstallRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AgentFile = Join-Path $InstallRoot "agent.exe"
+$ConfigFile = Join-Path $env:ProgramData "NodeFlare\Agent\config.json"
+$Config = Get-Content -LiteralPath $ConfigFile -Raw | ConvertFrom-Json
+$env:NODEFLARE_AGENT_TOKEN = [string]$Config.token
+& $AgentFile -e ([string]$Config.endpoint) -i ([int]$Config.interval)
+exit $LASTEXITCODE
+'@
+  [IO.File]::WriteAllText($LauncherFile, $Launcher, [Text.UTF8Encoding]::new($false))
+  & icacls.exe $ConfigFile /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { Write-InstallError "无法限制 Agent 配置文件权限" }
+  & icacls.exe $LauncherFile /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { Write-InstallError "无法限制 Agent 启动脚本权限" }
+  $Token = ""
+  $PowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+  $TaskArguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$LauncherFile`""
+  Write-Step "正在注册并启动 Windows 计划任务"
+  $TaskAction = New-ScheduledTaskAction -Execute $PowerShell -Argument $TaskArguments
+  $Trigger = New-ScheduledTaskTrigger -AtStartup
+  $Settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+  $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+  Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $Trigger -Settings $Settings -Principal $Principal -Force | Out-Null
+  Start-ScheduledTask -TaskName $TaskName
+  $Task = $null
+  for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
+    Start-Sleep -Milliseconds 500
+    $Task = Get-ScheduledTask -TaskName $TaskName
+    if ($Task.State -eq "Running") { break }
+  }
+  if ($Task.State -ne "Running") {
+    Write-InstallError "NodeFlare 服务启动失败（状态：$($Task.State)）"
+  }
+  Write-Host ""
+  Write-Host "NodeFlare Agent 安装完成"
+  Write-Host "  版本：$InstalledVersion"
+  Write-Host "  服务：$TaskName（Windows 计划任务）"
+  Write-Host "  查看状态：Get-ScheduledTask -TaskName '$TaskName'"
+  $InstallChanged = $false
+} catch {
+  if ($InstallChanged) {
+    Write-Warning "安装未完成，正在恢复上一版本"
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    if ($HadPreviousAgent) {
+      Copy-Item -LiteralPath $PreviousAgent -Destination $AgentFile -Force
+    } else {
+      Remove-Item -LiteralPath $AgentFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($HadPreviousConfig) {
+      Copy-Item -LiteralPath $PreviousConfig -Destination $ConfigFile -Force
+    } else {
+      Remove-Item -LiteralPath $ConfigFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($HadPreviousLauncher) {
+      Copy-Item -LiteralPath $PreviousLauncher -Destination $LauncherFile -Force
+    } else {
+      Remove-Item -LiteralPath $LauncherFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $PreviousTaskXml) {
+      Register-ScheduledTask -TaskName $TaskName -Xml $PreviousTaskXml -Force | Out-Null
+      Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    }
+  }
+  throw
 } finally {
   Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PreviousAgent -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PreviousConfig -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PreviousLauncher -Force -ErrorAction SilentlyContinue
 }
-
-$TaskArguments = "-e `"$Endpoint`" -t `"$Token`" -i $Interval"
-Write-Step "正在注册并启动 Windows 计划任务"
-$TaskAction = New-ScheduledTaskAction -Execute $AgentFile -Argument $TaskArguments
-$Trigger = New-ScheduledTaskTrigger -AtStartup
-$Settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-$Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $Trigger -Settings $Settings -Principal $Principal -Force | Out-Null
-Start-ScheduledTask -TaskName $TaskName
-$Task = $null
-for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
-  Start-Sleep -Milliseconds 500
-  $Task = Get-ScheduledTask -TaskName $TaskName
-  if ($Task.State -eq "Running") { break }
-}
-if ($Task.State -ne "Running") {
-  Write-InstallError "NodeFlare 服务启动失败（状态：$($Task.State)）"
-}
-Write-Host ""
-Write-Host "NodeFlare Agent 安装完成"
-Write-Host "  版本：$InstalledVersion"
-Write-Host "  服务：$TaskName（Windows 计划任务）"
-Write-Host "  查看状态：Get-ScheduledTask -TaskName '$TaskName'"

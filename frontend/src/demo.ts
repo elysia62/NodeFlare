@@ -115,7 +115,7 @@ const baseServer: Server = {
   virtualization: "KVM",
   gpu_usage: 0,
   gpu_model: "",
-  agent_version: "0.0.1",
+  agent_version: "1.0.0",
   disk_read_bps: 6.4 * 1024 ** 2,
   disk_write_bps: 2.1 * 1024 ** 2,
   disk_read_iops: 128,

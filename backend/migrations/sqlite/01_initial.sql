@@ -196,7 +196,7 @@ CREATE TABLE latency_results (
   task_id TEXT NOT NULL REFERENCES latency_tasks(id) ON DELETE CASCADE,
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
   timestamp INTEGER NOT NULL,
-  latency_ms REAL NOT NULL CHECK(latency_ms >= 0),
+  latency_ms REAL NOT NULL CHECK(latency_ms >= -1),
   packet_loss REAL NOT NULL CHECK(packet_loss BETWEEN 0 AND 100),
   PRIMARY KEY(task_id, server_id, timestamp)
 ) WITHOUT ROWID;

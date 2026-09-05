@@ -71,6 +71,8 @@ pub struct SettingsInput {
     pub show_uptime: Option<bool>,
     pub admin_username: Option<String>,
     pub new_password_derived: Option<String>,
+    pub current_password_derived: Option<String>,
+    pub current_totp_code: Option<String>,
     pub turnstile_enabled: Option<bool>,
     pub turnstile_login_enabled: Option<bool>,
     pub turnstile_site_key: Option<String>,

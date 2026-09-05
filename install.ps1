@@ -54,6 +54,7 @@ function Write-Config([string]$Username, [string]$Password, [string]$DatabaseUrl
   $Lines = @(
     "database_url = `"$(Escape-Toml $DatabaseUrl)`""
     'bind_addr = "127.0.0.1:8080"'
+    'trusted_proxies = ["127.0.0.1/32", "::1/128"]'
     "admin_username = `"$(Escape-Toml $Username)`""
     "admin_password = `"$(Escape-Toml $Password)`""
     'turnstile_site_key = ""'
@@ -106,6 +107,10 @@ $ReleaseApi = "https://api.github.com/repos/$Repository/releases/latest"
 $TemporaryDir = Join-Path $env:TEMP "nodeflare-install-$PID"
 $Archive = Join-Path $TemporaryDir $Asset
 $PackageDir = Join-Path $TemporaryDir "package"
+$PreviousInstall = Join-Path $TemporaryDir "previous-install"
+$InstallChanged = $false
+$HadPreviousInstall = $false
+$PreviousTaskXml = $null
 
 try {
   New-Item -ItemType Directory -Path $TemporaryDir -Force | Out-Null
@@ -130,7 +135,8 @@ try {
     $PackageServer,
     (Join-Path $PackageDir "share\frontend\index.html"),
     (Join-Path $PackageDir "share\admin\admin.html"),
-    (Join-Path $PackageDir "share\agent\agent.sh")
+    (Join-Path $PackageDir "share\agent\agent.sh"),
+    (Join-Path $PackageDir "LICENSE")
   )) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
       Stop-Install "Release 文件不完整"
@@ -166,6 +172,15 @@ try {
   }
 
   Write-Step "安装 NodeFlare $Version"
+  $HadPreviousInstall = Test-Path -LiteralPath $InstallDir -PathType Container
+  if ($HadPreviousInstall) {
+    Copy-Item -LiteralPath $InstallDir -Destination $PreviousInstall -Recurse -Force
+  }
+  $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if ($null -ne $ExistingTask) {
+    $PreviousTaskXml = Export-ScheduledTask -TaskName $TaskName
+  }
+  $InstallChanged = $true
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Path $InstallDir, $DataDir, $ThemeDir -Force | Out-Null
@@ -175,7 +190,8 @@ try {
   if ($NewConfig) {
     Write-Config $Username $Password $DatabaseUrl
   }
-  & icacls.exe $DataDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+  & icacls.exe $DataDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { Stop-Install "无法限制配置和数据目录权限" }
 
   $Action = New-ScheduledTaskAction -Execute $ServerFile -Argument "--config `"$ConfigFile`"" -WorkingDirectory $DataDir
   $Trigger = New-ScheduledTaskTrigger -AtStartup
@@ -200,6 +216,22 @@ try {
   Write-Host "  配置和数据：$DataDir"
   Write-Host "  服务：Windows 计划任务 $TaskName"
   Write-Host "  默认访问：http://127.0.0.1:8080"
+  $InstallChanged = $false
+} catch {
+  if ($InstallChanged) {
+    Write-Warning "安装未完成，正在恢复上一版本"
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($HadPreviousInstall) {
+      Copy-Item -LiteralPath $PreviousInstall -Destination $InstallDir -Recurse -Force
+    }
+    if ($null -ne $PreviousTaskXml) {
+      Register-ScheduledTask -TaskName $TaskName -Xml $PreviousTaskXml -Force | Out-Null
+      Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    }
+  }
+  throw
 } finally {
   Remove-Item -LiteralPath $TemporaryDir -Recurse -Force -ErrorAction SilentlyContinue
 }

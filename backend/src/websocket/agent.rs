@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -84,7 +84,7 @@ pub async fn handle(
         Ok(None) => return ApiResponse::unauthorized("Agent Token 无效").into_response(),
         Err(error) => return ApiResponse::internal(error).into_response(),
     };
-    let remote_ip = client_ip(&headers, peer);
+    let remote_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
     let token = token.to_string();
     ws.max_message_size(MAX_AGENT_MESSAGE_BYTES)
         .max_frame_size(MAX_AGENT_MESSAGE_BYTES)
@@ -108,6 +108,7 @@ async fn run(
             sender: outbound_tx.clone(),
             report_interval: identity.report_interval,
             collect_interval: identity.collect_interval,
+            live_until: Arc::new(AtomicI64::new(0)),
         },
     );
     if let Some(previous) = previous {
@@ -236,9 +237,13 @@ async fn handle_text(
             .await
             {
                 Ok(result) => {
-                    send_ack(outbound, identity, &result);
+                    let next_wss_report_after_ms =
+                        state.agent_wss_interval_ms(&identity.server_id).await;
+                    send_ack(outbound, &result, next_wss_report_after_ms);
                     if !result.reports.is_empty() {
                         broadcast_reports(state, identity, &result.reports);
+                    }
+                    if result.persisted && !result.reports.is_empty() {
                         let state = Arc::clone(state);
                         let server_id = identity.server_id.clone();
                         tokio::spawn(async move {
@@ -347,20 +352,18 @@ fn send_task(outbound: &mpsc::Sender<AgentCommand>, task: &RemoteTaskInfo) {
 
 fn send_ack(
     outbound: &mpsc::Sender<AgentCommand>,
-    identity: &AgentIdentity,
     result: &PersistResult,
+    next_wss_report_after_ms: u64,
 ) {
-    let report_interval = identity.report_interval.clamp(15, 3600) * 1000;
-    let live_interval = identity.collect_interval.clamp(1, 60) * 1000;
     let _ = outbound.try_send(AgentCommand::Text(
         serde_json::json!({
             "type": "ack",
             "ts": crate::db::now(),
-            "persisted": true,
+            "persisted": result.persisted,
             "persistenceError": false,
             "persistedThroughTs": result.persisted_through,
-            "nextPersistAfterMs": report_interval,
-            "nextWssReportAfterMs": live_interval,
+            "nextPersistAfterMs": result.next_persist_after_ms,
+            "nextWssReportAfterMs": next_wss_report_after_ms,
             "realtimeHint": false,
         })
         .to_string(),

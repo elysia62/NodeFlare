@@ -12,6 +12,11 @@ package_dir=""
 release_version=""
 config_temp=""
 tty_state=""
+rollback_ready=false
+backup_dir=""
+previous_install=false
+previous_share=false
+previous_service=false
 
 case "$(uname -s)" in
   Linux)
@@ -123,6 +128,9 @@ restore_tty() {
 
 cleanup() {
   restore_tty
+  if [ "$rollback_ready" = true ]; then
+    rollback_install
+  fi
   [ -z "$config_temp" ] || rm -f "$config_temp"
   [ -z "$download_dir" ] || rm -rf "$download_dir"
 }
@@ -205,6 +213,7 @@ write_config() {
   {
     printf 'database_url = "%s"\n' "$escaped_database_url"
     printf 'bind_addr = "127.0.0.1:8080"\n'
+    printf 'trusted_proxies = ["127.0.0.1/32", "::1/128"]\n'
     printf 'admin_username = "%s"\n' "$escaped_username"
     printf 'admin_password = "%s"\n' "$escaped_password"
     printf 'turnstile_site_key = ""\n'
@@ -328,6 +337,7 @@ download_release() {
     && [ -f "$package_dir/share/frontend/index.html" ] \
     && [ -f "$package_dir/share/admin/admin.html" ] \
     && [ -f "$package_dir/share/agent/agent.sh" ] \
+    && [ -f "$package_dir/LICENSE" ] \
     || fail "Release 文件不完整"
   chmod 0755 "$package_dir/nodeflare"
   binary_version=$("$package_dir/nodeflare" --version) || fail "服务端文件无法运行"
@@ -394,6 +404,62 @@ stop_server() {
     launchd) launchctl bootout system "$launchd_file" >/dev/null 2>&1 || true ;;
     freebsd) service nodeflare stop >/dev/null 2>&1 || true ;;
   esac
+}
+
+service_definition() {
+  case "$init_system" in
+    systemd) printf '%s' "$systemd_file" ;;
+    openrc) printf '%s' "$openrc_file" ;;
+    launchd) printf '%s' "$launchd_file" ;;
+    freebsd) printf '%s' "$freebsd_rc_file" ;;
+  esac
+}
+
+snapshot_install() {
+  backup_dir=$download_dir/previous
+  mkdir -p "$backup_dir"
+  if [ -d "$install_dir" ]; then
+    cp -Rp "$install_dir" "$backup_dir/install"
+    previous_install=true
+  fi
+  if [ "$share_dir" != "$install_dir/share" ] && [ -d "$share_dir" ]; then
+    cp -Rp "$share_dir" "$backup_dir/share"
+    previous_share=true
+  fi
+  service_path=$(service_definition)
+  if [ -f "$service_path" ]; then
+    cp -p "$service_path" "$backup_dir/service"
+    previous_service=true
+  fi
+  rollback_ready=true
+}
+
+rollback_install() {
+  rollback_ready=false
+  log "安装未完成，正在恢复上一版本"
+  stop_server
+  rm -rf "$install_dir"
+  if [ "$previous_install" = true ]; then
+    cp -Rp "$backup_dir/install" "$install_dir"
+  fi
+  if [ "$share_dir" != "$install_dir/share" ]; then
+    rm -rf "$share_dir"
+    if [ "$previous_share" = true ]; then
+      cp -Rp "$backup_dir/share" "$share_dir"
+    fi
+  fi
+  service_path=$(service_definition)
+  rm -f "$service_path"
+  if [ "$previous_service" = true ]; then
+    cp -p "$backup_dir/service" "$service_path"
+  fi
+  if [ "$previous_install" = true ] && [ -f "$config_file" ]; then
+    if start_server; then
+      log "已恢复并重新启动上一版本"
+    else
+      printf '[NodeFlare] 警告：上一版本已恢复，但服务未能自动启动\n' >&2
+    fi
+  fi
 }
 
 install_service() {
@@ -516,6 +582,7 @@ else
 fi
 
 log "安装 NodeFlare $release_version"
+snapshot_install
 stop_server
 install -d -m 0700 "$config_dir" "$theme_dir"
 install -d -m 0755 "$install_dir" "$share_dir"
@@ -539,6 +606,7 @@ fi
 if ! start_server; then
   fail "NodeFlare 服务启动失败"
 fi
+rollback_ready=false
 
 log "安装完成"
 printf '%s\n' \

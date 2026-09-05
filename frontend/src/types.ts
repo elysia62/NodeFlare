@@ -275,6 +275,8 @@ export interface Settings extends Omit<Config, "password_client_salt"> {
   admin_password_configured: boolean;
   new_password?: string;
   new_password_derived?: string;
+  current_password_derived?: string;
+  current_totp_code?: string;
   turnstile_secret_key: string;
   notification_enabled: boolean;
   offline_alert_minutes: number;

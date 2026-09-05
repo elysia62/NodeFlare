@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::{HeaderName, HeaderValue},
+    http::{HeaderName, HeaderValue, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -37,8 +37,16 @@ pub struct AuthenticatedUser {
 }
 
 pub async fn security_headers(request: Request, next: Next) -> Response {
+    let api_response = request.uri().path().starts_with("/api/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    if api_response {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, max-age=0"),
+        );
+        headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    }
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),

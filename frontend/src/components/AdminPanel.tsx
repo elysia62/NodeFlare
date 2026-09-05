@@ -36,7 +36,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError, getToken, setToken } from "../api";
+import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError } from "../api";
 import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } from "../adminRoutes";
 import { formatBytes, formatByteSize, isOnline, parseByteSize } from "../format";
 import { derivePassword } from "../password";
@@ -229,14 +229,14 @@ async function copyText(value: string) {
   if (!copied) throw new Error("copy failed");
 }
 
-async function waitForDatabaseSwitch(targetKind: DatabaseStats["kind"], token: string) {
+async function waitForDatabaseSwitch(targetKind: DatabaseStats["kind"]) {
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => window.setTimeout(resolve, 750));
     try {
       const response = await fetch(`/api/admin/database?restart=${Date.now()}`, {
         cache: "no-store",
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        credentials: "same-origin",
         signal: AbortSignal.timeout(2_500),
       });
       if (response.status === 401) return;
@@ -260,7 +260,8 @@ export function AdminPanel({
   onToggleTheme: () => void;
   onChanged: () => void;
 }) {
-  const [authenticated, setAuthenticated] = useState(!!getToken());
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
@@ -308,6 +309,8 @@ export function AdminPanel({
   const [twoFactorStatus, setTwoFactorStatus] = useState<TotpStatus | null>(null);
   const [twoFactorSetup, setTwoFactorSetup] = useState<TotpSetup | null>(null);
   const [twoFactorCode, setTwoFactorCode] = useState("");
+  const [securityVerification, setSecurityVerification] = useState("");
+  const [databaseVerification, setDatabaseVerification] = useState("");
   const [twoFactorSecretCopied, setTwoFactorSecretCopied] = useState(false);
   const [loginSessions, setLoginSessions] = useState<LoginSession[]>([]);
   const [loginSessionsLoaded, setLoginSessionsLoaded] = useState(false);
@@ -324,7 +327,6 @@ export function AdminPanel({
   remoteTasksRef.current = remoteTasks;
 
   const load = useCallback(async () => {
-    if (!getToken()) return;
     setBusy(true);
     setError("");
     try {
@@ -343,13 +345,13 @@ export function AdminPanel({
       setAuthenticated(true);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) {
-        setToken("");
         setAuthenticated(false);
         setError("");
         return;
       }
       setError(reason instanceof Error ? reason.message : "加载失败");
     } finally {
+      setAuthChecked(true);
       setBusy(false);
     }
   }, []);
@@ -357,6 +359,7 @@ export function AdminPanel({
   useEffect(() => { void load(); }, [load]);
 
   useEffect(() => {
+    if (!authChecked) return;
     const syncAdminPath = () => {
       const canonicalPath = canonicalAdminPath(window.location.pathname, authenticated);
       if (window.location.pathname !== canonicalPath) {
@@ -370,7 +373,7 @@ export function AdminPanel({
     const handlePopState = () => syncAdminPath();
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [authenticated]);
+  }, [authChecked, authenticated]);
 
   useEffect(() => {
     if (!authenticated) return;
@@ -382,6 +385,7 @@ export function AdminPanel({
   useEffect(() => {
     const resetAuthentication = () => {
       setAuthenticated(false);
+      setAuthChecked(true);
       setError("");
       setNotice("");
     };
@@ -413,8 +417,7 @@ export function AdminPanel({
     setError("");
     try {
       const passwordDerived = await derivePassword(password, config.password_client_salt);
-      const result = await api.login(username.trim(), passwordDerived, turnstileToken, loginTotpCode);
-      setToken(result.token);
+      await api.login(username.trim(), passwordDerived, turnstileToken, loginTotpCode);
       setPassword("");
       setTurnstileToken("");
       setLoginTotpCode("");
@@ -582,6 +585,8 @@ export function AdminPanel({
     const payload: Partial<Settings> = { ...settings };
     delete payload.admin_password_configured;
     delete payload.totp_login_enabled;
+    delete payload.current_password_derived;
+    delete payload.current_totp_code;
     try {
       if (payload.new_password) {
         payload.new_password_derived = await derivePassword(payload.new_password, config.password_client_salt);
@@ -590,9 +595,22 @@ export function AdminPanel({
         delete payload.new_password;
         delete payload.new_password_derived;
       }
+      if (tab === "security") {
+        const verification = securityVerification.trim();
+        if (twoFactorStatus?.enabled) {
+          if (!/^\d{6}$/.test(verification)) throw new Error("请输入当前 6 位两步验证码");
+          payload.current_totp_code = verification;
+        } else {
+          if (!verification) throw new Error("请输入当前管理员密码");
+          payload.current_password_derived = await derivePassword(
+            verification,
+            config.password_client_salt,
+          );
+        }
+      }
       const result = await api.saveSettings(payload);
-      if (result.token) setToken(result.token);
-      setSettings(result.settings);
+      setSettings(result);
+      setSecurityVerification("");
       if (tab === "security") await loadLoginSessions();
       setNotice("设置已保存");
       onChanged();
@@ -610,6 +628,18 @@ export function AdminPanel({
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : "读取数据库统计失败"); }
     finally { setBusy(false); }
+  }
+
+  async function sensitiveProof(value: string, action: string) {
+    const verification = value.trim();
+    if (twoFactorStatus?.enabled) {
+      if (!/^\d{6}$/.test(verification)) throw new Error(`${action}请输入当前 6 位两步验证码`);
+      return { totpCode: verification };
+    }
+    if (!verification) throw new Error(`${action}请输入当前管理员密码`);
+    return {
+      passwordDerived: await derivePassword(verification, config.password_client_salt),
+    };
   }
 
   async function reclaimDatabase() {
@@ -631,8 +661,10 @@ export function AdminPanel({
     if (!window.confirm(`将 ${source} 迁移到 ${target}？目标库中已有的 NodeFlare 数据会被覆盖。`)) return;
     setBusy(true); setError(""); setNotice("");
     try {
-      const result = await api.migrateDatabase(databaseUrl);
+      const proof = await sensitiveProof(databaseVerification, "迁移数据库前，");
+      const result = await api.migrateDatabase(databaseUrl, proof);
       setDatabaseMigrationUrl("");
+      setDatabaseVerification("");
       setDatabaseMigrationResult(result);
       setDatabase((current) => current ? { ...current, restart_required: result.restart_required } : current);
       const targetName = result.target_kind === "postgresql" ? "PostgreSQL" : "SQLite";
@@ -648,12 +680,10 @@ export function AdminPanel({
       : databaseMigrationResult?.target_kind === "sqlite"
         ? "sqlite"
         : database.kind === "postgresql" ? "sqlite" : "postgresql";
-    const token = getToken();
     setBusy(true); setRestarting(true); setError(""); setNotice("NodeFlare 正在重启");
     try {
       await api.restartAfterDatabaseMigration();
-      await waitForDatabaseSwitch(targetKind, token);
-      setToken("");
+      await waitForDatabaseSwitch(targetKind);
       window.location.replace("/admin/login");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "重启 NodeFlare 失败");
@@ -676,7 +706,9 @@ export function AdminPanel({
   async function exportDatabaseBackup() {
     setBusy(true); setError(""); setNotice("");
     try {
-      const { blob, filename } = await api.databaseBackup();
+      const proof = await sensitiveProof(databaseVerification, "导出备份前，");
+      const { blob, filename } = await api.databaseBackup(proof);
+      setDatabaseVerification("");
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -698,8 +730,9 @@ export function AdminPanel({
     if (!window.confirm("恢复将覆盖当前数据库，并使现有登录会话失效。确认继续？")) return;
     setBusy(true); setError(""); setNotice("");
     try {
-      const result = await api.restoreDatabaseBackup(file);
-      setToken("");
+      const proof = await sensitiveProof(databaseVerification, "恢复备份前，");
+      const result = await api.restoreDatabaseBackup(file, proof);
+      setDatabaseVerification("");
       window.alert(`数据库已恢复 ${result.restored_rows.toLocaleString()} 行，请使用备份中的管理员账号重新登录。`);
       window.location.reload();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "恢复数据库备份失败"); }
@@ -807,7 +840,7 @@ export function AdminPanel({
   async function logout() {
     try { await api.logout(); }
     finally {
-      setToken(""); setAuthenticated(false); setServers([]); setSettings(null); setSelectedIds([]);
+      setAuthenticated(false); setServers([]); setSettings(null); setSelectedIds([]);
       setTwoFactorStatus(null); setTwoFactorSetup(null); setTwoFactorCode(""); setRemoteTotpCode("");
       setTwoFactorSecretCopied(false);
       setLoginSessions([]); setLoginSessionsLoaded(false); setRevokingSessionId("");
@@ -818,7 +851,9 @@ export function AdminPanel({
   async function setupTwoFactor() {
     setBusy(true); setError(""); setNotice("");
     try {
-      const setup = await api.setupTwoFactor();
+      const proof = await sensitiveProof(securityVerification, "生成两步验证密钥前，");
+      const setup = await api.setupTwoFactor(proof);
+      setSecurityVerification("");
       setTwoFactorSetup(setup);
       setTwoFactorStatus({ enabled: false, has_secret: true });
       setTwoFactorCode("");
@@ -869,12 +904,12 @@ export function AdminPanel({
   const installCommand = useMemo(() => {
     if (!install) return "";
     const origin = window.location.origin;
-    const installer = "https://raw.githubusercontent.com/imengying/NodeFlare/main/agent";
+    const installer = `${origin}/agent`;
     const mirror = install.agent_mirror.trim().replace(/\/+$/, "");
     const shellMirror = mirror ? ` -m ${shellLiteral(mirror)}` : "";
     const powershellMirror = mirror ? ` -Mirror ${powershellLiteral(mirror)}` : "";
     if (installPlatform === "windows") {
-      return `Invoke-WebRequest -Uri "${installer}/install.ps1" -OutFile "$env:TEMP\\nodeflare-install.ps1"\n& "$env:TEMP\\nodeflare-install.ps1" -e ${powershellLiteral(origin)} -t ${powershellLiteral(install.agent_token)}${powershellMirror}`;
+      return `Invoke-WebRequest -UseBasicParsing -Uri "${installer}/install.ps1" -OutFile "$env:TEMP\\nodeflare-install.ps1"\nUnblock-File "$env:TEMP\\nodeflare-install.ps1"\n& "$env:TEMP\\nodeflare-install.ps1" -e ${powershellLiteral(origin)} -t ${powershellLiteral(install.agent_token)}${powershellMirror}`;
     }
     if (installPlatform === "macos") {
       return `curl -fsSL ${installer}/install-macos.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}`;
@@ -1047,6 +1082,10 @@ export function AdminPanel({
     };
   }, [authenticated, refreshRemoteTasks, remoteTasksActive, tab]);
 
+  if (!authChecked) {
+    return <div className={`admin-page ${dark ? "admin-dark" : ""}`} aria-busy="true" />;
+  }
+
   return (
     <div className={`admin-page ${dark ? "admin-dark" : ""}`}>
       {authenticated ? (error ? <div className="admin-toast error" role="alert" aria-live="assertive"><CircleAlert aria-hidden="true" /><span>{error}</span></div>
@@ -1175,7 +1214,7 @@ export function AdminPanel({
 
                   {tab === "security" ? <>
                     <div className="section-title"><ShieldCheck size={15} />账号与 Cloudflare 防护</div>
-                    <div className="form-grid"><label><span>管理员用户名</span><input autoComplete="username" value={settings.admin_username} onChange={(event) => updateSettings("admin_username", event.target.value)} /></label><label><span>新密码（留空不修改）</span><input autoComplete="new-password" type="password" minLength={8} maxLength={128} value={settings.new_password || ""} onChange={(event) => updateSettings("new_password", event.target.value)} placeholder="至少 8 个字符" /></label></div>
+                    <div className="form-grid three"><label><span>管理员用户名</span><input autoComplete="username" value={settings.admin_username} onChange={(event) => updateSettings("admin_username", event.target.value)} /></label><label><span>新密码（留空不修改）</span><input autoComplete="new-password" type="password" minLength={8} maxLength={128} value={settings.new_password || ""} onChange={(event) => updateSettings("new_password", event.target.value)} placeholder="至少 8 个字符" /></label><label><span>{twoFactorStatus?.enabled ? "当前两步验证码" : "当前管理员密码"}</span><input type="password" autoComplete={twoFactorStatus?.enabled ? "one-time-code" : "current-password"} inputMode={twoFactorStatus?.enabled ? "numeric" : undefined} maxLength={twoFactorStatus?.enabled ? 6 : 128} value={securityVerification} onChange={(event) => setSecurityVerification(twoFactorStatus?.enabled ? event.target.value.replace(/\D/g, "").slice(0, 6) : event.target.value)} required /></label></div>
                     <div className="two-factor-panel">
                       <div className="two-factor-head"><div><div className="section-subtitle">TOTP 两步验证</div><p className="settings-hint">启用后管理员登录和每次远程执行都必须提交验证器生成的 6 位动态码。</p></div><span className={`two-factor-status ${twoFactorStatus?.enabled ? "enabled" : ""}`}>{twoFactorStatus?.enabled ? "已启用" : twoFactorStatus ? "未启用" : "读取中"}</span></div>
                       {twoFactorSetup ? <div className="two-factor-setup">
@@ -1197,7 +1236,7 @@ export function AdminPanel({
                   </> : null}
 
                   {tab === "data" ? <>
-                    <div className="section-head database-section-head"><div><h3>数据库维护</h3><span>备份包含节点、设置、历史、任务及安全配置，请妥善保管。</span></div><div className="section-actions"><button type="button" className="secondary-btn compact" disabled={busy || database?.restart_required} onClick={() => void exportDatabaseBackup()}><Download size={15} />导出备份</button><button type="button" className="secondary-btn compact" disabled={busy || database?.restart_required} onClick={() => databaseRestoreInputRef.current?.click()}><Upload size={15} />恢复备份</button><input ref={databaseRestoreInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void restoreDatabaseBackup(file); }} /></div></div>
+                    <div className="section-head database-section-head"><div><h3>数据库维护</h3><span>备份包含节点、设置、历史、主题文件、任务及安全配置，请妥善保管。</span></div><div className="section-actions"><label><span className="sr-only">{twoFactorStatus?.enabled ? "当前两步验证码" : "当前管理员密码"}</span><input className="compact-verification-input" type="password" autoComplete={twoFactorStatus?.enabled ? "one-time-code" : "current-password"} inputMode={twoFactorStatus?.enabled ? "numeric" : undefined} maxLength={twoFactorStatus?.enabled ? 6 : 128} value={databaseVerification} onChange={(event) => setDatabaseVerification(twoFactorStatus?.enabled ? event.target.value.replace(/\D/g, "").slice(0, 6) : event.target.value)} placeholder={twoFactorStatus?.enabled ? "当前验证码" : "当前密码"} /></label><button type="button" className="secondary-btn compact" disabled={busy || database?.restart_required} onClick={() => void exportDatabaseBackup()}><Download size={15} />导出备份</button><button type="button" className="secondary-btn compact" disabled={busy || database?.restart_required} onClick={() => databaseRestoreInputRef.current?.click()}><Upload size={15} />恢复备份</button><input ref={databaseRestoreInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void restoreDatabaseBackup(file); }} /></div></div>
                     <div className="database-storage"><div><span>数据库大小</span><strong>{database ? formatBytes(database.size_bytes) : "读取中..."}</strong>{database ? <small>{database.kind === "postgresql" ? "PostgreSQL" : "SQLite"}{database.reclaimable_bytes ? ` · 可回收 ${formatBytes(database.reclaimable_bytes)}` : ""}</small> : null}</div><button type="button" className="secondary-btn" disabled={busy || !database || database.restart_required} onClick={() => void reclaimDatabase()}><RotateCw size={15} />回收空间</button></div>
                     <div className="database-migration">
                       <div><div className="section-title"><ArrowRightLeft size={15} />数据库迁移</div><p className="settings-hint">将当前 {database?.kind === "postgresql" ? "PostgreSQL" : "SQLite"} 数据复制到 {database?.kind === "postgresql" ? "SQLite" : "PostgreSQL"}，完成后自动更新配置，重启服务后生效。</p></div>
@@ -1268,7 +1307,7 @@ export function AdminPanel({
         <div className="form-grid"><label><span>名称</span><input autoFocus required value={form.name} onChange={(event) => updateForm("name", event.target.value)} /></label><label><span>地区代码</span><input maxLength={16} placeholder="CN / JP / DE" value={form.region} onChange={(event) => updateForm("region", event.target.value.toUpperCase())} /></label><label><span>分组</span><input value={form.group_name} onChange={(event) => updateForm("group_name", event.target.value)} /></label><label><span>标签</span><input placeholder="主力, 线路:BGP" value={form.tags} onChange={(event) => updateForm("tags", event.target.value)} /></label></div>
         <div className="form-grid three"><label><span>流量限额（0 不限）</span><input placeholder="如 100 G，不带单位按 GB；0 不限" {...sizeInputProps(trafficLimitText, setTrafficLimitText, (bytes) => updateForm("traffic_limit", bytes), form.traffic_limit)} /></label><label><span>流量口径</span><select value={form.traffic_limit_type} onChange={(event) => updateForm("traffic_limit_type", event.target.value as ServerInput["traffic_limit_type"])}><option value="sum">上下行合计</option><option value="max">取较大值</option><option value="min">取较小值</option><option value="up">仅上行</option><option value="down">仅下行</option></select></label><label><span>流量重置日</span><input min="1" max="31" type="number" value={form.reset_day} onChange={(event) => updateForm("reset_day", Number(event.target.value))} /></label></div>
         <div className="form-grid three"><label><span>价格（0 隐藏，-1 免费）</span><input inputMode="decimal" value={priceText} onChange={(event) => updatePriceText(event.target.value)} onBlur={() => setPriceText(String(form.price))} /></label><label><span>币种</span><select value={form.currency} onChange={(event) => updateForm("currency", event.target.value)}>{ASSET_CURRENCIES.map((code) => <option key={code}>{code}</option>)}</select></label><label><span>计费周期</span><select value={String(form.billing_cycle)} onChange={(event) => updateForm("billing_cycle", Number(event.target.value))}>{BILLING_CYCLES.map((cycle) => <option key={cycle.days} value={cycle.days}>{cycle.label}</option>)}{BILLING_CYCLES.every((cycle) => cycle.days !== form.billing_cycle) ? <option value={form.billing_cycle}>{form.billing_cycle} 天</option> : null}</select></label></div>
-        <div className="form-grid three"><label><span>到期日期</span><input type="date" value={formatDate(form.expires_at)} onChange={(event) => updateForm("expires_at", event.target.value ? Math.floor(new Date(`${event.target.value}T00:00:00Z`).getTime() / 1000) : null)} /></label><label><span>Agent 上报间隔（秒）</span><input min="15" max="3600" type="number" value={form.report_interval} onChange={(event) => updateForm("report_interval", Number(event.target.value))} /></label><label><span>指标采样间隔（秒）</span><input min="1" max="60" type="number" value={form.collect_interval} onChange={(event) => updateForm("collect_interval", Number(event.target.value))} /></label></div>
+        <div className="form-grid three"><label><span>到期日期</span><input type="date" value={formatDate(form.expires_at)} onChange={(event) => updateForm("expires_at", event.target.value ? Math.floor(new Date(`${event.target.value}T00:00:00Z`).getTime() / 1000) : null)} /></label><label><span>历史保存间隔（秒）</span><input min="15" max="3600" type="number" value={form.report_interval} onChange={(event) => updateForm("report_interval", Number(event.target.value))} /></label><label><span>实时采样间隔（秒）</span><input min="1" max="60" type="number" value={form.collect_interval} onChange={(event) => updateForm("collect_interval", Number(event.target.value))} /></label></div>
         <div className="form-grid"><label><span>统计网卡（逗号分隔，留空自动）</span><input value={form.network_interface} onChange={(event) => updateForm("network_interface", event.target.value)} placeholder="eth0,ens3" /></label><label><span>下行流量当前值</span><input placeholder="如 500 G" {...sizeInputProps(rxCurrentText, setRxCurrentText, setRxCurrentBytes, rxCurrentBytes)} /></label><label><span>上行流量当前值</span><input placeholder="如 500 G" {...sizeInputProps(txCurrentText, setTxCurrentText, setTxCurrentBytes, txCurrentBytes)} /></label><label><span>Agent 下载加速（可选）</span><input value={form.agent_mirror} onChange={(event) => updateForm("agent_mirror", event.target.value.trim())} placeholder="https://ghproxy.net" /></label></div>
         <div className="settings-toggles editor-toggles"><Toggle label={form.billing_cycle <= 0 ? "自动续费（一次性不适用）" : "自动续费"} checked={form.auto_renewal} onChange={(value) => updateForm("auto_renewal", value)} /><Toggle label="Agent 自动更新" checked={form.auto_update} onChange={(value) => updateForm("auto_update", value)} /><Toggle label="隐藏节点" checked={form.hidden} onChange={(value) => updateForm("hidden", value)} /><Toggle label="关闭离线告警" checked={form.offline_notify_disabled} onChange={(value) => updateForm("offline_notify_disabled", value)} /></div>
         <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="primary-btn" disabled={busy}><Save size={15} />保存节点</button></div>

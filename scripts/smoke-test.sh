@@ -24,9 +24,17 @@ step() {
 admin_token=
 server_id=
 latency_task_id=
+agent_latency_task_id=
 alert_rule_id=
 backup_file=
+agent_pid=
+agent_state_dir=
 cleanup() {
+  if [ -n "$agent_pid" ]; then
+    kill "$agent_pid" 2>/dev/null || true
+    wait "$agent_pid" 2>/dev/null || true
+  fi
+  [ -z "$agent_state_dir" ] || rm -rf "$agent_state_dir"
   [ -z "$backup_file" ] || rm -f -- "$backup_file"
   if [ "${MONITOR_KEEP_RESOURCES:-0}" != "1" ] && [ -n "$admin_token" ]; then
     if [ -n "$alert_rule_id" ]; then
@@ -36,6 +44,10 @@ cleanup() {
     if [ -n "$latency_task_id" ]; then
       monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
         -X DELETE "$MONITOR_BASE_URL/api/admin/latency-tasks/$latency_task_id" >/dev/null || true
+    fi
+    if [ -n "$agent_latency_task_id" ]; then
+      monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
+        -X DELETE "$MONITOR_BASE_URL/api/admin/latency-tasks/$agent_latency_task_id" >/dev/null || true
     fi
     if [ -n "$server_id" ]; then
       monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
@@ -66,13 +78,13 @@ invalid_login_payload=$(jq -nc --arg username "$MONITOR_ADMIN_USERNAME" --arg pa
 attempt=1
 while [ "$attempt" -le 5 ]; do
   invalid_login_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
-    -H 'Content-Type: application/json' -H 'X-Real-IP: 203.0.113.10' \
+    -H 'Content-Type: application/json' -H 'X-Forwarded-For: 203.0.113.10' \
     --data "$invalid_login_payload" "$MONITOR_BASE_URL/api/admin/login")
   [ "$invalid_login_status" = "401" ]
   attempt=$((attempt + 1))
 done
 throttled_login_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
-  -H 'Content-Type: application/json' -H 'X-Real-IP: 203.0.113.10' \
+  -H 'Content-Type: application/json' -H 'X-Forwarded-For: 203.0.113.10' \
   --data "$invalid_login_payload" "$MONITOR_BASE_URL/api/admin/login")
 [ "$throttled_login_status" = "429" ]
 step "static assets"
@@ -100,6 +112,9 @@ login_admin() {
 }
 login_json=$(login_admin)
 admin_token=$(printf '%s' "$login_json" | jq -er '.token')
+api_headers=$(monitor_curl --silent --show-error --dump-header - --output /dev/null \
+  -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/settings")
+printf '%s' "$api_headers" | grep -qi '^cache-control:.*no-store'
 
 step "login devices"
 second_login_json=$(login_admin)
@@ -125,7 +140,7 @@ settings_payload=$(request -H "Authorization: Bearer $admin_token" \
   jq -c '.site_description = "Smoke settings" | del(.admin_password_configured, .totp_login_enabled)')
 request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
   --data "$settings_payload" \
-  "$MONITOR_BASE_URL/api/admin/settings" | jq -e '.settings.site_description == "Smoke settings"' >/dev/null
+  "$MONITOR_BASE_URL/api/admin/settings" | jq -e '.site_description == "Smoke settings"' >/dev/null
 
 request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/bootstrap" | \
@@ -145,13 +160,14 @@ request -H "Authorization: Bearer $admin_token" -X POST \
 
 step "database backup and restore"
 backup_file=$(mktemp /tmp/nodeflare-backup.XXXXXX.zip)
-request -H "Authorization: Bearer $admin_token" \
+request -H "Authorization: Bearer $admin_token" -H "X-NodeFlare-Password: $password_derived" \
   "$MONITOR_BASE_URL/api/admin/database/backup" > "$backup_file"
 [ -s "$backup_file" ]
 changed_settings=$(printf '%s' "$settings_payload" | jq -c '.site_description = "Changed after backup"')
 request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
   --data "$changed_settings" "$MONITOR_BASE_URL/api/admin/settings" >/dev/null
-restore_json=$(request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/zip' \
+restore_json=$(request -H "Authorization: Bearer $admin_token" \
+  -H "X-NodeFlare-Password: $password_derived" -H 'Content-Type: application/zip' \
   --data-binary "@$backup_file" "$MONITOR_BASE_URL/api/admin/database/restore?filename=smoke.zip")
 printf '%s' "$restore_json" | jq -e '.restored_rows > 0' >/dev/null
 restored_session_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -188,6 +204,8 @@ server_id=$(printf '%s' "$server_json" | jq -er '.id')
 agent_token=$(printf '%s' "$server_json" | jq -er '.agent_token')
 step "websocket report"
 MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
+  MONITOR_ADMIN_USERNAME="$MONITOR_ADMIN_USERNAME" \
+  MONITOR_PASSWORD_DERIVED="$password_derived" \
   MONITOR_AGENT_TOKEN="$agent_token" MONITOR_SERVER_ID="$server_id" \
   MONITOR_LATENCY_TASK_ID="$latency_task_id" \
   node scripts/websocket-smoke.mjs
@@ -224,6 +242,51 @@ MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
   MONITOR_LATENCY_TASK_ID="$latency_task_id" MONITOR_EXPECT_TASK_ASSIGNED=0 \
   MONITOR_CONFIG_ONLY=1 node scripts/websocket-smoke.mjs
 
+if [ -n "${MONITOR_AGENT_BINARY:-}" ]; then
+  step "real Agent failed-latency and persistence"
+  request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
+    --data "$(printf '%s' "$server_input" | jq '.report_interval=15 | .collect_interval=1')" \
+    "$MONITOR_BASE_URL/api/admin/servers/$server_id" >/dev/null
+  agent_latency_task_id=$(request -H "Authorization: Bearer $admin_token" \
+    -H 'Content-Type: application/json' \
+    --data "$(jq -nc --arg server_id "$server_id" '{name:"Smoke failure",task_type:"tcp",target:"does-not-exist.invalid",port:443,interval_seconds:30,default_enabled:false,server_ids:[$server_id]}')" \
+    "$MONITOR_BASE_URL/api/admin/latency-tasks" | jq -er '.id')
+  agent_state_dir=$(mktemp -d "${TMPDIR:-/tmp}/nodeflare-agent-smoke.XXXXXX")
+  NODEFLARE_STATE_DIR="$agent_state_dir" "$MONITOR_AGENT_BINARY" \
+    -e "$MONITOR_BASE_URL" -t "$agent_token" -i 15 > "$agent_state_dir/agent.log" 2>&1 &
+  agent_pid=$!
+  failed_latency_seen=false
+  attempt=1
+  while [ "$attempt" -le 45 ]; do
+    if request -H "Authorization: Bearer $admin_token" \
+      "$MONITOR_BASE_URL/api/latency/$server_id?hours=1" | \
+      jq -e --arg task_id "$agent_latency_task_id" \
+        '.points | any(.task_id == $task_id and .latency_ms == -1 and .packet_loss == 100)' >/dev/null; then
+      failed_latency_seen=true
+      break
+    fi
+    kill -0 "$agent_pid" 2>/dev/null || {
+      cat "$agent_state_dir/agent.log" >&2
+      exit 1
+    }
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  [ "$failed_latency_seen" = true ] || {
+    cat "$agent_state_dir/agent.log" >&2
+    echo "Failed latency result was not persisted" >&2
+    exit 1
+  }
+  kill "$agent_pid"
+  wait "$agent_pid" 2>/dev/null || true
+  agent_pid=
+  rm -rf "$agent_state_dir"
+  agent_state_dir=
+  request -H "Authorization: Bearer $admin_token" -X DELETE \
+    "$MONITOR_BASE_URL/api/admin/latency-tasks/$agent_latency_task_id" >/dev/null
+  agent_latency_task_id=
+fi
+
 step "alerts and visibility"
 alert_rule_json=$(request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
   --data "$(jq -nc --arg server_id "$server_id" '{name:"Smoke CPU",metric:"cpu",threshold:80,duration_minutes:5,aggregation:"average",enabled:true,server_ids:[$server_id]}')" \
@@ -243,7 +306,8 @@ hidden_history_status=$(monitor_curl --silent --output /dev/null --write-out '%{
 if [ -n "${MONITOR_MIGRATION_URL:-}" ]; then
   step "database migration"
   migration_payload=$(jq -nc --arg database_url "$MONITOR_MIGRATION_URL" '{database_url:$database_url}')
-  request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+  request -H "Authorization: Bearer $admin_token" \
+    -H "X-NodeFlare-Password: $password_derived" -H 'Content-Type: application/json' \
     --data "$migration_payload" "$MONITOR_BASE_URL/api/admin/database/migrate" | \
     jq -e --arg kind "${MONITOR_MIGRATION_KIND:-postgresql}" \
       '.migrated_rows > 0 and .target_kind == $kind and .size_bytes > 0 and .restart_required == true' >/dev/null

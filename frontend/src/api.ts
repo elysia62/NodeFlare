@@ -1,6 +1,5 @@
 import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
 
-const TOKEN_KEY = "nodeflare-admin-token";
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
 
 export class ApiError extends Error {
@@ -9,25 +8,13 @@ export class ApiError extends Error {
   }
 }
 
-export function getToken() {
-  return localStorage.getItem(TOKEN_KEY) ?? "";
-}
-
-export function setToken(token: string) {
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  else localStorage.removeItem(TOKEN_KEY);
-}
-
 async function requestResponse(path: string, init: RequestInit = {}, admin = false): Promise<Response> {
   const headers = new Headers(init.headers);
   if (typeof init.body === "string" && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const token = getToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(path, { ...init, headers });
+  const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: response.statusText }));
     if (response.status === 401 && admin) {
-      setToken("");
       window.dispatchEvent(new Event(ADMIN_UNAUTHORIZED_EVENT));
       throw new ApiError("", response.status);
     }
@@ -40,6 +27,18 @@ async function request<T>(path: string, init: RequestInit = {}, admin = false): 
   const response = await requestResponse(path, init, admin);
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+interface SensitiveProof {
+  totpCode?: string;
+  passwordDerived?: string;
+}
+
+function sensitiveHeaders(proof: SensitiveProof): Headers {
+  const headers = new Headers();
+  if (proof.totpCode) headers.set("X-NodeFlare-TOTP", proof.totpCode);
+  if (proof.passwordDerived) headers.set("X-NodeFlare-Password", proof.passwordDerived);
+  return headers;
 }
 
 export const api = {
@@ -59,18 +58,22 @@ export const api = {
     request<{ tasks: LatencyTestPoint[]; points: LatencySample[] }>(`/api/latency/${encodeURIComponent(id)}?hours=${hours}`),
   verifyTurnstile: (token: string) =>
     request<void>("/api/turnstile/verify", { method: "POST", body: JSON.stringify({ token }) }),
-  login: (username: string, passwordDerived: string, turnstileToken: string, totpCode = "") =>
-    request<{ token: string }>("/api/admin/login", {
+  login: async (username: string, passwordDerived: string, turnstileToken: string, totpCode = "") => {
+    await request<{ token: string }>("/api/admin/login", {
       method: "POST",
       body: JSON.stringify({ username, password_derived: passwordDerived, turnstile_token: turnstileToken, totp_code: totpCode }),
-    }),
+    });
+  },
   logout: () => request<void>("/api/admin/logout", { method: "POST" }),
   loginSessions: () => request<{ sessions: LoginSession[] }>("/api/admin/sessions", {}, true),
   revokeLoginSession: (id: string) =>
     request<void>(`/api/admin/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }, true),
   settings: () => request<Settings>("/api/admin/settings", {}, true),
   twoFactorStatus: () => request<TotpStatus>("/api/admin/2fa/status", {}, true),
-  setupTwoFactor: () => request<TotpSetup>("/api/admin/2fa/setup", { method: "POST" }, true),
+  setupTwoFactor: (proof: SensitiveProof) => request<TotpSetup>("/api/admin/2fa/setup", {
+    method: "POST",
+    headers: sensitiveHeaders(proof),
+  }, true),
   enableTwoFactor: (totpCode: string) => request<void>("/api/admin/2fa/enable", {
     method: "POST",
     body: JSON.stringify({ totp_code: totpCode }),
@@ -112,7 +115,7 @@ export const api = {
   deleteTheme: (id: string) =>
     request<void>(`/api/admin/themes/${encodeURIComponent(id)}`, { method: "DELETE" }, true),
   saveSettings: (input: Partial<Settings>) =>
-    request<{ settings: Settings; token: string | null }>("/api/admin/settings", { method: "PATCH", body: JSON.stringify(input) }, true),
+    request<Settings>("/api/admin/settings", { method: "PATCH", body: JSON.stringify(input) }, true),
   createServer: (input: ServerInput) =>
     request<{ id: string; agent_token: string }>(
       "/api/admin/servers",
@@ -150,9 +153,9 @@ export const api = {
     { method: "POST" },
     true,
   ),
-  migrateDatabase: (databaseUrl: string) => request<DatabaseMigrationResult>(
+  migrateDatabase: (databaseUrl: string, proof: SensitiveProof) => request<DatabaseMigrationResult>(
     "/api/admin/database/migrate",
-    { method: "POST", body: JSON.stringify({ database_url: databaseUrl }) },
+    { method: "POST", headers: sensitiveHeaders(proof), body: JSON.stringify({ database_url: databaseUrl }) },
     true,
   ),
   restartAfterDatabaseMigration: () => request<{ restarting: boolean }>(
@@ -160,15 +163,24 @@ export const api = {
     { method: "POST" },
     true,
   ),
-  databaseBackup: async () => {
-    const response = await requestResponse("/api/admin/database/backup", {}, true);
+  databaseBackup: async (proof: SensitiveProof) => {
+    const response = await requestResponse("/api/admin/database/backup", {
+      headers: sensitiveHeaders(proof),
+    }, true);
     const disposition = response.headers.get("Content-Disposition") ?? "";
     const filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? "nodeflare-database-backup.zip";
     return { blob: await response.blob(), filename };
   },
-  restoreDatabaseBackup: (file: File) => {
+  restoreDatabaseBackup: (
+    file: File,
+    proof: SensitiveProof,
+  ) => {
     const query = new URLSearchParams({ filename: file.name });
-    return request<{ restored_rows: number }>(`/api/admin/database/restore?${query}`, { method: "POST", body: file }, true);
+    return request<{ restored_rows: number }>(`/api/admin/database/restore?${query}`, {
+      method: "POST",
+      body: file,
+      headers: sensitiveHeaders(proof),
+    }, true);
   },
   createRemoteTask: (input: RemoteTaskInput) => request<{ tasks: RemoteTaskCreated[] }>("/api/admin/remote/task", {
     method: "POST",

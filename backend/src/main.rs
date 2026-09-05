@@ -23,9 +23,11 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, watch};
 use tower_http::trace::TraceLayer;
+
+const LIVE_REPORT_DIVISOR: i64 = 15;
 
 pub struct AppState {
     pub db: db::Database,
@@ -36,11 +38,13 @@ pub struct AppState {
     pub agents: RwLock<HashMap<String, websocket::AgentConnection>>,
     pub dashboard_tx: broadcast::Sender<websocket::DashboardEvent>,
     pub database_maintenance: Mutex<()>,
+    pub theme_operations: Mutex<()>,
     pub database_maintenance_active: AtomicBool,
     pub database_restart_required: AtomicBool,
     pub restart_tx: watch::Sender<bool>,
     pub login_attempts: security::AttemptLimiter,
-    pub remote_totp_attempts: security::AttemptLimiter,
+    pub sensitive_attempts: security::AttemptLimiter,
+    pub wake_requests: security::IntervalLimiter,
     pub password_verifications: Arc<Semaphore>,
 }
 
@@ -86,6 +90,9 @@ impl AppState {
         let Some(connection) = self.agents.read().await.get(server_id).cloned() else {
             return;
         };
+        connection
+            .live_until
+            .store(db::now().saturating_add(75), Ordering::Release);
         let payload = serde_json::json!({
             "type": "ack",
             "ts": db::now(),
@@ -100,6 +107,24 @@ impl AppState {
         let _ = connection
             .sender
             .try_send(websocket::AgentCommand::Text(payload));
+    }
+
+    pub async fn agent_wss_interval_ms(&self, server_id: &str) -> u64 {
+        let Some(connection) = self.agents.read().await.get(server_id).cloned() else {
+            return 60_000;
+        };
+        let seconds = if connection.live_until.load(Ordering::Acquire) >= db::now() {
+            connection.collect_interval.clamp(1, 60)
+        } else {
+            (connection
+                .report_interval
+                .clamp(15, 3600)
+                .saturating_add(LIVE_REPORT_DIVISOR - 1)
+                / LIVE_REPORT_DIVISOR)
+                .clamp(1, 60)
+                .max(connection.collect_interval.clamp(1, 60))
+        };
+        seconds as u64 * 1000
     }
 
     pub async fn send_remote_task(&self, task: &models::RemoteTaskInfo) {
@@ -174,6 +199,7 @@ async fn main() -> Result<()> {
         agents: RwLock::new(HashMap::new()),
         dashboard_tx,
         database_maintenance: Mutex::new(()),
+        theme_operations: Mutex::new(()),
         database_maintenance_active: AtomicBool::new(false),
         database_restart_required: AtomicBool::new(false),
         restart_tx,
@@ -182,11 +208,12 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(5 * 60),
             std::time::Duration::from_secs(5 * 60),
         ),
-        remote_totp_attempts: security::AttemptLimiter::new(
+        sensitive_attempts: security::AttemptLimiter::new(
             5,
             std::time::Duration::from_secs(5 * 60),
             std::time::Duration::from_secs(10 * 60),
         ),
+        wake_requests: security::IntervalLimiter::new(std::time::Duration::from_secs(1)),
         password_verifications: Arc::new(Semaphore::new(4)),
     });
 
@@ -387,10 +414,8 @@ fn spawn_maintenance(state: Arc<AppState>) {
 
 async fn shutdown_signal(mut restart_rx: watch::Receiver<bool>) {
     tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            if result.is_ok() {
-                tracing::info!("shutdown signal received");
-            }
+        () = operating_system_shutdown() => {
+            tracing::info!("shutdown signal received");
         }
         result = restart_rx.wait_for(|requested| *requested) => {
             if result.is_ok() {
@@ -398,4 +423,28 @@ async fn shutdown_signal(mut restart_rx: watch::Receiver<bool>) {
             }
         }
     }
+}
+
+#[cfg(unix)]
+async fn operating_system_shutdown() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let terminate = signal(SignalKind::terminate());
+    match terminate {
+        Ok(mut terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to register SIGTERM handler");
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn operating_system_shutdown() {
+    let _ = tokio::signal::ctrl_c().await;
 }

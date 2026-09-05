@@ -19,7 +19,7 @@ export interface LiveTransportHandlers {
   onServer: (server: Server) => void;
   onBatch: (updates: BatchUpdate[], cached: boolean) => void;
   onConnectedChange: (connected: boolean) => void;
-  onOverviewConnected: () => Promise<void>;
+  onWakeRequested: () => Promise<void>;
 }
 
 export interface LiveTransportOptions {
@@ -60,11 +60,11 @@ export function connectLive(
     reconnectTimer = null;
   };
 
-  const wakeOverviewAgents = () => {
-    if (serverId || cancelled || wakeInFlight) return;
+  const wakeAgents = () => {
+    if (cancelled || wakeInFlight) return;
     wakeInFlight = true;
     void Promise.resolve()
-      .then(handlers.onOverviewConnected)
+      .then(handlers.onWakeRequested)
       .catch(() => {})
       .finally(() => { wakeInFlight = false; });
   };
@@ -94,7 +94,7 @@ export function connectLive(
       if (socket !== current || cancelled || suspended) return;
       openedAt = Date.now();
       setConnected(true);
-      wakeOverviewAgents();
+      wakeAgents();
     };
     current.onclose = () => {
       if (socket !== current) return;
@@ -159,7 +159,10 @@ export function connectLive(
 
   connect();
   const heartbeat = window.setInterval(() => {
-    if (socket?.readyState === WebSocket.OPEN) socket.send("ping");
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send("ping");
+      wakeAgents();
+    }
   }, HEARTBEAT_INTERVAL);
   document.addEventListener("visibilitychange", updateSuspension);
   window.addEventListener("online", updateSuspension);

@@ -33,7 +33,9 @@ pub struct AgentIdentity {
 #[derive(Debug, Clone)]
 pub struct PersistResult {
     pub reports: Vec<AgentReport>,
+    pub persisted: bool,
     pub persisted_through: i64,
+    pub next_persist_after_ms: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -390,7 +392,9 @@ pub async fn save_agent_batch(
         transaction.rollback().await?;
         return Ok(PersistResult {
             reports: Vec::new(),
+            persisted: true,
             persisted_through: persisted_before,
+            next_persist_after_ms: identity.report_interval.clamp(15, 3600) as u64 * 1000,
         });
     }
     reports.retain(|report| report.timestamp > persisted_before);
@@ -398,7 +402,9 @@ pub async fn save_agent_batch(
         transaction.rollback().await?;
         return Ok(PersistResult {
             reports: Vec::new(),
+            persisted: true,
             persisted_through: persisted_before,
+            next_persist_after_ms: identity.report_interval.clamp(15, 3600) as u64 * 1000,
         });
     }
 
@@ -406,7 +412,36 @@ pub async fn save_agent_batch(
     for report in &mut reports {
         apply_traffic(report, &mut traffic, identity);
     }
-    save_history_rows(db, &mut transaction, &identity.server_id, &reports).await?;
+    let latest = reports.last().context("report batch became empty")?;
+    let report_interval = identity.report_interval.clamp(15, 3600);
+    let next_persist_at = persisted_before.saturating_add(report_interval);
+    if persisted_before > 0 && latest.timestamp < next_persist_at {
+        let next_persist_after_ms =
+            next_persist_at.saturating_sub(latest.timestamp).max(1) as u64 * 1000;
+        if reports
+            .iter()
+            .any(|report| !report.latency_results.is_empty())
+        {
+            save_latency_rows(db, &mut transaction, &identity.server_id, &reports).await?;
+            transaction.commit().await?;
+        } else {
+            transaction.rollback().await?;
+        }
+        return Ok(PersistResult {
+            reports,
+            persisted: false,
+            persisted_through: persisted_before,
+            next_persist_after_ms,
+        });
+    }
+
+    save_history_rows(
+        db,
+        &mut transaction,
+        &identity.server_id,
+        std::slice::from_ref(latest),
+    )
+    .await?;
     save_latency_rows(db, &mut transaction, &identity.server_id, &reports).await?;
     let latest = reports.last().context("report batch became empty")?;
     let persisted_through = latest.timestamp;
@@ -451,8 +486,10 @@ pub async fn save_agent_batch(
     .await?;
     transaction.commit().await?;
     Ok(PersistResult {
-        reports,
+        reports: vec![latest.clone()],
+        persisted: true,
         persisted_through,
+        next_persist_after_ms: report_interval as u64 * 1000,
     })
 }
 
@@ -538,7 +575,7 @@ fn valid_agent_report(report: &AgentReport, current: i64) -> bool {
             || latency.timestamp < current - AGENT_REPORT_MAX_AGE_SECONDS
             || latency.timestamp > current + 300
             || !finite_between(latency.latency_ms, -1.0, 86_400_000.0)
-            || !finite_between(latency.packet_loss, -1.0, 100.0)
+            || !finite_between(latency.packet_loss, 0.0, 100.0)
     }) {
         return false;
     }
@@ -1135,7 +1172,8 @@ pub async fn latency_history(
          CASE WHEN SUM(CASE WHEN latency_ms>=0 THEN 1 ELSE 0 END)>0 \
            THEN SUM(CASE WHEN latency_ms>=0 THEN latency_ms ELSE 0 END) / \
                 SUM(CASE WHEN latency_ms>=0 THEN CAST(1 AS DOUBLE PRECISION) \
-                         ELSE CAST(0 AS DOUBLE PRECISION) END) ELSE -1 END AS latency_ms, \
+                         ELSE CAST(0 AS DOUBLE PRECISION) END) \
+           ELSE CAST(-1 AS DOUBLE PRECISION) END AS latency_ms, \
          AVG(packet_loss) AS packet_loss FROM ( \
            SELECT r.task_id, r.server_id, t.name, t.task_type, t.target, t.port, \
                   (r.timestamp / ?) * ? AS bucket_timestamp, r.latency_ms, r.packet_loss \
@@ -1718,6 +1756,23 @@ pub async fn theme_resolved_url(db: &Database, id: &str) -> Result<Option<String
     )
 }
 
+pub async fn theme_asset(db: &Database, id: &str) -> Result<Option<(String, String)>> {
+    let row =
+        sqlx::query(db.sql("SELECT resolved_url, version, created_at FROM themes WHERE id=?"))
+            .bind(id)
+            .fetch_optional(db.pool())
+            .await?;
+    row.map(|row| {
+        let resolved_url = row.try_get::<String, _>("resolved_url")?;
+        let version = row.try_get::<String, _>("version")?;
+        let created_at = row.try_get::<i64, _>("created_at")?;
+        let cache_key = auth::token_hash(&format!("{id}\0{resolved_url}\0{version}\0{created_at}"));
+        Ok::<_, sqlx::Error>((resolved_url, cache_key[..16].to_string()))
+    })
+    .transpose()
+    .map_err(Into::into)
+}
+
 pub async fn set_active_theme(db: &Database, id: &str) -> Result<bool> {
     if id != "builtin-nodeflare-glass" && !theme_exists(db, id).await? {
         return Ok(false);
@@ -1886,6 +1941,15 @@ mod tests {
         report.cpu_model = "x".repeat(513);
         assert!(!valid_agent_report(&report, current));
         report.cpu_model.clear();
+        report.latency_results = vec![AgentLatencyResult {
+            task_id: "failed-probe".to_string(),
+            timestamp: current,
+            latency_ms: -1.0,
+            packet_loss: 100.0,
+        }];
+        assert!(valid_agent_report(&report, current));
+        report.latency_results[0].packet_loss = -1.0;
+        assert!(!valid_agent_report(&report, current));
         report.latency_results = (0..=AGENT_REPORT_MAX_LATENCY_RESULTS)
             .map(|index| AgentLatencyResult {
                 task_id: format!("task-{index}"),
@@ -1924,7 +1988,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_persists_large_agent_batches() {
+    async fn sqlite_persists_history_at_report_interval_and_all_latency_results() {
         let db = super::super::connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();
         let (id, token) = create_server(&db, &server_input(0)).await.unwrap();
@@ -1951,8 +2015,12 @@ mod tests {
                 latency_results: vec![AgentLatencyResult {
                     task_id: latency_task_id.clone(),
                     timestamp: start + offset,
-                    latency_ms: 10.0 + offset as f64 / 100.0,
-                    packet_loss: 0.0,
+                    latency_ms: if offset == 100 {
+                        -1.0
+                    } else {
+                        10.0 + offset as f64 / 100.0
+                    },
+                    packet_loss: if offset == 100 { 100.0 } else { 0.0 },
                 }],
                 ..AgentReport::default()
             })
@@ -1975,9 +2043,96 @@ mod tests {
         .fetch_one(db.pool())
         .await
         .unwrap();
-        assert_eq!(result.reports.len(), 600);
-        assert_eq!(rows, 600);
+        assert!(result.persisted);
+        assert_eq!(result.reports.len(), 1);
+        assert_eq!(rows, 1);
         assert_eq!(latency_rows, 600);
+
+        let persisted_at = start + 599;
+        let skipped = save_agent_batch(
+            &db,
+            &identity,
+            "realtime-only",
+            &[AgentReport {
+                timestamp: persisted_at + 1,
+                ..AgentReport::default()
+            }],
+            "127.0.0.1",
+        )
+        .await
+        .unwrap();
+        assert!(!skipped.persisted);
+        assert_eq!(skipped.persisted_through, persisted_at);
+        assert_eq!(skipped.next_persist_after_ms, 59_000);
+
+        let due = save_agent_batch(
+            &db,
+            &identity,
+            "report-due",
+            &[AgentReport {
+                timestamp: persisted_at + identity.report_interval,
+                ..AgentReport::default()
+            }],
+            "127.0.0.1",
+        )
+        .await
+        .unwrap();
+        assert!(due.persisted);
+        let rows = sqlx::query_scalar::<_, i64>(
+            db.sql("SELECT COUNT(*) FROM metric_history WHERE server_id=?"),
+        )
+        .bind(&id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows, 2);
+    }
+
+    #[tokio::test]
+    async fn sqlite_reads_a_bucket_containing_only_failed_latency() {
+        let db = super::super::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let (server_id, token) = create_server(&db, &server_input(0)).await.unwrap();
+        let task_id = create_latency_task(
+            &db,
+            &LatencyTaskInput {
+                name: "Failed latency".to_string(),
+                task_type: "tcp".to_string(),
+                target: "does-not-exist.invalid".to_string(),
+                port: Some(443),
+                interval_seconds: 60,
+                default_enabled: false,
+                server_ids: vec![server_id.clone()],
+            },
+        )
+        .await
+        .unwrap();
+        let timestamp = now();
+        let identity = agent_identity(&db, &token).await.unwrap().unwrap();
+        save_agent_batch(
+            &db,
+            &identity,
+            "failed-latency",
+            &[AgentReport {
+                timestamp,
+                latency_results: vec![AgentLatencyResult {
+                    task_id: task_id.clone(),
+                    timestamp,
+                    latency_ms: -1.0,
+                    packet_loss: 100.0,
+                }],
+                ..AgentReport::default()
+            }],
+            "127.0.0.1",
+        )
+        .await
+        .unwrap();
+
+        let (_, points) = latency_history(&db, &server_id, 1).await.unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].task_id, task_id);
+        assert_eq!(points[0].latency_ms, -1.0);
+        assert_eq!(points[0].packet_loss, 100.0);
     }
 
     #[tokio::test]

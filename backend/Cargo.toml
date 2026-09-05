@@ -1,6 +1,6 @@
 [package]
 name = "nodeflare"
-version = "0.0.1"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 description = "Server monitoring system with WebSocket support"
@@ -36,6 +36,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 data-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
 url = "2.5"
+ipnet = { version = "2", features = ["serde"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 tempfile = "3"
 

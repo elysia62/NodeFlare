@@ -77,7 +77,7 @@ pub async fn server_patch(
     {
         return Err(ApiResponse::not_found("节点不存在"));
     }
-    state.push_agent_config(&id).await;
+    state.disconnect_agent(&id).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -170,6 +170,32 @@ pub async fn settings_patch(
         .map_or(current.admin_username.as_str(), str::trim)
         .to_string();
     let username_changed = next_username != user.username;
+    let turnstile_changed = input
+        .turnstile_enabled
+        .is_some_and(|value| value != current.turnstile_enabled)
+        || input
+            .turnstile_login_enabled
+            .is_some_and(|value| value != current.turnstile_login_enabled)
+        || submitted_secret(
+            input.turnstile_site_key.as_deref(),
+            &current.turnstile_site_key,
+        ) != current.turnstile_site_key
+        || submitted_secret(
+            input.turnstile_secret_key.as_deref(),
+            &current.turnstile_secret_key,
+        ) != current.turnstile_secret_key;
+    if username_changed || password_hash.is_some() || turnstile_changed {
+        super::auth::require_sensitive_auth(
+            &state,
+            &user,
+            input.current_totp_code.as_deref().unwrap_or_default(),
+            input
+                .current_password_derived
+                .as_deref()
+                .unwrap_or_default(),
+        )
+        .await?;
+    }
     if !username_changed {
         input.admin_username = None;
     }
@@ -186,7 +212,7 @@ pub async fn settings_patch(
                 &state.db,
                 &next_username,
                 state.config.session_ttl_hours,
-                &super::auth::session_device(&headers, peer),
+                &super::auth::session_device(&headers, peer, &state.config.trusted_proxies),
             )
             .await
             .map_err(ApiResponse::internal)?,
@@ -197,18 +223,14 @@ pub async fn settings_patch(
     let updated = crate::db::load_settings(&state.db)
         .await
         .map_err(ApiResponse::internal)?;
-    let mut response = Json(serde_json::json!({
-        "settings": updated.admin_view(),
-        "token": token,
-    }))
-    .into_response();
+    let mut response = Json(updated.admin_view()).into_response();
     if let Some(token) = token {
         response.headers_mut().append(
             SET_COOKIE,
             HeaderValue::from_str(&admin_cookie(
                 &token,
                 state.config.session_ttl_hours * 3600,
-                request_is_secure(&headers),
+                request_is_secure(&headers, peer, &state.config.trusted_proxies),
             ))
             .map_err(ApiResponse::internal)?,
         );
@@ -389,6 +411,7 @@ pub async fn themes_post(
     State(state): State<Arc<AppState>>,
     Json(input): Json<ThemeInput>,
 ) -> Result<Response, ApiResponse> {
+    let _themes = state.theme_operations.lock().await;
     validate_theme_metadata(&input.name, &input.description)?;
     let source_url = crate::theme::normalize_repository_url(&input.url)
         .map_err(|error| ApiResponse::bad_request(error.to_string()))?;
@@ -421,6 +444,7 @@ pub async fn themes_upload(
     Query(input): Query<ThemeUploadInput>,
     request: Request,
 ) -> Result<Response, ApiResponse> {
+    let _themes = state.theme_operations.lock().await;
     validate_theme_metadata(&input.name, &input.description)?;
     let filename = validate_theme_filename(&input.filename)?;
     if request
@@ -468,6 +492,7 @@ pub async fn theme_activate(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiResponse> {
+    let _themes = state.theme_operations.lock().await;
     validate_id(&id)?;
     if id != crate::theme::BUILTIN_THEME_ID {
         let url = crate::db::queries::theme_resolved_url(&state.db, &id)
@@ -512,6 +537,7 @@ pub async fn theme_delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiResponse> {
+    let _themes = state.theme_operations.lock().await;
     validate_id(&id)?;
     if id == crate::theme::BUILTIN_THEME_ID {
         return Err(ApiResponse::bad_request("内置主题不能删除"));
@@ -649,6 +675,8 @@ pub async fn database_reclaim(State(state): State<Arc<AppState>>) -> Result<Resp
 
 pub async fn database_migrate(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Json(input): Json<DatabaseMigrationInput>,
 ) -> Result<Response, ApiResponse> {
     if state.database_overridden {
@@ -671,8 +699,10 @@ pub async fn database_migrate(
     if target_kind == state.db.kind() {
         return Err(ApiResponse::bad_request("目标必须使用另一种数据库类型"));
     }
+    super::auth::require_sensitive_headers(&state, &user, &headers).await?;
 
     let _maintenance = state.database_maintenance.lock().await;
+    let _themes = state.theme_operations.lock().await;
     state
         .database_maintenance_active
         .store(true, Ordering::Release);
@@ -718,9 +748,15 @@ pub async fn database_restart(State(state): State<Arc<AppState>>) -> Result<Resp
         .into_response())
 }
 
-pub async fn database_backup(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+pub async fn database_backup(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Result<Response, ApiResponse> {
+    super::auth::require_sensitive_headers(&state, &user, &headers).await?;
     let _maintenance = state.database_maintenance.lock().await;
-    let archive = crate::backup::export_archive(&state.db)
+    let _themes = state.theme_operations.lock().await;
+    let archive = crate::backup::export_archive(&state.db, &state.config.theme_dir)
         .await
         .map_err(ApiResponse::internal)?;
     let disposition =
@@ -739,6 +775,7 @@ pub async fn database_backup(State(state): State<Arc<AppState>>) -> Result<Respo
 
 pub async fn database_restore(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     Query(input): Query<DatabaseRestoreInput>,
     request: Request,
 ) -> Result<Response, ApiResponse> {
@@ -764,6 +801,7 @@ pub async fn database_restore(
             "数据库备份 ZIP 不能超过 512 MiB",
         ));
     }
+    super::auth::require_sensitive_headers(&state, &user, request.headers()).await?;
     let archive = to_bytes(
         request.into_body(),
         crate::backup::DATABASE_BACKUP_MAX_BYTES,
@@ -777,14 +815,16 @@ pub async fn database_restore(
     })?;
 
     let _maintenance = state.database_maintenance.lock().await;
+    let _themes = state.theme_operations.lock().await;
     state
         .database_maintenance_active
         .store(true, Ordering::Release);
     let _operation = DatabaseOperationFlag(&state.database_maintenance_active);
     state.disconnect_agents().await;
-    let restored_rows = crate::backup::restore_archive(&state.db, &archive)
-        .await
-        .map_err(|error| ApiResponse::unprocessable(format!("恢复失败：{error}")))?;
+    let restored_rows =
+        crate::backup::restore_archive(&state.db, &state.config.theme_dir, &archive)
+            .await
+            .map_err(|error| ApiResponse::unprocessable(format!("恢复失败：{error}")))?;
     Ok(Json(serde_json::json!({"restored_rows": restored_rows})).into_response())
 }
 

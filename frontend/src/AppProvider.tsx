@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, ApiError, setToken } from "./api";
+import { api, ApiError } from "./api";
 import { demoConfig, demoExchangeRates, demoServers } from "./demo";
 import {
   advancePlayback,
@@ -142,8 +142,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string, turnstileToken: string, totpCode: string) => {
     const derived = await derivePassword(password, config.password_client_salt);
-    const result = await api.login(username.trim(), derived, turnstileToken, totpCode);
-    setToken(result.token);
+    await api.login(username.trim(), derived, turnstileToken, totpCode);
     setAccess("ok");
     await reload();
   }, [config.password_client_salt, reload]);
@@ -241,11 +240,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         servers: serversRef.current,
       })),
       onConnectedChange: (connected) => { liveConnectedRef.current = connected; },
-      onOverviewConnected: () => {
+      onWakeRequested: () => {
         const now = Date.now() / 1000;
-        const serverIds = serversRef.current
-          .filter((server) => server.timestamp && now - server.timestamp <= config.offline_threshold_seconds)
-          .map((server) => server.id);
+        const serverIds = selectedId
+          ? [selectedId]
+          : serversRef.current
+            .filter((server) => server.timestamp && now - server.timestamp <= config.offline_threshold_seconds)
+            .map((server) => server.id);
         return serverIds.length ? api.wakeServers(serverIds) : Promise.resolve();
       },
     });

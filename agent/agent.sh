@@ -8,20 +8,26 @@ STATE_ROOT="/etc/nodeflare"
 STATE_DIR="$STATE_ROOT/agent"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 OPENRC_FILE="/etc/init.d/$SERVICE_NAME"
+temporary=""
+backup_agent=""
+backup_service=""
+rollback_agent=false
+had_agent=false
+had_service=false
 
 usage() {
   cat <<'EOF'
 NodeFlare Agent 安装脚本
 
 用法：
-  agent.sh -e <NodeFlare URL> -t <Agent Token> [-i <上报间隔>] [-m <下载加速前缀>]
+  agent.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>]
   agent.sh --status
   agent.sh --uninstall
 
 参数：
   -e  NodeFlare 服务地址（必填）
   -t  后台生成的 Agent Token（必填，请勿泄露）
-  -i  初始上报间隔，15-3600 秒（默认 60）
+  -i  初始历史保存间隔，15-3600 秒（默认 60）
   -m  GitHub 下载加速前缀（可选，仅作用于 Release 下载；
       形如 https://ghproxy.net，脚本会自动拼接完整地址，摘要校验不受影响）
 EOF
@@ -34,6 +40,39 @@ log() {
 fail() {
   printf '[NodeFlare] 错误：%s\n' "$1" >&2
   exit 1
+}
+
+cleanup_agent_install() {
+  if [ "$rollback_agent" = true ]; then
+    rollback_agent=false
+    log "安装未完成，正在恢复上一版本"
+    case "$init_system" in
+      systemd) systemctl stop "$SERVICE_NAME" 2>/dev/null || true ;;
+      openrc) rc-service "$SERVICE_NAME" stop 2>/dev/null || true ;;
+    esac
+    if [ "$had_agent" = true ]; then
+      cp -p "$backup_agent" "$AGENT_FILE" 2>/dev/null || true
+    else
+      rm -f "$AGENT_FILE"
+    fi
+    service_path=$SERVICE_FILE
+    [ "$init_system" != openrc ] || service_path=$OPENRC_FILE
+    if [ "$had_service" = true ]; then
+      cp -p "$backup_service" "$service_path" 2>/dev/null || true
+    else
+      rm -f "$service_path"
+    fi
+    case "$init_system" in
+      systemd)
+        systemctl daemon-reload 2>/dev/null || true
+        [ "$had_agent" != true ] || systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+        ;;
+      openrc) [ "$had_agent" != true ] || rc-service "$SERVICE_NAME" restart 2>/dev/null || true ;;
+    esac
+  fi
+  [ -z "$temporary" ] || rm -f "$temporary"
+  [ -z "$backup_agent" ] || rm -f "$backup_agent"
+  [ -z "$backup_service" ] || rm -f "$backup_service"
 }
 
 detect_glibc_version() {
@@ -145,8 +184,8 @@ install_agent() {
     *) fail "服务地址必须使用 HTTPS；仅本机调试可使用 HTTP" ;;
   esac
   case "$endpoint" in *@*) fail "服务地址不能包含用户信息" ;; esac
-  case "$interval" in ''|*[!0-9]*) fail "上报间隔必须是整数" ;; esac
-  [ "$interval" -ge 15 ] && [ "$interval" -le 3600 ] || fail "上报间隔必须在 15-3600 秒之间"
+  case "$interval" in ''|*[!0-9]*) fail "历史保存间隔必须是整数" ;; esac
+  [ "$interval" -ge 15 ] && [ "$interval" -le 3600 ] || fail "历史保存间隔必须在 15-3600 秒之间"
   mirror=${mirror%/}
   if [ -n "$mirror" ]; then
     [ ${#mirror} -le 2048 ] || fail "下载加速前缀长度超出限制"
@@ -176,7 +215,7 @@ install_agent() {
   chmod 700 "$STATE_ROOT"
   chmod 750 "$STATE_DIR"
   temporary="$INSTALL_DIR/.agent.$$.download"
-  trap 'rm -f "$temporary"' EXIT HUP INT TERM
+  trap cleanup_agent_install EXIT HUP INT TERM
   artifact="agent-linux-$arch-$libc"
   release_api="https://api.github.com/repos/imengying/NodeFlare/releases/latest"
   log "正在获取 GitHub 最新正式版本（$artifact）"
@@ -233,12 +272,24 @@ install_agent() {
   [ "$installed_version" = "${release_tag#v}" ] || {
     fail "Release $release_tag 与 Agent 版本 $installed_version 不一致"
   }
+  backup_agent="$STATE_DIR/.agent.$$.previous"
+  service_path=$SERVICE_FILE
+  [ "$init_system" != openrc ] || service_path=$OPENRC_FILE
+  backup_service="$STATE_DIR/.service.$$.previous"
+  if [ -f "$AGENT_FILE" ]; then
+    cp -p "$AGENT_FILE" "$backup_agent"
+    had_agent=true
+  fi
+  if [ -f "$service_path" ]; then
+    cp -p "$service_path" "$backup_service"
+    had_service=true
+  fi
+  rollback_agent=true
   case "$init_system" in
     systemd) systemctl stop "$SERVICE_NAME" 2>/dev/null || true ;;
     openrc) rc-service "$SERVICE_NAME" stop 2>/dev/null || true ;;
   esac
   mv "$temporary" "$AGENT_FILE"
-  trap - EXIT HUP INT TERM
   log "正在配置并启动 $init_system 服务"
   if [ "$init_system" = "systemd" ]; then
     printf '%s\n' \
@@ -285,6 +336,9 @@ install_agent() {
       fail "NodeFlare 服务启动失败，请查看上方状态信息"
     }
   fi
+  rollback_agent=false
+  cleanup_agent_install
+  trap - EXIT HUP INT TERM
   printf '\nNodeFlare Agent 安装完成\n'
   printf '  版本：%s\n' "$installed_version"
   printf '  服务：%s（%s）\n' "$SERVICE_NAME" "$init_system"
