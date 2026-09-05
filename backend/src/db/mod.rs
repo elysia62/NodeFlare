@@ -552,14 +552,14 @@ pub async fn update_settings(
     if let Some(value) = input
         .turnstile_site_key
         .as_deref()
-        .filter(|value| value.trim() != SECRET_MASK)
+        .filter(|value| !value.trim().is_empty() && value.trim() != SECRET_MASK)
     {
         updates.push(("turnstile_site_key", value.trim().to_string()));
     }
     if let Some(value) = input
         .turnstile_secret_key
         .as_deref()
-        .filter(|value| value.trim() != SECRET_MASK)
+        .filter(|value| !value.trim().is_empty() && value.trim() != SECRET_MASK)
     {
         updates.push(("turnstile_secret_key", value.trim().to_string()));
     }
@@ -810,6 +810,52 @@ fn mask_secret(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn blank_or_masked_turnstile_keys_preserve_saved_values() {
+        let db = connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        set_setting(&db, "turnstile_site_key", "saved-site")
+            .await
+            .unwrap();
+        set_setting(&db, "turnstile_secret_key", "saved-secret")
+            .await
+            .unwrap();
+        for value in ["", "  ", SECRET_MASK] {
+            let input: SettingsInput = serde_json::from_value(serde_json::json!({
+                "turnstile_site_key": value, "turnstile_secret_key": value,
+                "turnstile_login_enabled": false
+            }))
+            .unwrap();
+            update_settings(&db, &input, None).await.unwrap();
+            assert_eq!(
+                get_setting(&db, "turnstile_site_key")
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("saved-site")
+            );
+            assert_eq!(
+                get_setting(&db, "turnstile_secret_key")
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("saved-secret")
+            );
+        }
+        let input: SettingsInput = serde_json::from_value(serde_json::json!({
+            "turnstile_site_key": "new-site", "turnstile_secret_key": "new-secret"
+        }))
+        .unwrap();
+        update_settings(&db, &input, None).await.unwrap();
+        assert_eq!(
+            get_setting(&db, "turnstile_secret_key")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("new-secret")
+        );
+    }
 
     #[tokio::test]
     async fn sqlite_file_pool_configures_every_connection() {

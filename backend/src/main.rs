@@ -155,6 +155,11 @@ async fn main() -> Result<()> {
     let bind_addr = args
         .bind
         .unwrap_or(config.bind_addr.parse().context("invalid bind_addr")?);
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .with_context(|| {
+            format!("failed to bind {bind_addr}; check whether the port is already in use")
+        })?;
 
     let database = db::connect(&config.database_url).await?;
     tracing::info!(database = ?database.kind(), "connected to database");
@@ -353,7 +358,6 @@ async fn main() -> Result<()> {
         .with_state(Arc::clone(&state));
 
     spawn_maintenance(Arc::clone(&state));
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!(address = %bind_addr, "NodeFlare listening");
     axum::serve(
         listener,

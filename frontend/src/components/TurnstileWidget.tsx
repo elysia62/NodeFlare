@@ -41,7 +41,7 @@ export function TurnstileWidget({
   onError,
 }: {
   siteKey: string;
-  action: "admin-login" | "public-dashboard";
+  action: "admin_login" | "public_dashboard";
   theme: "light" | "dark";
   resetKey?: number;
   onVerify: (token: string) => void;
@@ -58,6 +58,7 @@ export function TurnstileWidget({
   useEffect(() => {
     let cancelled = false;
     setVerified(false);
+    verifyCallback.current("");
     void loadScript().then(() => {
       if (cancelled || !target.current || !window.turnstile) return;
       target.current.replaceChildren();
@@ -74,7 +75,11 @@ export function TurnstileWidget({
           setVerified(false);
           verifyCallback.current("");
         },
-        "error-callback": () => errorCallback.current("Cloudflare 验证暂时不可用，请刷新重试"),
+        "error-callback": () => {
+          setVerified(false);
+          verifyCallback.current("");
+          errorCallback.current("Cloudflare 验证暂时不可用，请刷新重试");
+        },
       });
     }).catch((reason) => errorCallback.current(reason instanceof Error ? reason.message : "验证组件加载失败"));
     return () => {

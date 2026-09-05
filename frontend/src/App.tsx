@@ -54,7 +54,7 @@ function LoginGate() {
         <label><span>{ui(locale, "用户名", "Username")}</span><input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
         <label><span>{ui(locale, "密码", "Password")}</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
         {totpRequired ? <label><span>{ui(locale, "两步验证码", "Two-factor code")}</span><input autoFocus inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} required /></label> : null}
-        {config.turnstile_login_enabled ? <div className="dashboard-login-turnstile"><TurnstileWidget siteKey={config.turnstile_site_key} action="admin-login" theme={dark ? "dark" : "light"} resetKey={turnstileReset} onVerify={setTurnstileToken} onError={setError} /></div> : null}
+        {config.turnstile_login_enabled ? <div className="dashboard-login-turnstile"><TurnstileWidget siteKey={config.turnstile_site_key} action="admin_login" theme={dark ? "dark" : "light"} resetKey={turnstileReset} onVerify={setTurnstileToken} onError={setError} /></div> : null}
         {error ? <p className="form-error">{error}</p> : null}
         <button className="primary-btn dashboard-login-submit" disabled={busy || (totpRequired && !/^\d{6}$/.test(totpCode)) || (config.turnstile_login_enabled && !turnstileToken)} type="submit"><KeyRound size={16} />{busy ? ui(locale, "登录中", "Signing in") : ui(locale, "登录", "Sign in")}</button>
       </form>
@@ -65,6 +65,7 @@ function LoginGate() {
 function VerificationGate() {
   const { config, dark, error, setError, verify } = useApp();
   const [busy, setBusy] = useState(false);
+  const [resetKey, setResetKey] = useState(0);
   const locale = config.locale;
 
   async function run(token: string) {
@@ -85,10 +86,11 @@ function VerificationGate() {
       <SiteLogo src={config.logo_url} alt="" width="52" height="52" />
       <div><h1>{ui(locale, "访问验证", "Access verification")}</h1><p>{config.site_name}</p></div>
       {config.turnstile_site_key
-        ? <TurnstileWidget siteKey={config.turnstile_site_key} action="public-dashboard" theme={dark ? "dark" : "light"} onVerify={(token) => void run(token)} onError={setError} />
+        ? <TurnstileWidget siteKey={config.turnstile_site_key} action="public_dashboard" theme={dark ? "dark" : "light"} resetKey={resetKey} onVerify={(token) => void run(token)} onError={setError} />
         : <p className="form-error">{ui(locale, "Turnstile 尚未正确配置", "Turnstile is not configured")}</p>}
       {busy ? <span className="verification-status">{ui(locale, "正在验证", "Verifying")}</span> : null}
       {error ? <p className="form-error">{error}</p> : null}
+      {error && !busy ? <button className="secondary-btn" type="button" onClick={() => { setError(""); setResetKey((value) => value + 1); }}>{ui(locale, "重试", "Retry")}</button> : null}
     </section>
   );
 }

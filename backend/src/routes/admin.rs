@@ -1041,7 +1041,7 @@ async fn validate_settings(
 
 fn submitted_secret<'a>(submitted: Option<&'a str>, current: &'a str) -> &'a str {
     match submitted.map(str::trim) {
-        None | Some(SECRET_MASK) => current,
+        None | Some("") | Some(SECRET_MASK) => current,
         Some(value) => value,
     }
 }

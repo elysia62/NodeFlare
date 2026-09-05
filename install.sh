@@ -474,10 +474,19 @@ install_service() {
 start_server() {
   case "$init_system" in
     systemd)
-      systemctl daemon-reload
-      systemctl enable nodeflare.service >/dev/null
-      systemctl restart nodeflare.service
-      systemctl is-active --quiet nodeflare.service
+      systemctl daemon-reload || return 1
+      systemctl enable nodeflare.service >/dev/null || return 1
+      systemctl restart nodeflare.service || return 1
+      started_pid=$(systemctl show -p MainPID --value nodeflare.service) || return 1
+      [ "$started_pid" -gt 0 ] || return 1
+      attempt=1
+      while [ "$attempt" -le 10 ]; do
+        sleep 1
+        systemctl is-active --quiet nodeflare.service || return 1
+        current_pid=$(systemctl show -p MainPID --value nodeflare.service) || return 1
+        [ "$current_pid" = "$started_pid" ] || return 1
+        attempt=$((attempt + 1))
+      done
       ;;
     openrc)
       rc-update add nodeflare default >/dev/null
@@ -604,7 +613,10 @@ else
 fi
 
 if ! start_server; then
-  fail "NodeFlare 服务启动失败"
+  if [ "$init_system" = systemd ]; then
+    journalctl -u nodeflare.service -n 30 --no-pager >&2 || true
+  fi
+  fail "NodeFlare 服务启动失败，请检查配置中的 bind_addr 是否被占用及数据库连接"
 fi
 rollback_ready=false
 

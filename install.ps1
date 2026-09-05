@@ -209,6 +209,13 @@ try {
   if ($Task.State -ne "Running") {
     Stop-Install "NodeFlare 服务启动失败（状态：$($Task.State)）"
   }
+  for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
+    Start-Sleep -Seconds 1
+    $Task = Get-ScheduledTask -TaskName $TaskName
+    if ($Task.State -ne "Running") {
+      Stop-Install "NodeFlare 启动后退出，请检查 bind_addr 端口占用及数据库连接"
+    }
+  }
 
   Write-Host ""
   Write-Host "NodeFlare 安装完成"

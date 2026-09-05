@@ -118,7 +118,6 @@
 .row-actions { display: flex; align-items: center; gap: 3px; }
 .section-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; margin: -1px; clip: rect(0, 0, 0, 0); white-space: nowrap; }
-.compact-verification-input { width: 130px; min-height: 34px; padding: 6px 9px; }
 .batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; justify-content: space-between; min-height: 44px; border-block: 1px solid var(--admin-border); color: var(--admin-muted); font-size: 13px; }
 .select-all { display: inline-flex; align-items: center; flex-direction: row; gap: 7px; color: var(--admin-text); font-size: 13px; }
 
@@ -163,7 +162,6 @@
 .copy-secret-btn { min-width: 102px; flex: 0 0 auto; justify-content: center; transition: color .15s ease, border-color .15s ease, background-color .15s ease; }
 .copy-secret-btn.copied { border-color: color-mix(in srgb, var(--admin-success) 34%, var(--admin-border)); color: var(--admin-success); background: var(--admin-success-bg); }
 .two-factor-actions { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 9px; }
-.two-factor-actions label { min-width: min(220px, 100%); flex: 1; }
 .two-factor-generate-btn { margin-left: auto; }
 .login-devices-panel { display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--admin-border); border-radius: 7px; padding: 14px; background: var(--admin-surface); }
 .login-devices-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -255,6 +253,12 @@
 .latency-task-name small, .latency-task-meta { color: var(--admin-muted); font-size: 12px; }
 .latency-editor { display: flex; width: min(620px, 100%); max-height: calc(100dvh - 48px); overflow: auto; flex-direction: column; gap: 16px; border: 1px solid var(--admin-border); border-radius: 8px; padding: 22px; color: var(--admin-text); background: var(--admin-surface); }
 .latency-editor > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.latency-editor > * { flex-shrink: 0; }
+.password-field { position: relative; min-width: 0; }
+.password-field input { padding-right: 44px; }
+.password-field .icon-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px; }
+.submodal-backdrop.verification-backdrop { z-index: 100; align-items: center; padding: 16px; }
+.verification-backdrop .verification-modal { width: min(400px, 100%); max-height: calc(100dvh - 32px); border: 1px solid var(--admin-border); border-radius: 8px; }
 .task-type-control { height: 36px; }
 .task-type-control button { flex: 1; }
 .server-picker { overflow: hidden; border: 1px solid var(--admin-border-strong); border-radius: 7px; }
@@ -395,8 +399,7 @@
 .remote-server-picker .server-picker-list { max-height: 280px; }
 .remote-server-picker-row { grid-template-columns: 20px 9px minmax(0, 1fr); }
 .remote-server-picker-row > .status-dot { width: 8px; height: 8px; }
-.remote-confirm-row { display: grid; align-items: end; gap: 12px; grid-template-columns: minmax(180px, 320px) auto; justify-content: space-between; }
-.remote-confirm-row label { width: 100%; }
+.remote-confirm-row { display: flex; justify-content: flex-end; }
 .remote-submit { min-width: 160px; min-height: 40px; }
 .remote-results { margin-top: 22px; border-top: 1px solid var(--admin-border); padding-top: 20px; }
 .remote-results > .section-head { margin-bottom: 12px; }
@@ -431,11 +434,9 @@
 @keyframes remote-refresh-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 639px) {
-  .remote-confirm-row { grid-template-columns: 1fr; }
   .remote-submit { width: 100%; }
   .database-section-head .section-actions, .usage-head-actions { width: 100%; }
   .database-section-head .section-actions > label { width: 100%; }
-  .compact-verification-input { width: 100%; }
   .database-section-head .section-actions > button, .usage-head-actions > button { flex: 1; }
   .database-storage { align-items: stretch; flex-direction: column; }
   .database-storage button { width: 100%; }

@@ -28,7 +28,7 @@ export function useDialog<T extends HTMLElement>(open: boolean, onClose: () => v
       ? document.activeElement
       : null;
     const focusFrame = window.requestAnimationFrame(() => {
-      const initial = dialogElement.querySelector<HTMLElement>("[autofocus]")
+      const initial = dialogElement.querySelector<HTMLElement>("[autofocus], [data-dialog-autofocus]")
         ?? focusableElements(dialogElement)[0]
         ?? dialogElement;
       initial.focus();
