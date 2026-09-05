@@ -7,36 +7,48 @@ interface LiveSample {
 
 export interface LiveMetrics {
   timestamp: number;
-  displayTimestamp: number;
   metrics: Partial<Server>;
   latencyResults?: LiveLatencyResult[];
 }
 
 export type LiveMetricsMap = Record<string, LiveMetrics>;
 
-export type PlaybackBuffer = Map<string, LiveSample[]>;
-
 export interface BatchUpdate {
   serverId?: string;
   samples?: LiveSample[];
-  reportAgeMs?: number;
 }
 
-const MAX_PLAYBACK_SAMPLES_PER_SERVER = 600;
 const MAX_LIVE_LATENCY_RESULTS = 4096;
 
 export function mergeLiveResults(
   previous: LiveLatencyResult[] | undefined,
-  incoming: LiveLatencyResult[],
+  incoming: readonly LiveLatencyResult[],
 ): LiveLatencyResult[] {
   const results = new Map<string, LiveLatencyResult>();
   for (const result of [...(previous ?? []), ...incoming]) {
-    if (!result.task_id || !Number.isFinite(result.timestamp) || result.timestamp <= 0) continue;
+    if (!result?.task_id || !Number.isFinite(result.timestamp) || result.timestamp <= 0
+      || !Number.isFinite(result.latency_ms) || !Number.isFinite(result.packet_loss)) continue;
     results.set(`${result.task_id}:${result.timestamp}`, result);
   }
-  return Array.from(results.values())
+  const merged = Array.from(results.values())
     .sort((left, right) => left.timestamp - right.timestamp)
     .slice(-MAX_LIVE_LATENCY_RESULTS);
+  return previous && merged.length === previous.length && merged.every((result, index) => {
+    const before = previous[index];
+    return result.task_id === before.task_id && result.timestamp === before.timestamp
+      && result.latency_ms === before.latency_ms && result.packet_loss === before.packet_loss;
+  }) ? previous : merged;
+}
+
+export function liveLatencySamples(
+  definitions: readonly LatencySample[],
+  results: readonly LiveLatencyResult[] = [],
+): LatencySample[] {
+  const tasks = new Map(definitions.map((definition) => [definition.task_id, definition]));
+  return results.flatMap((result) => {
+    const definition = tasks.get(result.task_id);
+    return definition ? [{ ...definition, ...result }] : [];
+  });
 }
 
 export function mergeLiveLatency(server: Server, results: LiveLatencyResult[]): LatencySample[] {
@@ -61,89 +73,44 @@ export function mergeLiveLatency(server: Server, results: LiveLatencyResult[]): 
   return changed ? merged : server.latency;
 }
 
-function splitSample(sample: LiveSample) {
+function sampleMetrics(sample: LiveSample) {
   const metrics = { ...sample.data };
-  const latencyResults = Array.isArray(metrics.latency_results) ? metrics.latency_results : [];
   delete metrics.latency_results;
-  return { metrics, latencyResults };
+  return metrics;
 }
 
 export function applyBatch(
   current: LiveMetricsMap,
   updates: readonly BatchUpdate[],
-  context: { cached: boolean; playback: PlaybackBuffer; servers: readonly Server[] },
+  servers: readonly Server[],
 ): LiveMetricsMap {
-  const next = { ...current };
+  let next = current;
+  const knownServers = new Map(servers.map((server) => [server.id, server]));
   for (const update of updates) {
-    if (!update.serverId || !Array.isArray(update.samples) || !update.samples.length) continue;
+    if (!update?.serverId || !Array.isArray(update.samples) || !update.samples.length) continue;
+    const server = knownServers.get(update.serverId);
+    if (!server) continue;
     const samples = update.samples
-      .filter((sample) => Number.isFinite(sample.ts) && sample.data && typeof sample.data === "object")
+      .filter((sample) => sample && Number.isFinite(sample.ts) && sample.ts > 0
+        && sample.data && typeof sample.data === "object" && !Array.isArray(sample.data))
       .sort((left, right) => left.ts - right.ts);
+    if (!samples.length) continue;
     const previous = next[update.serverId];
-    const pending = context.playback.get(update.serverId) ?? [];
-    const persistedTimestamp = context.servers.find((server) => server.id === update.serverId)?.timestamp ?? 0;
-    const appliedTimestamp = Math.max(previous?.timestamp ?? 0, persistedTimestamp);
-    const seen = new Set<number>(pending.map((sample) => sample.ts));
-    const incoming = samples.filter((sample) => sample.ts > appliedTimestamp && !seen.has(sample.ts));
-    if (!incoming.length) continue;
-
-    const reportAgeSeconds = context.cached && Number.isFinite(update.reportAgeMs)
-      ? Math.max(0, update.reportAgeMs! / 1000)
-      : 0;
-    const cursor = context.cached
-      ? Math.max(previous?.displayTimestamp ?? 0, incoming[incoming.length - 1].ts + reportAgeSeconds)
-      : previous?.displayTimestamp ?? incoming[0].ts;
-    const all = [...pending, ...incoming]
-      .sort((left, right) => left.ts - right.ts)
-      .slice(-MAX_PLAYBACK_SAMPLES_PER_SERVER);
-    let selected: LiveSample | undefined;
-    while (all.length && all[0].ts <= cursor) selected = all.shift();
-    if (selected) {
-      const { metrics, latencyResults } = splitSample(selected);
-      next[update.serverId] = {
-        timestamp: selected.ts,
-        displayTimestamp: cursor,
-        metrics,
-        latencyResults: latencyResults.length
-          ? mergeLiveResults(previous?.latencyResults, latencyResults)
-          : previous?.latencyResults,
-      };
-    } else if (!previous) {
-      continue;
-    }
-    if (all.length) context.playback.set(update.serverId, all);
-    else context.playback.delete(update.serverId);
-  }
-  return next;
-}
-
-export function advancePlayback(
-  current: LiveMetricsMap,
-  playback: PlaybackBuffer,
-  elapsedSeconds: number,
-): LiveMetricsMap {
-  if (!playback.size) return current;
-  const next = { ...current };
-  for (const [serverId, samples] of playback) {
-    const state = next[serverId];
-    if (!state || !samples.length) continue;
-    const displayTimestamp = state.displayTimestamp + elapsedSeconds;
-    let selected: LiveSample | undefined;
-    while (samples.length && samples[0].ts <= displayTimestamp) selected = samples.shift();
-    if (selected) {
-      const { metrics, latencyResults } = splitSample(selected);
-      next[serverId] = {
-        timestamp: selected.ts,
-        displayTimestamp,
-        metrics,
-        latencyResults: latencyResults.length
-          ? mergeLiveResults(state.latencyResults, latencyResults)
-          : state.latencyResults,
-      };
-    } else {
-      next[serverId] = { ...state, displayTimestamp };
-    }
-    if (!samples.length) playback.delete(serverId);
+    const latest = samples[samples.length - 1];
+    const newer = latest.ts > Math.max(previous?.timestamp ?? 0, server.timestamp ?? 0);
+    // Metrics use the newest snapshot; latency history retains results from the whole batch.
+    const incomingLatency = samples.flatMap((sample) => Array.isArray(sample.data.latency_results)
+      ? sample.data.latency_results : []);
+    const latencyResults = incomingLatency.length
+      ? mergeLiveResults(previous?.latencyResults, incomingLatency)
+      : previous?.latencyResults;
+    if (!newer && latencyResults === previous?.latencyResults) continue;
+    if (next === current) next = { ...current };
+    next[update.serverId] = {
+      timestamp: newer ? latest.ts : previous?.timestamp ?? 0,
+      metrics: newer ? sampleMetrics(latest) : previous?.metrics ?? {},
+      latencyResults,
+    };
   }
   return next;
 }
@@ -168,12 +135,8 @@ export function mergeServerLive(
     : merged;
 }
 
-export function pruneStalePlayback(playback: PlaybackBuffer, servers: readonly Server[]) {
-  for (const server of servers) {
-    const samples = playback.get(server.id);
-    if (!samples || !server.timestamp) continue;
-    const fresh = samples.filter((sample) => sample.ts > server.timestamp!);
-    if (fresh.length) playback.set(server.id, fresh);
-    else playback.delete(server.id);
-  }
+export function pruneLiveMetrics(current: LiveMetricsMap, servers: readonly Server[]): LiveMetricsMap {
+  const ids = new Set(servers.map((server) => server.id));
+  const entries = Object.entries(current).filter(([id]) => ids.has(id));
+  return entries.length === Object.keys(current).length ? current : Object.fromEntries(entries);
 }

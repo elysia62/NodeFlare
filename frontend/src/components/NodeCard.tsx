@@ -18,7 +18,7 @@ import {
   percent,
   trafficUsed,
 } from "../format";
-import type { Config, Server } from "../types";
+import type { Config, LiveLatencyResult, Server } from "../types";
 import { ui } from "../locale";
 import { carrierSelection, themeToggle } from "../theme";
 import { useNodeLatency, type CarrierLatencyRow, type LatencyBar } from "../hooks/useNodeLatency";
@@ -92,7 +92,12 @@ function CarrierPanel({ label, rows, kind, empty }: {
   );
 }
 
-export function NodeCard({ server, config, onOpen }: { server: Server; config: Config; onOpen: () => void }) {
+export function NodeCard({ server, config, liveLatencyResults, onOpen }: {
+  server: Server;
+  config: Config;
+  liveLatencyResults?: LiveLatencyResult[];
+  onOpen: () => void;
+}) {
   const threshold = config.offline_threshold_seconds;
   const online = isOnline(server, threshold);
   const memory = percent(server.mem_used, server.mem_total);
@@ -101,7 +106,7 @@ export function NodeCard({ server, config, onOpen }: { server: Server; config: C
   const traffic = server.traffic_limit > 0 ? Math.min(100, (usedTraffic / server.traffic_limit) * 100) : 0;
   const locale = config.locale;
   const showCarriers = themeToggle(config, "showCarrierLatency", false);
-  const quality = useNodeLatency(server, config.show_latency, locale, showCarriers ? carrierSelection(config) : null);
+  const quality = useNodeLatency(server, config.show_latency, locale, showCarriers ? carrierSelection(config) : null, liveLatencyResults);
   const price = formatPrice(server, locale);
   const remainingValue = remainingAssetValue(server.price, server.billing_cycle, server.expires_at);
   const showExpiryPanel = config.show_expiry || config.show_price;

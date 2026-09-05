@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
-  advancePlayback,
   applyBatch,
+  liveLatencySamples,
   mergeLiveLatency,
   mergeLiveResults,
   mergeServerLive,
-  pruneStalePlayback,
+  pruneLiveMetrics,
   type LiveMetricsMap,
-  type PlaybackBuffer,
 } from "./live";
 import type { Server } from "./types";
 
@@ -46,8 +45,7 @@ function server(overrides: Partial<Server> = {}): Server {
 }
 
 describe("applyBatch", () => {
-  test("shows the first sample immediately and buffers the rest", () => {
-    const playback: PlaybackBuffer = new Map();
+  test("shows the newest sample immediately without replaying the batch", () => {
     const next = applyBatch({}, [{
       serverId: "s1",
       samples: [
@@ -55,92 +53,80 @@ describe("applyBatch", () => {
         { ts: 1_011, data: { cpu: 12 } },
         { ts: 1_012, data: { cpu: 13 } },
       ],
-    }], { cached: false, playback, servers: [server()] });
+    }], [server()]);
 
-    expect(next.s1.timestamp).toBe(1_010);
-    expect(next.s1.metrics.cpu).toBe(11);
-    expect(playback.get("s1")?.map((sample) => sample.ts)).toEqual([1_011, 1_012]);
+    expect(next.s1.timestamp).toBe(1_012);
+    expect(next.s1.metrics.cpu).toBe(13);
   });
 
   test("ignores samples already covered by the persisted row", () => {
-    const playback: PlaybackBuffer = new Map();
-    const next = applyBatch({}, [{
+    const current = {};
+    const next = applyBatch(current, [{
       serverId: "s1",
       samples: [{ ts: 900, data: { cpu: 5 } }],
-    }], { cached: false, playback, servers: [server({ timestamp: 1_000 })] });
+    }], [server({ timestamp: 1_000 })]);
 
     expect(next.s1).toBeUndefined();
-    expect(playback.size).toBe(0);
+    expect(next).toBe(current);
   });
 
-  test("skips ahead on a cached replay instead of re-playing the window", () => {
-    const playback: PlaybackBuffer = new Map();
-    const next = applyBatch({}, [{
+  test("catches up immediately after a gap and ignores out-of-order samples", () => {
+    const current: LiveMetricsMap = {
+      s1: { timestamp: 1_010, metrics: { cpu: 11 } },
+    };
+    const next = applyBatch(current, [{
       serverId: "s1",
-      samples: [{ ts: 1_010, data: { cpu: 11 } }, { ts: 1_070, data: { cpu: 12 } }],
-      reportAgeMs: 5_000,
-    }], { cached: true, playback, servers: [server()] });
+      samples: [{ ts: 1_070, data: { cpu: 12 } }, { ts: 1_010, data: { cpu: 11 } }],
+    }], [server()]);
 
     expect(next.s1.timestamp).toBe(1_070);
-    expect(playback.size).toBe(0);
+    expect(next.s1.metrics.cpu).toBe(12);
+    expect(current.s1.timestamp).toBe(1_010);
   });
 
-  test("does not re-buffer a sample it is already holding", () => {
-    const playback: PlaybackBuffer = new Map([["s1", [{ ts: 1_011, data: { cpu: 12 } }]]]);
+  test("reuses the state for duplicate messages and leaves other nodes untouched", () => {
     const current: LiveMetricsMap = {
-      s1: { timestamp: 1_010, displayTimestamp: 1_010, metrics: { cpu: 11 } },
+      s1: { timestamp: 1_010, metrics: { cpu: 11 } },
+      s2: { timestamp: 1_010, metrics: { cpu: 20 } },
     };
-    applyBatch(current, [{
+    const duplicate = [{ serverId: "s1", samples: [{ ts: 1_010, data: { cpu: 11 } }] }];
+    expect(applyBatch(current, duplicate, [server()])).toBe(current);
+    const next = applyBatch(current, [{
       serverId: "s1",
-      samples: [{ ts: 1_011, data: { cpu: 12 } }, { ts: 1_012, data: { cpu: 13 } }],
-    }], { cached: false, playback, servers: [server()] });
-
-    expect(playback.get("s1")?.map((sample) => sample.ts)).toEqual([1_011, 1_012]);
+      samples: [{ ts: 1_011, data: { cpu: 12 } }],
+    }], [server()]);
+    expect(next.s2).toBe(current.s2);
   });
 
   test("keeps latency results out of the metric patch", () => {
-    const playback: PlaybackBuffer = new Map();
     const next = applyBatch({}, [{
       serverId: "s1",
       samples: [{
         ts: 1_010,
         data: { cpu: 11, latency_results: [{ task_id: "t1", timestamp: 1_010, latency_ms: 20, packet_loss: 0 }] },
       }],
-    }], { cached: false, playback, servers: [server()] });
+    }], [server()]);
 
     expect("latency_results" in next.s1.metrics).toBe(false);
     expect(next.s1.latencyResults).toHaveLength(1);
   });
-});
-
-describe("advancePlayback", () => {
-  test("releases a buffered sample once the cursor reaches it", () => {
-    const playback: PlaybackBuffer = new Map([["s1", [{ ts: 1_011, data: { cpu: 12 } }]]]);
-    const next = advancePlayback(
-      { s1: { timestamp: 1_010, displayTimestamp: 1_010, metrics: { cpu: 11 } } },
-      playback,
-      1,
-    );
-    expect(next.s1.timestamp).toBe(1_011);
-    expect(next.s1.metrics.cpu).toBe(12);
-    expect(playback.size).toBe(0);
+  test("retains all latency samples even when metrics are already persisted", () => {
+    const updates = [{ serverId: "s1", samples: [100, 200, 300].map((timestamp) => ({
+      ts: timestamp,
+      data: { cpu: timestamp, latency_results: [{ task_id: "t1", timestamp, latency_ms: timestamp, packet_loss: 0 }] },
+    })) }];
+    const next = applyBatch({}, updates, [server()]);
+    expect(next.s1.latencyResults?.map((sample) => sample.timestamp)).toEqual([100, 200, 300]);
+    expect(next.s1.metrics.cpu).toBeUndefined();
+    expect(applyBatch(next, updates, [server()])).toBe(next);
   });
 
-  test("advances only the cursor when nothing is due yet", () => {
-    const playback: PlaybackBuffer = new Map([["s1", [{ ts: 1_020, data: { cpu: 12 } }]]]);
-    const next = advancePlayback(
-      { s1: { timestamp: 1_010, displayTimestamp: 1_010, metrics: { cpu: 11 } } },
-      playback,
-      1,
-    );
-    expect(next.s1.timestamp).toBe(1_010);
-    expect(next.s1.displayTimestamp).toBe(1_011);
-    expect(playback.get("s1")).toHaveLength(1);
-  });
-
-  test("is a no-op with an empty buffer", () => {
-    const current: LiveMetricsMap = { s1: { timestamp: 1, displayTimestamp: 1, metrics: {} } };
-    expect(advancePlayback(current, new Map(), 1)).toBe(current);
+  test("ignores removed nodes and invalid timestamps", () => {
+    const current = {};
+    expect(applyBatch(current, [
+      { serverId: "removed", samples: [{ ts: 1_010, data: { cpu: 10 } }] },
+      { serverId: "s1", samples: [{ ts: NaN, data: {} }, { ts: -1, data: {} }] },
+    ], [server()])).toBe(current);
   });
 });
 
@@ -148,7 +134,7 @@ describe("mergeServerLive", () => {
   test("applies a newer live sample and ticks uptime", () => {
     const merged = mergeServerLive(
       server({ timestamp: 1_000, uptime: 100 }),
-      { timestamp: 1_010, displayTimestamp: 1_010, metrics: { cpu: 42 } },
+      { timestamp: 1_010, metrics: { cpu: 42 } },
       1_015_000,
       180,
     );
@@ -159,7 +145,7 @@ describe("mergeServerLive", () => {
   test("keeps persisted metrics when the live sample is older", () => {
     const merged = mergeServerLive(
       server({ timestamp: 2_000, cpu: 10, uptime: null }),
-      { timestamp: 1_000, displayTimestamp: 1_000, metrics: { cpu: 99 } },
+      { timestamp: 1_000, metrics: { cpu: 99 } },
       2_000_000,
       180,
     );
@@ -209,19 +195,25 @@ describe("mergeLiveResults / mergeLiveLatency", () => {
   });
 });
 
-describe("pruneStalePlayback", () => {
-  test("drops buffered samples the persisted row already covers", () => {
-    const playback: PlaybackBuffer = new Map([["s1", [
-      { ts: 900, data: {} },
-      { ts: 1_100, data: {} },
-    ]]]);
-    pruneStalePlayback(playback, [server({ timestamp: 1_000 })]);
-    expect(playback.get("s1")?.map((sample) => sample.ts)).toEqual([1_100]);
+describe("pruneLiveMetrics", () => {
+  test("removes deleted nodes while preserving retained state", () => {
+    const current: LiveMetricsMap = { s1: { timestamp: 1, metrics: {} }, removed: { timestamp: 1, metrics: {} } };
+    const next = pruneLiveMetrics(current, [server()]);
+    expect(Object.keys(next)).toEqual(["s1"]);
+    expect(next.s1).toBe(current.s1);
+    expect(pruneLiveMetrics(next, [server()])).toBe(next);
+    expect(current.removed).toBeDefined();
   });
+});
 
-  test("removes the entry entirely once nothing is left", () => {
-    const playback: PlaybackBuffer = new Map([["s1", [{ ts: 900, data: {} }]]]);
-    pruneStalePlayback(playback, [server({ timestamp: 1_000 })]);
-    expect(playback.has("s1")).toBe(false);
-  });
+test("live latency samples retain task definitions and exclude unknown tasks", () => {
+  const definition = {
+    task_id: "t1", server_id: "s1", name: "Tokyo", task_type: "icmp" as const,
+    target: "example.com", port: null, timestamp: 100, latency_ms: 50, packet_loss: 0,
+  };
+  const samples = liveLatencySamples([definition], [
+    { task_id: "t1", timestamp: 200, latency_ms: 12, packet_loss: 0 },
+    { task_id: "deleted", timestamp: 300, latency_ms: 99, packet_loss: 0 },
+  ]);
+  expect(samples).toEqual([{ ...definition, timestamp: 200, latency_ms: 12 }]);
 });

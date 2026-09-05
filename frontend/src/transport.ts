@@ -5,7 +5,9 @@ const RECONNECT_BASE_DELAY = 1_000;
 const RECONNECT_MAX_DELAY = 30_000;
 const RECONNECT_JITTER = 0.2;
 const STABLE_CONNECTION_MS = 10_000;
+const CONNECTION_TIMEOUT = 10_000;
 const HEARTBEAT_INTERVAL = 30_000;
+const HEARTBEAT_TIMEOUT = 10_000;
 
 export function reconnectDelay(attempt: number, randomValue = Math.random()) {
   const exponent = Math.max(0, Math.min(30, Math.floor(attempt)));
@@ -17,7 +19,7 @@ export function reconnectDelay(attempt: number, randomValue = Math.random()) {
 
 export interface LiveTransportHandlers {
   onServer: (server: Server) => void;
-  onBatch: (updates: BatchUpdate[], cached: boolean) => void;
+  onBatch: (updates: BatchUpdate[]) => void;
   onConnectedChange: (connected: boolean) => void;
   onWakeRequested: () => Promise<void>;
 }
@@ -43,9 +45,11 @@ export function connectLive(
   let suspended = document.hidden || navigator.onLine === false;
   let socket: WebSocket | null = null;
   let reconnectTimer: number | null = null;
+  let deadlineTimer: number | null = null;
+  let heartbeatTimer: number | null = null;
   let reconnectAttempt = 0;
   let connected = false;
-  let openedAt = 0;
+  let openedAt: number | null = null;
   let wakeInFlight = false;
 
   const setConnected = (next: boolean) => {
@@ -61,10 +65,10 @@ export function connectLive(
   };
 
   const wakeAgents = () => {
-    if (cancelled || wakeInFlight) return;
+    if (cancelled || suspended || wakeInFlight) return;
     wakeInFlight = true;
     void Promise.resolve()
-      .then(handlers.onWakeRequested)
+      .then(() => { if (!cancelled && !suspended) return handlers.onWakeRequested(); })
       .catch(() => {})
       .finally(() => { wakeInFlight = false; });
   };
@@ -79,6 +83,42 @@ export function connectLive(
     }, delay);
   };
 
+  const clearDeadline = () => {
+    if (deadlineTimer !== null) window.clearTimeout(deadlineTimer);
+    deadlineTimer = null;
+  };
+
+  const closeCurrentSocket = (retry = false) => {
+    const current = socket;
+    socket = null;
+    if (openedAt !== null && Date.now() - openedAt >= STABLE_CONNECTION_MS) reconnectAttempt = 0;
+    openedAt = null;
+    clearDeadline();
+    if (heartbeatTimer !== null) window.clearTimeout(heartbeatTimer);
+    heartbeatTimer = null;
+    if (current) {
+      current.onopen = null;
+      current.onclose = null;
+      current.onerror = null;
+      current.onmessage = null;
+      try { if (current.readyState < WebSocket.CLOSING) current.close(); } catch {}
+    }
+    setConnected(false);
+    if (retry) scheduleReconnect();
+  };
+
+  const heartbeat = () => {
+    heartbeatTimer = null;
+    if (cancelled || suspended || socket?.readyState !== WebSocket.OPEN) return;
+    deadlineTimer = window.setTimeout(() => closeCurrentSocket(true), HEARTBEAT_TIMEOUT);
+    try {
+      socket.send("ping");
+      wakeAgents();
+    } catch {
+      closeCurrentSocket(true);
+    }
+  };
+
   const connect = () => {
     if (cancelled || suspended || socket) return;
 
@@ -90,30 +130,30 @@ export function connectLive(
       return;
     }
     socket = current;
+    deadlineTimer = window.setTimeout(() => closeCurrentSocket(true), CONNECTION_TIMEOUT);
     current.onopen = () => {
       if (socket !== current || cancelled || suspended) return;
+      clearDeadline();
       openedAt = Date.now();
       setConnected(true);
-      wakeAgents();
+      heartbeat();
     };
     current.onclose = () => {
       if (socket !== current) return;
-      socket = null;
-      setConnected(false);
-      if (openedAt && Date.now() - openedAt >= STABLE_CONNECTION_MS) {
-        reconnectAttempt = 0;
-      }
-      openedAt = 0;
-      scheduleReconnect();
+      closeCurrentSocket(true);
     };
     current.onerror = () => {
       if (socket !== current) return;
-      setConnected(false);
-      if (current.readyState < WebSocket.CLOSING) current.close();
+      closeCurrentSocket(true);
     };
     current.onmessage = (event) => {
       if (socket !== current) return;
-      if (event.data === "pong") return;
+      if (event.data === "pong") {
+        clearDeadline();
+        if (heartbeatTimer !== null) window.clearTimeout(heartbeatTimer);
+        heartbeatTimer = window.setTimeout(heartbeat, HEARTBEAT_INTERVAL);
+        return;
+      }
       try {
         const message = JSON.parse(event.data);
         if (message.type === "server" && message.server?.id) {
@@ -121,24 +161,10 @@ export function connectLive(
           return;
         }
         if (message.type === "batchUpdate" && Array.isArray(message.updates)) {
-          handlers.onBatch(message.updates as BatchUpdate[], message.cached === true);
+          handlers.onBatch(message.updates as BatchUpdate[]);
         }
       } catch {}
     };
-  };
-
-  const closeCurrentSocket = () => {
-    const current = socket;
-    socket = null;
-    openedAt = 0;
-    if (current) {
-      current.onopen = null;
-      current.onclose = null;
-      current.onerror = null;
-      current.onmessage = null;
-      if (current.readyState < WebSocket.CLOSING) current.close();
-    }
-    setConnected(false);
   };
 
   const updateSuspension = () => {
@@ -158,12 +184,6 @@ export function connectLive(
   };
 
   connect();
-  const heartbeat = window.setInterval(() => {
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send("ping");
-      wakeAgents();
-    }
-  }, HEARTBEAT_INTERVAL);
   document.addEventListener("visibilitychange", updateSuspension);
   window.addEventListener("online", updateSuspension);
   window.addEventListener("offline", updateSuspension);
@@ -173,7 +193,6 @@ export function connectLive(
     document.removeEventListener("visibilitychange", updateSuspension);
     window.removeEventListener("online", updateSuspension);
     window.removeEventListener("offline", updateSuspension);
-    window.clearInterval(heartbeat);
     clearReconnect();
     closeCurrentSocket();
   };

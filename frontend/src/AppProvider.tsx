@@ -2,12 +2,11 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, ApiError } from "./api";
 import { demoConfig, demoExchangeRates, demoServers } from "./demo";
 import {
-  advancePlayback,
   applyBatch,
   mergeServerLive,
-  pruneStalePlayback,
+  pruneLiveMetrics,
+  type BatchUpdate,
   type LiveMetricsMap,
-  type PlaybackBuffer,
 } from "./live";
 import { ui } from "./locale";
 import { useFavicon, useStoredAppearance, useSystemDark } from "./hooks/useBrowserAppearance";
@@ -27,7 +26,6 @@ const demoViewConfig: Config = demoMode && search.has("carrier")
   ? { ...demoConfig, theme_options: { ...demoConfig.theme_options, showCarrierLatency: true } }
   : demoConfig;
 const defaultConfig: Config = { ...demoViewConfig, site_description: "", site_name: "" };
-const MAX_CLOCK_STEP_MS = 5_000;
 
 type Access = "ok" | "login" | "turnstile";
 
@@ -82,7 +80,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [appearance, setAppearance] = useStoredAppearance("nodeflare-theme");
   const systemDark = useSystemDark();
   const liveConnectedRef = useRef(false);
-  const playbackRef = useRef<PlaybackBuffer>(new Map());
   const serversRef = useRef<Server[]>([]);
   const localeRef = useRef(config.locale);
   const reloadQueueRef = useRef<ReturnType<typeof createRefreshQueue> | null>(null);
@@ -111,11 +108,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const result = await api.bootstrap();
         setConfig(result.config);
         setConfigReady(true);
+        serversRef.current = result.servers;
         setServers(result.servers);
         setExchangeRates(result.exchange_rates);
         setAccess(result.access);
         if (result.access !== "ok") {
-          playbackRef.current.clear();
           setLiveMetrics({});
         }
         setError("");
@@ -123,8 +120,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const status = reason instanceof ApiError ? reason.status : 0;
         if (status === 401 || status === 403) {
           setAccess(status === 401 ? "login" : "turnstile");
+          serversRef.current = [];
           setServers([]);
-          playbackRef.current.clear();
           setLiveMetrics({});
           setError(status === 403 && reason instanceof Error ? reason.message : "");
         } else {
@@ -157,7 +154,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     serversRef.current = servers;
-    pruneStalePlayback(playbackRef.current, servers);
+    setLiveMetrics((current) => pruneLiveMetrics(current, servers));
   }, [servers]);
 
   useEffect(() => {
@@ -218,39 +215,65 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [access, reload]);
 
   useEffect(() => {
-    let previous = Date.now();
-    const timer = window.setInterval(() => {
-      const current = Date.now();
-      const elapsed = Math.max(0, Math.min(MAX_CLOCK_STEP_MS, current - previous));
-      previous = current;
-      setClockNow(current);
-      if (elapsed === 0) return;
-      setLiveMetrics((currentMetrics) => advancePlayback(currentMetrics, playbackRef.current, elapsed / 1000));
-    }, 1_000);
-    return () => clearInterval(timer);
+    let timer: number | undefined;
+    const sync = () => {
+      window.clearInterval(timer);
+      timer = undefined;
+      if (document.hidden || navigator.onLine === false) return;
+      setClockNow(Date.now());
+      timer = window.setInterval(() => setClockNow(Date.now()), 1_000);
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("online", sync);
+    window.addEventListener("offline", sync);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("online", sync);
+      window.removeEventListener("offline", sync);
+    };
   }, []);
 
   useEffect(() => {
-    if (loading || access !== "ok" || demoMode) return;
-    return connectLive({ serverId: selectedId }, {
+    if (!configReady || access !== "ok" || demoMode) return;
+    let active = true;
+    let frame: number | null = null;
+    let pending: BatchUpdate[] = [];
+    const disconnect = connectLive({ serverId: selectedId }, {
       onServer: (server) => setServers((current) => current.map((entry) => entry.id === server.id ? server : entry)),
-      onBatch: (updates, cached) => setLiveMetrics((current) => applyBatch(current, updates, {
-        cached,
-        playback: playbackRef.current,
-        servers: serversRef.current,
-      })),
-      onConnectedChange: (connected) => { liveConnectedRef.current = connected; },
-      onWakeRequested: () => {
-        const now = Date.now() / 1000;
-        const serverIds = selectedId
-          ? [selectedId]
-          : serversRef.current
-            .filter((server) => server.timestamp && now - server.timestamp <= config.offline_threshold_seconds)
-            .map((server) => server.id);
-        return serverIds.length ? api.wakeServers(serverIds) : Promise.resolve();
+      onBatch: (updates) => {
+        pending.push(...updates);
+        if (frame !== null) return;
+        frame = window.requestAnimationFrame(() => {
+          frame = null;
+          const batch = pending;
+          pending = [];
+          setLiveMetrics((current) => applyBatch(current, batch, serversRef.current));
+        });
+      },
+      onConnectedChange: (connected) => {
+        liveConnectedRef.current = connected;
+        if (active && !connected && !document.hidden && navigator.onLine !== false) {
+          void reload(true);
+        }
+      },
+      onWakeRequested: async () => {
+        const serverIds = selectedId ? [selectedId] : serversRef.current.map((server) => server.id);
+        for (let offset = 0; offset < serverIds.length; offset += 500) {
+          // The wake endpoint accepts one request per second and at most 500 nodes.
+          if (offset > 0) await new Promise((resolve) => window.setTimeout(resolve, 1_100));
+          if (!active || document.hidden || navigator.onLine === false) return;
+          await api.wakeServers(serverIds.slice(offset, offset + 500));
+        }
       },
     });
-  }, [access, config.offline_threshold_seconds, loading, selectedId]);
+    return () => {
+      active = false;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      disconnect();
+    };
+  }, [access, configReady, reload, selectedId]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -265,9 +288,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  const metricServers = useMemo(
+    () => servers.map((server) => mergeServerLive(server, liveMetrics[server.id], 0, config.offline_threshold_seconds)),
+    [config.offline_threshold_seconds, liveMetrics, servers],
+  );
   const liveServers = useMemo(
-    () => servers.map((server) => mergeServerLive(server, liveMetrics[server.id], clockNow, config.offline_threshold_seconds)),
-    [clockNow, config.offline_threshold_seconds, liveMetrics, servers],
+    () => metricServers.map((server) => mergeServerLive(server, undefined, clockNow, config.offline_threshold_seconds)),
+    [clockNow, config.offline_threshold_seconds, metricServers],
   );
 
   useEffect(() => {

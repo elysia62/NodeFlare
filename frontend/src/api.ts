@@ -42,20 +42,21 @@ function sensitiveHeaders(proof: SensitiveProof): Headers {
 }
 
 export const api = {
-  bootstrap: () => request<Bootstrap>("/api/bootstrap"),
+  bootstrap: () => request<Bootstrap>("/api/bootstrap", { cache: "no-store", signal: AbortSignal.timeout(15_000) }),
   config: () => request<Config>("/api/config"),
   exchangeRates: () => request<ExchangeRates>("/api/exchange-rates"),
   wakeServers: (serverIds: string[]) => request<void>("/api/live/wake", {
     method: "POST",
     body: JSON.stringify({ server_ids: serverIds }),
+    signal: AbortSignal.timeout(15_000),
   }),
   refreshExchangeRates: () => request<ExchangeRates>("/api/admin/exchange-rates/refresh", { method: "POST" }, true),
   servers: () => request<{ servers: Server[] }>("/api/servers"),
   adminServers: () => request<{ servers: AdminServer[] }>("/api/admin/servers", {}, true),
   history: (id: string, hours: number) =>
-    request<{ points: HistoryPoint[] }>(`/api/history/${encodeURIComponent(id)}?hours=${hours}`),
+    request<{ points: HistoryPoint[] }>(`/api/history/${encodeURIComponent(id)}?hours=${hours}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) }),
   latencyHistory: (id: string, hours: number) =>
-    request<{ tasks: LatencyTestPoint[]; points: LatencySample[] }>(`/api/latency/${encodeURIComponent(id)}?hours=${hours}`),
+    request<{ tasks: LatencyTestPoint[]; points: LatencySample[] }>(`/api/latency/${encodeURIComponent(id)}?hours=${hours}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) }),
   verifyTurnstile: (token: string) =>
     request<void>("/api/turnstile/verify", { method: "POST", body: JSON.stringify({ token }) }),
   login: async (username: string, passwordDerived: string, turnstileToken: string, totpCode = "") => {

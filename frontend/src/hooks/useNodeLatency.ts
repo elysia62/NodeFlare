@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { liveLatencySamples } from "../live";
 import {
   averageOf,
   bucketSamples,
@@ -13,7 +14,7 @@ import {
   type LatencyTaskRef,
 } from "../latency";
 import { ui, type UiLocale } from "../locale";
-import type { LatencySample, Server } from "../types";
+import type { LatencySample, LiveLatencyResult, Server } from "../types";
 
 export type { LatencyBar } from "../latency";
 
@@ -37,7 +38,7 @@ export interface NodeLatencyStats {
   loading: boolean;
 }
 
-const cache = new Map<string, { at: number; points: LatencySample[] }>();
+const cache = new Map<string, { at: number; signature: string; points: LatencySample[] }>();
 const CACHE_TTL = 120_000;
 const REFRESH_INTERVAL = 120_000;
 const WINDOW_HOURS = 1;
@@ -67,6 +68,7 @@ export function useNodeLatency(
   enabled: boolean,
   locale: UiLocale,
   carrierSelection: CarrierSlotKey | null = null,
+  liveResults?: LiveLatencyResult[],
 ): NodeLatencyStats {
   const [fetched, setFetched] = useState<LatencySample[]>(server.latency);
   const [loading, setLoading] = useState(enabled);
@@ -102,15 +104,17 @@ export function useNodeLatency(
       running = true;
       try {
         const hit = cache.get(server.id);
-        if (!force && hit && Date.now() - hit.at < CACHE_TTL) {
+        if (!force && hit?.signature === taskSignature && Date.now() - hit.at < CACHE_TTL) {
           setFetched(hit.points);
           setLoading(false);
           return;
         }
         if (!hit) setLoading(true);
         const result = await api.latencyHistory(server.id, WINDOW_HOURS);
-        cache.set(server.id, { at: Date.now(), points: result.points });
-        if (!stopped) setFetched(result.points);
+        if (!stopped) {
+          cache.set(server.id, { at: Date.now(), signature: taskSignature, points: result.points });
+          setFetched(result.points);
+        }
       } catch {} finally {
         running = false;
         if (!stopped) setLoading(false);
@@ -119,7 +123,7 @@ export function useNodeLatency(
     };
     const resume = () => {
       clearTimer();
-      if (!stopped && canRefresh() && !running) void load(true);
+      if (!stopped && canRefresh() && !running) void load(false);
     };
     const pause = () => clearTimer();
     const handleVisibility = () => {
@@ -138,9 +142,13 @@ export function useNodeLatency(
       window.removeEventListener("online", resume);
       window.removeEventListener("offline", pause);
     };
-  }, [enabled, server.id]);
+  }, [enabled, server.id, taskSignature]);
 
-  const points = useMemo(() => mergePoints(fetched, server.latency), [server.latency, fetched]);
+  const points = useMemo(() => {
+    const cutoff = Date.now() / 1000 - WINDOW_HOURS * 3600;
+    return mergePoints(fetched, server.latency, liveLatencySamples(server.latency, liveResults))
+      .filter((point) => point.timestamp >= cutoff);
+  }, [server.latency, fetched, liveResults]);
   const carrierKey = carrierSelection
     ? `${carrierSelection.telecom}\0${carrierSelection.mobile}\0${carrierSelection.unicom}`
     : "";

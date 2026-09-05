@@ -24,8 +24,9 @@ import { api } from "../api";
 import { chartGapLimit, chartTimeLabel, insertTimelineGaps } from "../chart";
 import { demoHistory, demoLatencyHistory, demoLatencyTasks } from "../demo";
 import { averageOf } from "../latency";
+import { liveLatencySamples } from "../live";
 import { displayGpuDevices, formatBytes, formatCpuName, formatSpeed, formatUptime, isOnline, number } from "../format";
-import type { HistoryPoint, LatencySample, LatencyTestPoint, Server } from "../types";
+import type { HistoryPoint, LatencySample, LatencyTestPoint, LiveLatencyResult, Server } from "../types";
 import { Flag, regionDisplayName } from "./Flag";
 import { OSIcon } from "./OSIcon";
 import { ui } from "../locale";
@@ -204,8 +205,9 @@ const tooltipStyle = {
   fontSize: 12,
 };
 
-export function NodeDetails({ server, threshold, retentionDays, locale, demo = false, onClose }: {
+export function NodeDetails({ server, liveLatencyResults, threshold, retentionDays, locale, demo = false, onClose }: {
   server: Server;
+  liveLatencyResults?: LiveLatencyResult[];
   threshold: number;
   retentionDays: number;
   locale: "zh-CN" | "en";
@@ -306,9 +308,19 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
   );
   const networkMaximum = useMemo(() => networkAxisMaximum(data), [data]);
   const networkTicks = useMemo(() => resourceTicks(networkMaximum), [networkMaximum]);
+  const currentLatencyPoints = useMemo(() => {
+    if (demo || !latencyTasks.length) return latencyPoints;
+    const definitions = latencyTasks.map((task) => ({
+      ...task, task_id: task.id, server_id: server.id, timestamp: 0, latency_ms: 0, packet_loss: 0,
+    }));
+    return mergeLatencySamples(latencyPoints, [
+      ...server.latency,
+      ...liveLatencySamples(definitions, liveLatencyResults),
+    ], latencyHours, latencyTasks.length);
+  }, [demo, latencyHours, latencyPoints, latencyTasks, liveLatencyResults, server.id, server.latency]);
   const latencySeries = useMemo(() => {
     return latencyTasks.map((task, index) => {
-      const samples = latencyPoints.filter((point) => point.task_id === task.id);
+      const samples = currentLatencyPoints.filter((point) => point.task_id === task.id);
       const rawPoints: LatencyChartPoint[] = samples
         .filter((sample) => Number.isFinite(sample.timestamp) && sample.timestamp > 0)
         .sort((left, right) => left.timestamp - right.timestamp)
@@ -325,7 +337,7 @@ export function NodeDetails({ server, threshold, retentionDays, locale, demo = f
         points: insertLatencyGaps(rawPoints, hours),
       };
     });
-  }, [hours, latencyPoints, latencyTasks]);
+  }, [currentLatencyPoints, hours, latencyTasks]);
   const visibleLatencySeries = useMemo(
     () => latencySeries.filter((series) => !hiddenLatencyTaskIds.has(series.id)),
     [hiddenLatencyTaskIds, latencySeries],

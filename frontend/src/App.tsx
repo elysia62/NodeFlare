@@ -96,7 +96,7 @@ function VerificationGate() {
 }
 
 function HomeView() {
-  const { carrierLatency, config, error, exchangeRates, loading, openServer, reload, servers } = useApp();
+  const { carrierLatency, config, error, exchangeRates, liveMetrics, loading, openServer, reload, servers } = useApp();
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("__all__");
   const locale = config.locale;
@@ -125,7 +125,7 @@ function HomeView() {
         <div className="dashboard-loading"><span className="loading-ring" aria-hidden="true" /><p>{ui(locale, "加载中…", "Loading…")}</p></div>
       ) : visible.length ? (
         <section className={`node-grid ${carrierLatency ? "carrier-latency" : ""}`}>
-          {visible.map((server) => <NodeCard key={server.id} server={server} config={config} onOpen={() => openServer(server)} />)}
+          {visible.map((server) => <NodeCard key={server.id} server={server} config={config} liveLatencyResults={liveMetrics[server.id]?.latencyResults} onOpen={() => openServer(server)} />)}
         </section>
       ) : !error ? (
         <div className="empty-state"><strong>{servers.length ? ui(locale, "没有匹配的节点", "No matching servers") : ui(locale, "尚未添加节点", "No servers added")}</strong></div>
@@ -135,7 +135,7 @@ function HomeView() {
 }
 
 function DetailView() {
-  const { config, goHome, loading, selectedId, servers } = useApp();
+  const { config, goHome, liveMetrics, loading, selectedId, servers } = useApp();
   const locale = config.locale;
   const selected = servers.find((server) => server.id === selectedId) ?? null;
 
@@ -143,7 +143,9 @@ function DetailView() {
     return (
       <Suspense fallback={<div className="chart-loading">{ui(locale, "正在加载节点", "Loading server")}</div>}>
         <NodeDetails
+          key={selected.id}
           server={selected}
+          liveLatencyResults={liveMetrics[selected.id]?.latencyResults}
           threshold={config.offline_threshold_seconds}
           retentionDays={config.history_retention_days}
           locale={locale}
