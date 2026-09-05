@@ -17,6 +17,7 @@ backup_dir=""
 previous_install=false
 previous_share=false
 previous_service=false
+server_port=2206
 
 case "$(uname -s)" in
   Linux)
@@ -58,11 +59,14 @@ usage() {
     'NodeFlare 面板安装脚本' \
     '' \
     '用法：' \
-    '  sudo sh install.sh' \
+    '  sudo sh install.sh              # 交互菜单' \
+    '  sudo sh install.sh --install    # 安装或更新' \
+    '  sudo sh install.sh --status     # 查看状态' \
+    '  sudo sh install.sh --restart    # 重启服务' \
     '  sudo sh install.sh --uninstall' \
     '  sudo sh install.sh --uninstall --purge' \
     '' \
-    '首次安装会询问管理员用户名、密码和数据库连接。' \
+    '首次安装会询问管理员用户名、密码、监听端口（默认 2206）和数据库连接。' \
     '安装和更新均使用 GitHub latest Release，并保留已有配置和数据库。' \
     '--uninstall 保留配置和数据；只有同时指定 --purge 才彻底删除。'
 }
@@ -146,6 +150,55 @@ prompt_line() {
   IFS= read -r prompt_value < /dev/tty || fail "无法读取输入"
 }
 
+show_menu() {
+  (: < /dev/tty) 2>/dev/null || fail "交互菜单需要终端；直接安装或更新请使用 --install"
+  printf '%s\n' \
+    '' \
+    'NodeFlare 面板管理' \
+    '  1. 安装 / 更新' \
+    '  2. 查看服务状态' \
+    '  3. 重启服务' \
+    '  4. 卸载（保留配置和数据）' \
+    '  0. 退出' > /dev/tty
+  while :; do
+    prompt_line "请选择 [0]: "
+    case "${prompt_value:-0}" in
+      1) mode=install; return ;;
+      2) mode=status; return ;;
+      3) mode=restart; return ;;
+      4)
+        prompt_line "确认卸载 NodeFlare 面板？[y/N]: "
+        case "$prompt_value" in
+          y|Y) mode=uninstall ;;
+          *) mode=exit ;;
+        esac
+        return
+        ;;
+      0) mode=exit; return ;;
+      *) printf '%s\n' "请输入 0-4。" > /dev/tty ;;
+    esac
+  done
+}
+
+valid_port() {
+  case "$1" in
+    ''|*[!0-9]*|??????*) return 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+prompt_port() {
+  while :; do
+    prompt_line "监听端口 [2206]: "
+    server_port=${prompt_value:-2206}
+    if valid_port "$server_port"; then
+      server_port=$(printf '%s' "$server_port" | sed 's/^0*//')
+      return
+    fi
+    printf '%s\n' "端口必须是 1-65535 之间的整数。" > /dev/tty
+  done
+}
+
 prompt_secret() {
   printf '%s' "$1" > /dev/tty
   tty_state=$(stty -g < /dev/tty) || fail "无法读取终端状态"
@@ -212,7 +265,7 @@ write_config() {
   config_temp=$(mktemp "$config_dir/.config.toml.XXXXXX")
   {
     printf 'database_url = "%s"\n' "$escaped_database_url"
-    printf 'bind_addr = "127.0.0.1:8080"\n'
+    printf 'bind_addr = "127.0.0.1:%s"\n' "$server_port"
     printf 'trusted_proxies = ["127.0.0.1/32", "::1/128"]\n'
     printf 'admin_username = "%s"\n' "$escaped_username"
     printf 'admin_password = "%s"\n' "$escaped_password"
@@ -489,20 +542,37 @@ start_server() {
       done
       ;;
     openrc)
-      rc-update add nodeflare default >/dev/null
-      rc-service nodeflare start
+      rc-update add nodeflare default >/dev/null || return 1
+      rc-service nodeflare start || return 1
       rc-service nodeflare status >/dev/null
       ;;
     launchd)
-      launchctl bootstrap system "$launchd_file"
+      launchctl bootstrap system "$launchd_file" || return 1
       launchctl print system/nodeflare >/dev/null
       ;;
     freebsd)
-      sysrc nodeflare_enable=YES >/dev/null
-      service nodeflare start
+      sysrc nodeflare_enable=YES >/dev/null || return 1
+      service nodeflare start || return 1
       service nodeflare status >/dev/null
       ;;
   esac
+}
+
+status_server() {
+  case "$init_system" in
+    systemd) systemctl status nodeflare.service --no-pager ;;
+    openrc) rc-service nodeflare status ;;
+    launchd) launchctl print system/nodeflare ;;
+    freebsd) service nodeflare status ;;
+  esac
+}
+
+restart_server() {
+  [ -x "$server_binary" ] && [ -f "$config_file" ] && [ -f "$(service_definition)" ] \
+    || fail "未检测到完整安装，请先选择安装 / 更新"
+  stop_server
+  start_server || fail "NodeFlare 重启失败，请检查服务日志"
+  log "NodeFlare 已重启"
 }
 
 uninstall_server() {
@@ -542,16 +612,24 @@ uninstall_server() {
   log "卸载完成"
 }
 
-mode=install
+mode=menu
 purge=false
 case "$#:${1:-}:${2:-}" in
   0::) ;;
+  1:--menu:) ;;
   1:-h:|1:--help:) usage; exit 0 ;;
+  1:--install:) mode=install ;;
+  1:--status:) mode=status ;;
+  1:--restart:) mode=restart ;;
   1:--uninstall:) mode=uninstall ;;
   2:--uninstall:--purge) mode=uninstall; purge=true ;;
   *) usage >&2; fail "参数无效" ;;
 esac
 
+if [ "$mode" = menu ]; then
+  show_menu
+fi
+[ "$mode" != exit ] || exit 0
 [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限运行"
 init_system=$(detect_init_system)
 if [ "$mode" = uninstall ]; then
@@ -559,6 +637,10 @@ if [ "$mode" = uninstall ]; then
   exit 0
 fi
 [ "$init_system" != unknown ] || fail "未检测到受支持的服务管理器"
+case "$mode" in
+  status) status_server; exit 0 ;;
+  restart) restart_server; exit 0 ;;
+esac
 
 for required_command in tar install mktemp sed grep wc tr id chown chmod mv cp stty uname cat; do
   command -v "$required_command" >/dev/null 2>&1 || fail "缺少命令：$required_command"
@@ -585,6 +667,7 @@ new_config=false
 if [ ! -f "$config_file" ]; then
   new_config=true
   prompt_credentials
+  prompt_port
   prompt_database
 else
   log "保留已有配置：$config_file"
@@ -625,5 +708,9 @@ printf '%s\n' \
   "版本：$release_version" \
   "配置和数据：$config_dir" \
   "程序：$server_binary" \
-  "服务系统：$init_system" \
-  '默认访问：http://127.0.0.1:8080'
+  "服务系统：$init_system"
+if [ "$new_config" = true ]; then
+  printf '本机访问：http://127.0.0.1:%s/admin/login\n' "$server_port"
+else
+  printf '监听地址：沿用 %s 中的 bind_addr\n' "$config_file"
+fi

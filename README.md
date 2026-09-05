@@ -1,14 +1,24 @@
 # NodeFlare
 
-NodeFlare 是一个自部署的服务器监控面板，支持 SQLite、PostgreSQL、实时状态、延迟检测、通知、主题、登录设备管理和带 TOTP 验证的远程命令执行。
+自部署的服务器监控面板：服务端提供状态页与管理后台，Agent 部署在被监控服务器上采集并上报数据，两者通过 WebSocket 通信。
+
+## 功能
+
+- **实时监控**：CPU、内存、负载、磁盘、网络流量、TCP/UDP 连接数
+- **延迟检测**：在选定节点上对指定目标做周期性 TCP 拨测
+- **告警通知**：CPU / 内存 / 磁盘 / 上下行速率阈值规则与离线告警，经 Telegram 推送
+- **远程执行**：管理后台通过 TOTP 验证后向节点下发命令，由系统级 Agent 服务执行
+- **安全**：TOTP 两步验证、Cloudflare Turnstile、登录设备管理、可信代理
+- **主题**：状态页主题包上传、预览与启用
+- **节点信息**：价格（自动汇率换算）与到期时间
+- **数据库**：SQLite / PostgreSQL，后台备份、恢复与互相迁移
+- **界面**：中文 / English
 
 ## 安装服务端
 
-安装脚本只下载 latest Release 中对应平台的完整包并校验 SHA-256，不会在服务器上编译源码。
+服务端与 Agent 支持 Linux x64/ARM64、Windows x64、macOS ARM64、FreeBSD 13+ x64/ARM64。安装脚本从 latest Release 下载预编译包、校验 SHA-256 并注册系统服务（Linux 为 systemd / OpenRC，macOS 为 launchd）。
 
-支持 Linux x64/ARM64（glibc、musl）、Windows x64、macOS ARM64、FreeBSD 13+ x64/ARM64。Linux 检测到 glibc 2.28 或更高版本时优先使用 glibc 包，否则使用静态 musl 包；支持 systemd 和 OpenRC。
-
-Linux 或 macOS：
+Linux / macOS：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh
@@ -28,25 +38,19 @@ Unblock-File "$env:TEMP\nodeflare-install.ps1"
 & "$env:TEMP\nodeflare-install.ps1"
 ```
 
-安装时输入管理员用户名、密码和数据库地址。数据库直接回车时使用 SQLite，也可填写 PostgreSQL：
+运行脚本后选择“安装 / 更新”。首次安装依次输入管理员用户名、密码、监听端口（默认 2206）和数据库地址（默认 SQLite），连接串格式见[配置](#配置)。更新时保留已有配置和端口；菜单还可查看状态、重启或卸载服务。
 
-```text
-postgres://用户:密码@127.0.0.1:5432/nodeflare?sslmode=prefer
-```
-
-PostgreSQL 用户名或密码中的 `@`、`:`、`/`、`?` 等字符需要先进行 URL 百分号编码。
-
-安装完成后访问 `http://服务器地址:8080/admin/login`。默认只监听 `127.0.0.1:8080`，对外使用时请配置 HTTPS 反向代理，例如 Caddy：
+服务端默认监听 `127.0.0.1:2206`，本机访问 `http://127.0.0.1:2206/admin/login`。需经 HTTPS 反向代理对外暴露，例如 Caddy（使用自选端口时同步修改）：
 
 ```caddy
 monitor.example.com {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:2206
 }
 ```
 
-NodeFlare 默认只信任本机反向代理写入的 `X-Forwarded-For`。反向代理位于容器或其他主机时，在 `config.toml` 的 `trusted_proxies` 中填写其 IP 或 CIDR，未受信任来源提交的转发头会被忽略。
+只有 `trusted_proxies` 中列出的代理写入的 `X-Forwarded-For` 会被信任（默认含本机回环），代理不在本机时将其 IP 或 CIDR 加入 `config.toml`。
 
-Linux systemd 常用命令：
+重新运行脚本并选择“安装 / 更新”即可更新；直接更新可用 `install.sh --install`（Windows 为 `install.ps1 -Install`）。Linux 常用 systemd 命令：
 
 ```bash
 systemctl status nodeflare
@@ -54,66 +58,52 @@ systemctl restart nodeflare
 journalctl -u nodeflare -f
 ```
 
-重新执行安装命令即可更新。Linux 和 macOS 卸载时默认保留配置和数据库：
+卸载默认保留配置和数据，追加 `--purge` 一并删除（Windows 为 `install.ps1 -Uninstall`，加 `-Purge`）：
 
 ```bash
+# Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
-```
-
-同时删除配置和数据：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall --purge
-```
-
-FreeBSD：
-
-```sh
+# FreeBSD
 fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
 ```
 
-彻底删除时在末尾添加 `--purge`。
-
-Windows 使用 `install.ps1 -Uninstall`，彻底删除数据时再加 `-Purge`。
-
-## 数据库与备份
-
-管理后台的“数据库”页面可查看占用空间、手动回收空间、导出或恢复 ZIP，SQLite 和 PostgreSQL 都支持。
-
-- 备份包含设置、节点、监控历史、通知、主题记录及主题文件、远程任务和安全配置。
-- 登录会话等临时数据不会导出；恢复完成后需要重新登录。
-- 导出、恢复和迁移数据库前需要提交当前 TOTP；未启用 TOTP 时提交当前管理员密码。
-- 建议使用相同版本的 NodeFlare 恢复备份。
-- `pg_dump` 和 SQLite `.backup` 仍可作为额外的数据库原生备份方式，但不是使用内置 ZIP 功能的前提。
-
-“数据库迁移”可在 SQLite 和 PostgreSQL 之间复制全部持久数据。迁移会覆盖目标库中已有的 NodeFlare 数据并更新 `database_url`，完成后重启 NodeFlare。
-
-第三方主题会作为与管理后台同源的前端代码运行，只安装你信任的主题包或仓库。
-
 ## 安装 Agent
 
-进入“服务器”，创建节点并复制页面生成的安装命令。Linux 命令格式如下：
+在管理后台“服务器”页面创建节点，执行生成的安装命令。Agent 主动向服务端发起出站 WebSocket 连接，被监控服务器无需开放入站端口，服务地址仅接受 HTTPS（本机调试除外）。以 Linux 为例：
 
 ```bash
 curl -fsSL https://monitor.example.com/agent/agent.sh \
   | sudo sh -s -- -e 'https://monitor.example.com' -t 'Agent Token'
 ```
 
-Agent 服务名为 `nodeflare-agent`：
+Agent 服务名为 `nodeflare-agent`，卸载：
 
 ```bash
-systemctl status nodeflare-agent
 curl -fsSL https://monitor.example.com/agent/agent.sh | sudo sh -s -- --uninstall
 ```
 
-除本机调试外，Agent 只接受 HTTPS 服务地址。远程执行需要管理员登录和当前 TOTP 验证码，命令由系统级 Agent 服务运行。
+## 配置
 
-支持的平台：
+配置文件位于[默认目录](#默认目录)表中的配置位置，完整示例见 [`backend/config.example.toml`](backend/config.example.toml)。常用项：
 
-- Linux x86_64 / ARM64（glibc 2.28+ 或静态 musl）
-- Windows x64
-- macOS ARM64
-- FreeBSD 13+ x64 / ARM64
+| 配置项 | 说明 |
+| --- | --- |
+| `database_url` | 数据库连接，见下方示例 |
+| `bind_addr` | 监听地址，默认 `127.0.0.1:2206`，安装时可选择端口 |
+| `trusted_proxies` | 信任其转发头的反向代理 IP / CIDR 列表 |
+| `turnstile_site_key` / `turnstile_secret_key` | Turnstile 密钥，留空禁用；启用后可在管理后台开启登录与状态页验证 |
+| `session_ttl_hours` | 管理员会话有效期（1–2160 小时），默认 168 |
+
+SQLite 使用 `sqlite://`，相对路径相对于配置文件所在目录；PostgreSQL 使用标准连接串，密码中的特殊字符需 URL 编码：
+
+```toml
+# SQLite
+database_url = "sqlite://nodeflare.db"
+# PostgreSQL
+database_url = "postgres://nodeflare:password@127.0.0.1:5432/nodeflare?sslmode=disable"
+```
+
+管理员密码仅首次初始化数据库需要，成功后自动从配置中清空。
 
 ## 默认目录
 
@@ -124,7 +114,16 @@ curl -fsSL https://monitor.example.com/agent/agent.sh | sudo sh -s -- --uninstal
 | macOS   | `/usr/local/libexec/nodeflare` | `/Library/Application Support/NodeFlare/Server` |
 | FreeBSD | `/usr/local/libexec/nodeflare` | `/var/db/nodeflare/server`                      |
 
-默认 SQLite 文件位于对应数据目录下。首次初始化成功后，安装密码会自动从配置中清空。NodeFlare 不创建额外的系统用户。
+默认 SQLite 文件位于配置目录下。
+
+## 数据库与备份
+
+管理后台“数据库”页面：查看占用与回收空间、导出/恢复 ZIP 备份、在 SQLite 与 PostgreSQL 之间迁移。
+
+- 备份含设置、节点、监控历史、通知、主题（含文件）、远程任务与安全配置；会话等临时数据不导出，恢复后需重新登录。
+- 导出、恢复、迁移前需验证当前 TOTP，未启用时为管理员密码。
+- 恢复建议使用相同版本的 NodeFlare；`pg_dump` 与 SQLite `.backup` 可作为补充。
+- 迁移会覆盖目标库已有数据并自动更新 `database_url`，完成后重启生效。
 
 ## 从源码开发
 

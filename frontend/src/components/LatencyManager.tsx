@@ -159,7 +159,7 @@ export function LatencyManager({
         <div className="server-picker-head"><strong>服务器</strong><span>已选 {form.server_ids.length} / 共 {servers.length}</span><button type="button" onClick={() => setForm((current) => ({ ...current, server_ids: allSelected ? [] : servers.map((server) => server.id) }))}>{allSelected ? "取消全选" : "全选"}</button></div>
         <div className="server-picker-search"><Search size={16} /><input aria-label="搜索服务器" placeholder="搜索" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
         <div className="server-picker-list">
-          {visibleServers.map((server) => <label className="server-picker-row" key={server.id}><Checkbox checked={form.server_ids.includes(server.id)} onChange={() => toggleServer(server.id)} /><span><strong>{server.name}</strong><small>{server.last_ip || "尚未上报 IP"}</small></span></label>)}
+          {visibleServers.map((server) => <label className="server-picker-row" key={server.id}><Checkbox checked={form.server_ids.includes(server.id)} onChange={() => toggleServer(server.id)} /><span><strong>{server.name}</strong></span></label>)}
           {!visibleServers.length ? <div className="server-picker-empty">没有匹配的服务器</div> : null}
         </div>
       </div>

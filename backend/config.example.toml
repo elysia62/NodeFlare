@@ -3,11 +3,11 @@
 
 # 数据库连接 URL
 # SQLite: sqlite:///path/to/database.db 或 sqlite://nodeflare.db
-# PostgreSQL: postgres://user:password@127.0.0.1:5432/nodeflare?sslmode=prefer
+# PostgreSQL: postgres://user:password@127.0.0.1:5432/nodeflare?sslmode=disable
 database_url = "sqlite://nodeflare.db"
 
 # 服务器监听地址
-bind_addr = "127.0.0.1:8080"
+bind_addr = "127.0.0.1:2206"
 
 # 只有来自这些反向代理网段的 X-Forwarded-For 才会被信任
 trusted_proxies = ["127.0.0.1/32", "::1/128"]

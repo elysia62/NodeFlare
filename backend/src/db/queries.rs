@@ -1639,6 +1639,9 @@ pub async fn telegram_settings(db: &Database) -> Result<Option<TelegramSettingsV
         if !settings.bot_token.is_empty() {
             settings.bot_token = SECRET_MASK.to_string();
         }
+        if !settings.chat_id.is_empty() {
+            settings.chat_id = SECRET_MASK.to_string();
+        }
         settings
     }))
 }
@@ -1665,9 +1668,20 @@ pub async fn raw_telegram_settings(db: &Database) -> Result<Option<TelegramSetti
 pub async fn save_telegram_settings(db: &Database, input: &TelegramSettingsInput) -> Result<()> {
     let current = raw_telegram_settings(db).await?;
     let token = if input.bot_token.trim() == SECRET_MASK {
-        current.map(|value| value.bot_token).unwrap_or_default()
+        current
+            .as_ref()
+            .map(|value| value.bot_token.as_str())
+            .unwrap_or_default()
     } else {
-        input.bot_token.trim().to_string()
+        input.bot_token.trim()
+    };
+    let chat_id = if input.chat_id.trim() == SECRET_MASK {
+        current
+            .as_ref()
+            .map(|value| value.chat_id.as_str())
+            .unwrap_or_default()
+    } else {
+        input.chat_id.trim()
     };
     sqlx::query(db.sql(
         "INSERT INTO notification_telegram(id, bot_token, chat_id, message_thread_id, template, \
@@ -1677,7 +1691,7 @@ pub async fn save_telegram_settings(db: &Database, input: &TelegramSettingsInput
          updated_at=excluded.updated_at",
     ))
     .bind(token)
-    .bind(input.chat_id.trim())
+    .bind(chat_id)
     .bind(input.message_thread_id)
     .bind(input.template.trim())
     .bind(now())
@@ -1899,6 +1913,50 @@ pub async fn upsert_exchange_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn telegram_settings_mask_and_preserve_saved_credentials() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(telegram_settings(&db).await.unwrap().is_none());
+        let mut input = TelegramSettingsInput {
+            bot_token: "123456789:test-token".into(),
+            chat_id: "-1001234567890".into(),
+            message_thread_id: None,
+            template: "{{message}}".into(),
+        };
+        save_telegram_settings(&db, &input).await.unwrap();
+        let view = telegram_settings(&db).await.unwrap().unwrap();
+        assert_eq!(view.bot_token, SECRET_MASK);
+        assert_eq!(view.chat_id, SECRET_MASK);
+
+        input.bot_token = view.bot_token;
+        input.chat_id = view.chat_id;
+        input.template = "{{title}}: {{message}}".into();
+        input.message_thread_id = Some(123);
+        save_telegram_settings(&db, &input).await.unwrap();
+        let raw = raw_telegram_settings(&db).await.unwrap().unwrap();
+        assert_eq!(raw.bot_token, "123456789:test-token");
+        assert_eq!(raw.chat_id, "-1001234567890");
+        assert_eq!(raw.template, input.template);
+        assert_eq!(raw.message_thread_id, Some(123));
+
+        input.chat_id = " -1009876543210 ".into();
+        save_telegram_settings(&db, &input).await.unwrap();
+        let raw = raw_telegram_settings(&db).await.unwrap().unwrap();
+        assert_eq!(raw.chat_id, "-1009876543210");
+        assert_eq!(raw.bot_token, "123456789:test-token");
+
+        input.chat_id = SECRET_MASK.into();
+        input.bot_token = "987654321:replacement-token".into();
+        save_telegram_settings(&db, &input).await.unwrap();
+        let raw = raw_telegram_settings(&db).await.unwrap().unwrap();
+        assert_eq!(raw.chat_id, "-1009876543210");
+        assert_eq!(raw.bot_token, input.bot_token);
+        let view = telegram_settings(&db).await.unwrap().unwrap();
+        assert_eq!(view.bot_token, SECRET_MASK);
+        assert_eq!(view.chat_id, SECRET_MASK);
+    }
 
     fn server_input(traffic_limit: i64) -> ServerInput {
         ServerInput {

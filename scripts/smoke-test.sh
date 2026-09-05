@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-MONITOR_BASE_URL=${MONITOR_BASE_URL:-http://127.0.0.1:8080}
+MONITOR_BASE_URL=${MONITOR_BASE_URL:-http://127.0.0.1:2206}
 MONITOR_TURNSTILE_TOKEN=${MONITOR_TURNSTILE_TOKEN:-XXXX.DUMMY.TOKEN.XXXX}
 : "${MONITOR_ADMIN_USERNAME:?Set MONITOR_ADMIN_USERNAME before running the smoke test}"
 : "${MONITOR_ADMIN_PASSWORD:?Set MONITOR_ADMIN_PASSWORD before running the smoke test}"
@@ -195,7 +195,7 @@ server_input='{"name":"Smoke Test Node","region":"JP","group_name":"Test","tags"
 step "admin resources"
 request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/telegram" | \
-  jq -e '.telegram == null or (.telegram.bot_token == "********" and (.telegram.chat_id | length > 0))' >/dev/null
+  jq -e '.telegram == null or (.telegram.bot_token == "********" and .telegram.chat_id == "********")' >/dev/null
 invalid_telegram_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
   -X PUT -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
   --data '{"bot_token":"invalid","chat_id":"","message_thread_id":null,"template":"{{message}}"}' \

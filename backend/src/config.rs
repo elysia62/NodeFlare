@@ -58,7 +58,7 @@ fn default_database_url() -> String {
 }
 
 fn default_bind_addr() -> String {
-    "127.0.0.1:8080".to_string()
+    "127.0.0.1:2206".to_string()
 }
 
 fn default_data_dir() -> PathBuf {
@@ -279,7 +279,7 @@ mod tests {
         let args = Args::try_parse_from(["nodeflare"]).unwrap();
         assert_eq!(args.config, default_config_path());
         assert_eq!(default_database_url(), "sqlite://nodeflare.db");
-        assert_eq!(default_bind_addr(), "127.0.0.1:8080");
+        assert_eq!(default_bind_addr(), "127.0.0.1:2206");
         assert_eq!(
             default_public_frontend_dir(),
             default_share_dir().join("frontend")

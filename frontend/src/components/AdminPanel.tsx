@@ -38,7 +38,7 @@ import {
 import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError } from "../api";
 import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } from "../adminRoutes";
-import { formatBytes, formatByteSize, isOnline, parseByteSize } from "../format";
+import { formatBytes, formatByteSize, parseByteSize } from "../format";
 import { derivePassword } from "../password";
 import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS } from "../refresh";
 import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
@@ -1127,7 +1127,6 @@ export function AdminPanel({
                       <div className={`server-row ${draggingId === server.id ? "dragging" : ""}`} key={server.id} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => void dropServer(event, server.id)}>
                         <button type="button" className="drag-handle" draggable onDragStart={(event) => startDrag(event, server.id)} onDragEnd={() => setDraggingId("")} title={`拖动排序：${server.name}`}><GripVertical size={15} /></button>
                         <Checkbox checked={selectedIds.includes(server.id)} onChange={() => toggleSelected(server.id)} ariaLabel={`选择 ${server.name}`} />
-                        <span className={`status-dot ${settings && isOnline(server, settings.offline_threshold_seconds) ? "online" : ""}`} />
                         <div className="server-name"><div className="server-name-main"><Flag region={server.region} size={17} /><strong>{server.name}</strong></div><ServerIpMeta server={server} agentVersion={server.agent_version} onCopy={(value) => void copyServerIp(value)} /></div>
                         <div className="row-actions"><button className="icon-btn" disabled={index === 0} onClick={() => void move(index, -1)} title="上移"><ChevronUp size={15} /></button><button className="icon-btn" disabled={index === servers.length - 1} onClick={() => void move(index, 1)} title="下移"><ChevronDown size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => void showInstallCommand(server)} title="重置 Token 并生成安装命令"><Download size={15} /></button><button className="icon-btn" onClick={() => openEditor(server)} title="编辑节点"><Pencil size={15} /></button><button className="icon-btn danger" onClick={() => void remove(server)} title="删除节点"><Trash2 size={15} /></button></div>
                       </div>
@@ -1209,7 +1208,7 @@ export function AdminPanel({
                         <label><span>验证器密钥</span><div className="copy-field"><input readOnly value={twoFactorSetup.secret} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} /><button type="button" className={`secondary-btn compact copy-secret-btn ${twoFactorSecretCopied ? "copied" : ""}`} aria-live="polite" onClick={() => void copyTwoFactorSecret()}>{twoFactorSecretCopied ? <Check size={14} /> : <Copy size={14} />}{twoFactorSecretCopied ? "已复制" : "复制密钥"}</button></div></label>
                         <p className="settings-hint">在 Google Authenticator、Aegis、2FAS 等验证器中手动输入该密钥，再填写当前 6 位验证码确认。</p>
                       </div> : null}
-                      {twoFactorStatus?.enabled ? <div className="two-factor-actions"><button type="button" className="danger-btn" disabled={busy} onClick={() => void disableTwoFactor()}>禁用两步验证</button></div> : <div className="two-factor-actions">
+                      {twoFactorStatus?.enabled ? <div className="two-factor-actions"><button type="button" className="danger-btn two-factor-disable-btn" disabled={busy} onClick={() => void disableTwoFactor()}>禁用两步验证</button></div> : <div className="two-factor-actions">
                         {!twoFactorSetup ? <p className="settings-hint">{twoFactorStatus?.has_secret ? "已有未启用的密钥；重新生成后，旧密钥会失效。" : "尚未生成两步验证密钥。"}</p> : null}
                         <button type="button" className="secondary-btn two-factor-generate-btn" disabled={busy} onClick={() => void setupTwoFactor()}>{twoFactorStatus?.has_secret ? "重新生成密钥" : "生成密钥"}</button>
                         {twoFactorSetup ? <button type="button" className="primary-btn" disabled={busy} onClick={() => void enableTwoFactor()}>启用两步验证</button> : null}
@@ -1251,10 +1250,7 @@ export function AdminPanel({
                       <div className="server-picker-head"><strong>选择服务器</strong><span>已选 {remoteSelectedIds.length} / 共 {servers.length}</span><button type="button" onClick={() => setRemoteSelectedIds(remoteAllSelected ? [] : servers.map((server) => server.id))}>{remoteAllSelected ? "取消全选" : "全选"}</button></div>
                       <div className="server-picker-search"><Search size={16} /><input aria-label="搜索远程执行服务器" placeholder="搜索服务器" value={remoteQuery} onChange={(event) => setRemoteQuery(event.target.value)} /></div>
                       <div className="server-picker-list">
-                        {remoteVisibleServers.map((server) => {
-                          const online = isOnline(server, config.offline_threshold_seconds);
-                          return <label className="server-picker-row remote-server-picker-row" key={server.id}><Checkbox checked={remoteSelectedIds.includes(server.id)} onChange={() => toggleRemoteServer(server.id)} ariaLabel={`选择 ${server.name}`} /><i className={`status-dot ${online ? "online" : ""}`} aria-hidden="true" /><span><strong>{server.name}</strong><small>{online ? "在线" : "离线"} · {server.group_name || "默认"}{server.last_ip ? ` · ${server.last_ip}` : ""}</small></span></label>;
-                        })}
+                        {remoteVisibleServers.map((server) => <label className="server-picker-row" key={server.id}><Checkbox checked={remoteSelectedIds.includes(server.id)} onChange={() => toggleRemoteServer(server.id)} ariaLabel={`选择 ${server.name}`} /><span><strong>{server.name}</strong><small>{server.group_name || "默认"}</small></span></label>)}
                         {!remoteVisibleServers.length ? <div className="server-picker-empty">{servers.length ? "没有匹配的服务器" : "暂无服务器"}</div> : null}
                       </div>
                     </div>
