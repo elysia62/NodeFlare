@@ -1,15 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const installer = readFileSync(new URL("../../install.sh", import.meta.url), "utf8");
+const agentInstaller = readFileSync(new URL("../../agent/agent.sh", import.meta.url), "utf8");
 
 function shellFunctions(...names: string[]) {
   return names.map((name) => {
     const match = installer.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, "m"));
     if (!match) throw new Error(`Missing installer function: ${name}`);
+    return match[0];
+  }).join("\n");
+}
+
+function agentShellFunctions(...names: string[]) {
+  return names.map((name) => {
+    const match = agentInstaller.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, "m"));
+    if (!match) throw new Error(`Missing agent installer function: ${name}`);
     return match[0];
   }).join("\n");
 }
@@ -124,5 +133,75 @@ describe("installer menu", () => {
     }
     expect(route("", ["--purge"]).status).toBe(1);
     expect(route("", ["--status", "--install"]).status).toBe(1);
+  });
+});
+
+describe("agent installer manual update", () => {
+  test("parses the existing systemd and OpenRC service configuration", () => {
+    const directory = mkdtempSync(join(tmpdir(), "nodeflare-agent-update-test-"));
+    const systemd = join(directory, "nodeflare-agent.service");
+    const openrc = join(directory, "nodeflare-agent.openrc");
+    try {
+      writeFileSync(systemd, [
+        "[Service]",
+        "ExecStart=/opt/nodeflare/agent -e https://monitor.example.com -i 120",
+        "Environment=NODEFLARE_AGENT_TOKEN=token-systemd",
+        "",
+      ].join("\n"));
+      writeFileSync(openrc, [
+        "command_args=\"-e https://monitor.example.com -i 45\"",
+        "export NODEFLARE_AGENT_TOKEN=\"token-openrc\"",
+        "",
+      ].join("\n"));
+      const functions = agentShellFunctions("load_installed_agent_config");
+      for (const [init, path, expected] of [
+        ["systemd", systemd, "https://monitor.example.com|token-systemd|120"],
+        ["openrc", openrc, "https://monitor.example.com|token-openrc|45"],
+      ] as const) {
+        const result = spawnSync("sh", ["-c", `
+          set -eu
+          ${functions}
+          init_system=${init}
+          SERVICE_FILE=$SERVICE_CONFIG
+          OPENRC_FILE=$SERVICE_CONFIG
+          load_installed_agent_config
+          printf '%s|%s|%s\\n' "$endpoint" "$token" "$interval"
+        `], { env: { ...process.env, SERVICE_CONFIG: path }, encoding: "utf8" });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe(`${expected}\n`);
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts only the optional download mirror", () => {
+    expect(spawnSync("sh", ["-n"], { input: agentInstaller }).status).toBe(0);
+    const update = agentInstaller.slice(agentInstaller.indexOf("update_agent()"), agentInstaller.indexOf("\nstatus_agent()"));
+    const functions = agentShellFunctions("update_agent", "load_installed_agent_config", "fail", "usage");
+    const accepted = spawnSync("sh", ["-c", `
+      set -eu
+      ${functions}
+      id() { printf '0'; }
+      detect_init_system() { printf systemd; }
+      load_installed_agent_config() { :; }
+      install_agent() { printf 'install:%s:%s:%s:%s\\n' "$2" "$4" "$6" "$8"; }
+      ${update}
+      endpoint=https://monitor.example.com
+      token=token
+      interval=120
+      update_agent -m https://ghproxy.net
+    `], { encoding: "utf8" });
+    expect(accepted.status).toBe(0);
+    expect(accepted.stdout).toBe("install:https://monitor.example.com:token:120:https://ghproxy.net\n");
+
+    const rejected = spawnSync("sh", ["-c", `
+      set -eu
+      ${functions}
+      id() { printf '0'; }
+      ${update}
+      update_agent --bad
+    `], { encoding: "utf8" });
+    expect(rejected.status).toBe(1);
   });
 });

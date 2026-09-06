@@ -21,6 +21,7 @@ NodeFlare Agent 安装脚本
 
 用法：
   agent.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>]
+  agent.sh --update [-m <下载加速前缀>]
   agent.sh --status
   agent.sh --uninstall
 
@@ -349,6 +350,59 @@ install_agent() {
   fi
 }
 
+load_installed_agent_config() {
+  case "$init_system" in
+    systemd)
+      [ -f "$SERVICE_FILE" ] || fail "未找到 Agent 服务配置，请先完成安装"
+      service_exec=$(sed -n 's/^ExecStart=//p' "$SERVICE_FILE" | head -n 1)
+      endpoint=$(printf '%s\n' "$service_exec" | sed -n 's/.* -e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\1/p')
+      interval=$(printf '%s\n' "$service_exec" | sed -n 's/.* -e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\2/p')
+      token=$(sed -n 's/^Environment=NODEFLARE_AGENT_TOKEN=//p' "$SERVICE_FILE" | head -n 1)
+      ;;
+    openrc)
+      [ -f "$OPENRC_FILE" ] || fail "未找到 Agent 服务配置，请先完成安装"
+      command_args=$(sed -n 's/^command_args="\([^"]*\)"$/\1/p' "$OPENRC_FILE" | head -n 1)
+      endpoint=$(printf '%s\n' "$command_args" | sed -n 's/^-e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\1/p')
+      interval=$(printf '%s\n' "$command_args" | sed -n 's/^-e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\2/p')
+      token=$(sed -n 's/^export NODEFLARE_AGENT_TOKEN="\([^"]*\)"$/\1/p' "$OPENRC_FILE" | head -n 1)
+      ;;
+    *)
+      fail "未检测到正在运行的 systemd 或 OpenRC，无法自动读取 Agent 配置"
+      ;;
+  esac
+  [ -n "${endpoint:-}" ] && [ -n "${token:-}" ] && [ -n "${interval:-}" ] || {
+    fail "无法读取现有 Agent 配置，请改用安装参数 -e 和 -t"
+  }
+}
+
+update_agent() {
+  [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行更新"
+  mirror=""
+  while [ "$#" -gt 0 ]; do
+    option="$1"
+    case "$option" in
+      -m)
+        [ "$#" -ge 2 ] || fail "参数 -m 缺少值"
+        [ -z "$mirror" ] || fail "参数 -m 重复"
+        mirror="$2"
+        shift 2
+        ;;
+      *)
+        echo "未知参数：$option" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
+  init_system=$(detect_init_system)
+  load_installed_agent_config
+  if [ -n "$mirror" ]; then
+    install_agent -e "$endpoint" -t "$token" -i "$interval" -m "$mirror"
+  else
+    install_agent -e "$endpoint" -t "$token" -i "$interval"
+  fi
+}
+
 status_agent() {
   init_system=$(detect_init_system)
   if [ "$init_system" = "systemd" ]; then
@@ -384,6 +438,7 @@ uninstall_agent() {
 }
 
 case "${1:-}" in
+  --update) shift; update_agent "$@" ;;
   --uninstall) [ "$#" -eq 1 ] || { usage; exit 1; }; uninstall_agent ;;
   --status) [ "$#" -eq 1 ] || { usage; exit 1; }; status_agent ;;
   -h|--help|'') usage; exit 0 ;;

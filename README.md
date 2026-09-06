@@ -82,6 +82,14 @@ Agent 服务名为 `nodeflare-agent`，卸载：
 curl -fsSL https://monitor.example.com/agent/agent.sh | sudo sh -s -- --uninstall
 ```
 
+手动更新到最新正式版本（自动沿用已安装 Agent 的服务地址、Token 和历史保存间隔）：
+
+```bash
+curl -fsSL https://monitor.example.com/agent/agent.sh | sudo sh -s -- --update
+```
+
+网络受限时可追加下载加速前缀：`--update -m https://ghproxy.net`。
+
 ## 配置
 
 配置文件位于[默认目录](#默认目录)表中的配置位置，完整示例见 [`backend/config.example.toml`](backend/config.example.toml)。常用项：
