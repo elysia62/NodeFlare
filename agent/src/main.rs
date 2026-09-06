@@ -1746,7 +1746,7 @@ fn report_batch_id(reports: &[Report]) -> String {
 
 type LiveSocket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
 
-fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)> {
+fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>, bool)> {
     let mut request = endpoint.into_client_request()?;
     request
         .headers_mut()
@@ -1770,7 +1770,11 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
         .get("date")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| clock_offset_from_http_date(value, started_ms, ended_ms));
-    Ok((socket, clock_offset_ms))
+    let persistence_batches = response
+        .headers()
+        .get("x-nodeflare-persistence-batches")
+        .is_some_and(|value| value == "1");
+    Ok((socket, clock_offset_ms, persistence_batches))
 }
 
 fn set_live_read_timeout(socket: &mut LiveSocket, timeout: Option<Duration>) -> io::Result<()> {
@@ -2535,12 +2539,16 @@ fn wait_for_live_ack(
     }
 }
 
-fn live_update_payload(reports: &[Report]) -> Result<String> {
-    Ok(serde_json::to_string(&serde_json::json!({
+fn live_update_payload(reports: &[Report], persist: Option<bool>) -> Result<String> {
+    let mut message = serde_json::json!({
         "type": "update",
         "batchId": report_batch_id(reports),
         "samples": reports,
-    }))?)
+    });
+    if let Some(persist) = persist {
+        message["persist"] = serde_json::json!(persist);
+    }
+    Ok(serde_json::to_string(&message)?)
 }
 
 fn observe_persisted_through(target: &AtomicI64, ack: &LiveAck) {
@@ -2573,7 +2581,21 @@ fn live_persistence_batch(queue: &VecDeque<Report>, timestamp: i64) -> Vec<Repor
         .filter(|report| report.timestamp > timestamp)
         .cloned()
         .collect::<VecDeque<_>>();
-    live_batch::latest(&candidates)
+    let count = live_batch::batch_len(&candidates);
+    candidates.into_iter().take(count).collect()
+}
+
+fn legacy_persistence_batch(queue: &VecDeque<Report>, timestamp: i64) -> Vec<Report> {
+    let candidates = queue
+        .iter()
+        .rev()
+        .filter(|report| report.timestamp > timestamp)
+        .cloned()
+        .collect::<VecDeque<_>>();
+    let count = live_batch::batch_len(&candidates);
+    let mut batch = candidates.into_iter().take(count).collect::<Vec<_>>();
+    batch.reverse();
+    batch
 }
 
 fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
@@ -2586,6 +2608,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         stats,
     } = worker;
     let mut socket: Option<LiveSocket> = None;
+    let mut persistence_batches = false;
     let mut wss_interval = configured_interval
         .lock()
         .map_or(Duration::from_secs(1), |interval| *interval);
@@ -2602,7 +2625,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
     'sender: loop {
         if socket.is_none() {
             match connect_live(endpoint, token) {
-                Ok((mut connected, offset_ms)) => {
+                Ok((mut connected, offset_ms, supports_persistence_batches)) => {
                     observe_clock(&clock, offset_ms);
                     if set_live_read_timeout(&mut connected, Some(LIVE_HINT_READ_TIMEOUT)).is_err()
                     {
@@ -2610,6 +2633,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                         continue;
                     }
                     socket = Some(connected);
+                    persistence_batches = supports_persistence_batches;
                     remote_executor.reset_delivery();
                     accepted_through = persisted_through.load(Ordering::Acquire);
                     next_send_at = Instant::now();
@@ -2636,18 +2660,24 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         let Ok(mut queue) = queue_lock.lock() else {
             return;
         };
-        let batch = loop {
+        let (batch, persist, more_pending) = loop {
             let now = Instant::now();
             let persisted = persisted_through.load(Ordering::Acquire);
             if now >= next_probe_at {
-                let persistence_batch = live_persistence_batch(&queue, persisted);
+                let persistence_batch = if persistence_batches {
+                    live_persistence_batch(&queue, persisted)
+                } else {
+                    legacy_persistence_batch(&queue, persisted)
+                };
                 if !persistence_batch.is_empty() {
-                    break persistence_batch;
+                    let last = persistence_batch.last().unwrap().timestamp;
+                    let more_pending = queue.iter().any(|report| report.timestamp > last);
+                    break (persistence_batch, true, more_pending);
                 }
             }
             let unsent = live_batch_after(&queue, accepted_through);
             if !unsent.is_empty() && now >= next_send_at {
-                break unsent;
+                break (unsent, false, false);
             }
 
             let wake_at = if !unsent.is_empty() {
@@ -2732,7 +2762,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
             wss_interval = (*interval).clamp(Duration::from_secs(1), Duration::from_secs(60));
         }
 
-        let payload = match live_update_payload(&batch) {
+        let payload = match live_update_payload(&batch, persistence_batches.then_some(persist)) {
             Ok(payload) => payload,
             Err(error) => {
                 eprintln!("live payload encode failed: {error}");
@@ -2771,6 +2801,14 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                         wss_interval = ack_wss_interval(&ack);
                         next_send_at = Instant::now() + wss_interval;
                         next_probe_at = Instant::now() + ack_persist_interval(&ack);
+                        if persist
+                            && more_pending
+                            && batch
+                                .last()
+                                .is_some_and(|report| ack.persisted_through_ts >= report.timestamp)
+                        {
+                            next_probe_at = Instant::now();
+                        }
                     }
                 }
                 Ok(LiveRead::Config(config)) => {
@@ -3769,21 +3807,25 @@ mod tests {
 
     #[test]
     fn encodes_realtime_samples_as_a_batch() {
-        let payload = live_update_payload(&[
-            Report {
-                timestamp: 10,
-                cpu: 20.0,
-                ..Report::default()
-            },
-            Report {
-                timestamp: 15,
-                cpu: 30.0,
-                ..Report::default()
-            },
-        ])
+        let payload = live_update_payload(
+            &[
+                Report {
+                    timestamp: 10,
+                    cpu: 20.0,
+                    ..Report::default()
+                },
+                Report {
+                    timestamp: 15,
+                    cpu: 30.0,
+                    ..Report::default()
+                },
+            ],
+            Some(false),
+        )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["type"], "update");
+        assert_eq!(value["persist"], false);
         assert_eq!(value["samples"].as_array().unwrap().len(), 2);
         assert_eq!(value["samples"][1]["cpu"], 30.0);
     }

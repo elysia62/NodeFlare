@@ -408,6 +408,11 @@ fn spawn_maintenance(state: Arc<AppState>) {
                 {
                     tracing::error!(%error, "database optimization failed");
                 }
+                if maintenance_runs.is_multiple_of(5)
+                    && let Err(error) = state.db.reclaim_incremental().await
+                {
+                    tracing::error!(%error, "incremental database reclaim failed");
+                }
             }
             if let Err(error) = exchange::refresh(&state.db, &state.http, false).await {
                 tracing::warn!(%error, "scheduled exchange-rate refresh failed");

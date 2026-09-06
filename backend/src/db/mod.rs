@@ -10,6 +10,7 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -18,7 +19,7 @@ pub const SECRET_MASK: &str = "********";
 const PASSWORD_SCHEME: &str = "argon2-client-pbkdf2-v1";
 const SESSION_ACTIVITY_WRITE_INTERVAL_SECONDS: i64 = 60;
 
-static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
+pub(super) static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,7 @@ impl DatabaseKind {
 pub struct Database {
     pool: AnyPool,
     kind: DatabaseKind,
+    sqlite_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,10 +81,11 @@ impl Database {
                 let free_pages = sqlx::query_scalar::<_, i64>("PRAGMA freelist_count")
                     .fetch_one(&self.pool)
                     .await?;
-                (
-                    page_count.saturating_mul(page_size),
-                    Some(free_pages.saturating_mul(page_size)),
-                )
+                let size = match self.sqlite_path.as_deref() {
+                    Some(path) => sqlite_storage_size(path).await?,
+                    None => page_count.saturating_mul(page_size),
+                };
+                (size, Some(free_pages.saturating_mul(page_size)))
             }
             DatabaseKind::Postgres => (
                 sqlx::query_scalar::<_, i64>("SELECT pg_database_size(current_database())::BIGINT")
@@ -102,13 +105,19 @@ impl Database {
     pub async fn reclaim_space(&self) -> Result<()> {
         match self.kind {
             DatabaseKind::Sqlite => {
+                let mut connection = self.pool.acquire().await?;
                 sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .execute(&self.pool)
+                    .execute(&mut *connection)
                     .await?;
-                sqlx::query("VACUUM").execute(&self.pool).await?;
-                sqlx::query("PRAGMA optimize").execute(&self.pool).await?;
+                sqlx::query("PRAGMA auto_vacuum = INCREMENTAL")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("VACUUM").execute(&mut *connection).await?;
+                sqlx::query("PRAGMA optimize")
+                    .execute(&mut *connection)
+                    .await?;
                 sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .execute(&self.pool)
+                    .execute(&mut *connection)
                     .await?;
             }
             DatabaseKind::Postgres => {
@@ -123,10 +132,35 @@ impl Database {
     pub async fn optimize(&self) -> Result<()> {
         if self.kind == DatabaseKind::Sqlite {
             sqlx::query("PRAGMA optimize").execute(&self.pool).await?;
-            sqlx::query("PRAGMA incremental_vacuum(256)")
-                .execute(&self.pool)
-                .await?;
         }
+        Ok(())
+    }
+
+    pub async fn reclaim_incremental(&self) -> Result<()> {
+        if self.kind != DatabaseKind::Sqlite {
+            return Ok(());
+        }
+        let mut connection = self.pool.acquire().await?;
+        let free_pages = sqlx::query_scalar::<_, i64>("PRAGMA freelist_count")
+            .fetch_one(&mut *connection)
+            .await?;
+        if free_pages == 0 {
+            return Ok(());
+        }
+        let page_budget = (free_pages / 8).clamp(256, 8192).min(free_pages);
+        let started = std::time::Instant::now();
+        for _ in 0..(page_budget + 127) / 128 {
+            if started.elapsed() >= Duration::from_millis(200) {
+                break;
+            }
+            sqlx::query("PRAGMA incremental_vacuum(128)")
+                .execute(&mut *connection)
+                .await?;
+            tokio::task::yield_now().await;
+        }
+        sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
+            .execute(&mut *connection)
+            .await?;
         Ok(())
     }
 
@@ -295,7 +329,35 @@ pub async fn connect(database_url: &str) -> Result<Database> {
         });
     }
     let pool = options.connect(database_url).await?;
-    Ok(Database { pool, kind })
+    let sqlite_path = if kind == DatabaseKind::Sqlite {
+        let databases = sqlx::query("PRAGMA database_list").fetch_all(&pool).await?;
+        databases.iter().find_map(|row| {
+            let name: String = row.try_get("name").ok()?;
+            let file: String = row.try_get("file").ok()?;
+            (name == "main" && !file.is_empty()).then(|| PathBuf::from(file))
+        })
+    } else {
+        None
+    };
+    Ok(Database {
+        pool,
+        kind,
+        sqlite_path,
+    })
+}
+
+async fn sqlite_storage_size(path: &std::path::Path) -> Result<i64> {
+    let mut size = 0_i64;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut candidate = path.as_os_str().to_os_string();
+        candidate.push(suffix);
+        match tokio::fs::metadata(&candidate).await {
+            Ok(metadata) => size = size.saturating_add(metadata.len().min(i64::MAX as u64) as i64),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(size)
 }
 
 pub fn database_kind(database_url: &str) -> Result<DatabaseKind> {
@@ -904,7 +966,88 @@ mod tests {
         assert_eq!(stats.kind, "sqlite");
         assert!(stats.size_bytes > 0);
         assert!(stats.reclaimable_bytes.is_some());
+        let expected = ["nodeflare.db", "nodeflare.db-wal", "nodeflare.db-shm"]
+            .into_iter()
+            .map(|name| {
+                std::fs::metadata(directory.path().join(name))
+                    .unwrap()
+                    .len() as i64
+            })
+            .sum::<i64>();
+        assert_eq!(stats.size_bytes, expected);
+        assert!(stats.size_bytes > std::fs::metadata(&path).unwrap().len() as i64);
         db.reclaim_space().await.unwrap();
+        db.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn incremental_reclaim_releases_pages_without_full_vacuum() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = connect(&format!(
+            "sqlite://{}",
+            directory.path().join("reclaim.db").display()
+        ))
+        .await
+        .unwrap();
+        db.migrate().await.unwrap();
+        sqlx::query("CREATE TABLE reclaim_test(id INTEGER PRIMARY KEY, data BLOB)")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<3000) \
+            INSERT INTO reclaim_test SELECT n,zeroblob(4096) FROM seq",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM reclaim_test WHERE id>1")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let before = sqlx::query_scalar::<_, i64>("PRAGMA freelist_count")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert!(before > 256);
+        db.reclaim_incremental().await.unwrap();
+        let after = sqlx::query_scalar::<_, i64>("PRAGMA freelist_count")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert!(after < before, "before={before}, after={after}");
+        assert!(before - after <= 8192);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reclaim_test")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            1
+        );
+        db.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn aggregate_migration_preserves_existing_history() {
+        let db = connect("sqlite::memory:").await.unwrap();
+        let original = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|migration| migration.version == 1)
+                .cloned()
+                .collect(),
+        );
+        original.run(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('old','Old','hash',1,1)")
+            .execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO metric_history(server_id,timestamp,cpu,mem_used) VALUES ('old',?,73.0,100)")
+            .bind(now()).execute(db.pool()).await.unwrap();
+        db.migrate().await.unwrap();
+        let point = queries::history(&db, "old", 1).await.unwrap().remove(0);
+        assert_eq!(point.cpu, 73.0);
+        assert_eq!(point.cpu_min, 73.0);
+        assert_eq!(point.cpu_max, 73.0);
+        assert_eq!(point.sample_count, 1);
     }
 
     #[tokio::test]

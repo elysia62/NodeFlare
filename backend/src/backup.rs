@@ -754,9 +754,20 @@ async fn restore_table<R: Read + Seek + Send>(
         bail!("{table} 备份表头无效");
     }
     let header: BackupTableHeader = serde_json::from_str(line.trim_end())?;
-    if header.table != table || header.columns != columns {
+    let legacy_history = table == "metric_history"
+        && columns.len()
+            == header.columns.len() + crate::db::queries::HISTORY_AGGREGATE_COLUMNS.len()
+        && columns.starts_with(&header.columns)
+        && columns[header.columns.len()..]
+            .iter()
+            .map(|column| column.name.as_str())
+            .eq(crate::db::queries::HISTORY_AGGREGATE_COLUMNS);
+    if header.table != table || (header.columns != columns && !legacy_history) {
         bail!("{table} 备份结构与当前数据库不兼容");
     }
+    // Original snapshot archives omit the new aggregate columns; their SQL
+    // defaults preserve each old row as a single sample.
+    let columns = &header.columns;
 
     let mut restored = 0_usize;
     let mut batch = Vec::with_capacity(INSERT_BATCH_ROWS);
@@ -892,6 +903,58 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(site_name, "Migrated");
+    }
+
+    #[tokio::test]
+    async fn restores_legacy_snapshot_archives_and_round_trips_aggregates() {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        let original = sqlx::migrate::Migrator::with_migrations(
+            crate::db::SQLITE_MIGRATOR
+                .iter()
+                .filter(|migration| migration.version == 1)
+                .cloned()
+                .collect(),
+        );
+        original.run(source.pool()).await.unwrap();
+        target.migrate().await.unwrap();
+        sqlx::query(
+            "INSERT INTO settings(key,value) VALUES \
+            ('admin_username','admin'),('admin_password_hash','hash'), \
+            ('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')",
+        )
+        .execute(source.pool())
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('legacy','Legacy','token',1,1)")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO metric_history(server_id,timestamp,cpu,mem_used) VALUES ('legacy',?,75.0,500)")
+            .bind(crate::db::now()).execute(source.pool()).await.unwrap();
+        assert_eq!(copy_database(&source, &target).await.unwrap(), 6);
+        let points = crate::db::queries::history(&target, "legacy", 1)
+            .await
+            .unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].cpu_min, 75.0);
+        assert_eq!(points[0].cpu_max, 75.0);
+        assert_eq!(points[0].mem_used_max, 500);
+        assert_eq!(points[0].sample_count, 1);
+        sqlx::query("UPDATE metric_history SET sample_count=4,cpu=50.0,cpu_min=10.0,cpu_max=90.0, \
+            memory_avg=50.0,memory_min=10.0,net_in_avg=20.0,net_in_min=1.0,first_timestamp=?,last_timestamp=?")
+            .bind(crate::db::now() - 3).bind(crate::db::now()).execute(target.pool()).await.unwrap();
+        source.migrate().await.unwrap();
+        assert_eq!(copy_database(&target, &source).await.unwrap(), 6);
+        let row = sqlx::query(
+            "SELECT sample_count,cpu_min,cpu_max,memory_avg,memory_min FROM metric_history",
+        )
+        .fetch_one(source.pool())
+        .await
+        .unwrap();
+        assert_eq!(row.try_get::<i64, _>("sample_count").unwrap(), 4);
+        assert_eq!(row.try_get::<f64, _>("cpu_min").unwrap(), 10.0);
+        assert_eq!(row.try_get::<f64, _>("cpu_max").unwrap(), 90.0);
+        assert_eq!(row.try_get::<f64, _>("memory_avg").unwrap(), 50.0);
+        assert_eq!(row.try_get::<f64, _>("memory_min").unwrap(), 10.0);
     }
 
     #[tokio::test]

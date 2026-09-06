@@ -8,7 +8,7 @@ use crate::models::{
 use anyhow::{Context, Result};
 use sqlx::any::AnyArguments;
 use sqlx::{Any, Arguments, AssertSqlSafe, Row, Transaction};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const REMOTE_TASK_ACTIVE_TTL_SECONDS: i64 = 24 * 60 * 60;
 const AGENT_REPORT_MAX_AGE_SECONDS: i64 = 2 * 60 * 60;
@@ -18,6 +18,25 @@ const AGENT_REPORT_MAX_GPUS: usize = 32;
 const AGENT_REPORT_MAX_LATENCY_RESULTS: usize = 2048;
 const HISTORY_INSERT_BATCH_ROWS: usize = 500;
 const LATENCY_INSERT_BATCH_ROWS: usize = 500;
+const CLEANUP_DELETE_BATCH_ROWS: i64 = 1000;
+const CLEANUP_MAX_PASSES: usize = 10;
+const CLEANUP_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+pub const HISTORY_AGGREGATE_COLUMNS: [&str; 14] = [
+    "sample_count",
+    "first_timestamp",
+    "last_timestamp",
+    "cpu_min",
+    "cpu_max",
+    "mem_used_max",
+    "memory_avg",
+    "memory_min",
+    "disk_avg",
+    "disk_min",
+    "net_in_avg",
+    "net_in_min",
+    "net_out_avg",
+    "net_out_min",
+];
 
 #[derive(Debug, Clone)]
 pub struct AgentIdentity {
@@ -47,6 +66,213 @@ struct TrafficState {
     raw_tx: i64,
     used_rx: i64,
     used_tx: i64,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryAggregate {
+    timestamp: i64,
+    first_timestamp: i64,
+    latest: AgentReport,
+    count: f64,
+    cpu_sum: f64,
+    cpu_min: f64,
+    cpu_max: f64,
+    load1_sum: f64,
+    load5_sum: f64,
+    load15_sum: f64,
+    mem_sum: f64,
+    mem_max: i64,
+    swap_sum: f64,
+    gpu_sum: f64,
+    net_in_max: f64,
+    net_out_max: f64,
+    disk_read_bps_max: f64,
+    disk_write_bps_max: f64,
+    disk_read_iops_max: f64,
+    disk_write_iops_max: f64,
+    disk_await_max: f64,
+    disk_utilization_max: f64,
+    disk_used_max: i64,
+    processes_max: i64,
+    tcp_connections_max: i64,
+    udp_connections_max: i64,
+    memory_sum: f64,
+    memory_min: f64,
+    disk_sum: f64,
+    disk_min: f64,
+    net_in_sum: f64,
+    net_in_min: f64,
+    net_out_sum: f64,
+    net_out_min: f64,
+}
+
+impl HistoryAggregate {
+    fn new(report: &AgentReport, timestamp: i64) -> Self {
+        Self {
+            timestamp,
+            first_timestamp: report.timestamp,
+            latest: report.clone(),
+            count: 0.0,
+            cpu_sum: 0.0,
+            cpu_min: f64::INFINITY,
+            cpu_max: f64::NEG_INFINITY,
+            load1_sum: 0.0,
+            load5_sum: 0.0,
+            load15_sum: 0.0,
+            mem_sum: 0.0,
+            mem_max: 0,
+            swap_sum: 0.0,
+            gpu_sum: 0.0,
+            net_in_max: 0.0,
+            net_out_max: 0.0,
+            disk_read_bps_max: 0.0,
+            disk_write_bps_max: 0.0,
+            disk_read_iops_max: 0.0,
+            disk_write_iops_max: 0.0,
+            disk_await_max: 0.0,
+            disk_utilization_max: 0.0,
+            disk_used_max: 0,
+            processes_max: 0,
+            tcp_connections_max: 0,
+            udp_connections_max: 0,
+            memory_sum: 0.0,
+            memory_min: f64::INFINITY,
+            disk_sum: 0.0,
+            disk_min: f64::INFINITY,
+            net_in_sum: 0.0,
+            net_in_min: f64::INFINITY,
+            net_out_sum: 0.0,
+            net_out_min: f64::INFINITY,
+        }
+    }
+
+    fn add(&mut self, report: &AgentReport) {
+        let mem_total = self.latest.mem_total.max(report.mem_total);
+        let swap_total = self.latest.swap_total.max(report.swap_total);
+        let disk_total = self.latest.disk_total.max(report.disk_total);
+        self.latest = report.clone();
+        self.latest.mem_total = mem_total;
+        self.latest.swap_total = swap_total;
+        self.latest.disk_total = disk_total;
+        self.count += 1.0;
+        self.cpu_sum += report.cpu;
+        self.cpu_min = self.cpu_min.min(report.cpu);
+        self.cpu_max = self.cpu_max.max(report.cpu);
+        self.load1_sum += report.load1;
+        self.load5_sum += report.load5;
+        self.load15_sum += report.load15;
+        self.mem_sum += report.mem_used as f64;
+        self.mem_max = self.mem_max.max(report.mem_used);
+        self.swap_sum += report.swap_used as f64;
+        self.gpu_sum += report.gpu_usage;
+        self.net_in_max = self.net_in_max.max(report.net_in);
+        self.net_out_max = self.net_out_max.max(report.net_out);
+        self.disk_read_bps_max = self.disk_read_bps_max.max(report.disk_read_bps);
+        self.disk_write_bps_max = self.disk_write_bps_max.max(report.disk_write_bps);
+        self.disk_read_iops_max = self.disk_read_iops_max.max(report.disk_read_iops);
+        self.disk_write_iops_max = self.disk_write_iops_max.max(report.disk_write_iops);
+        self.disk_await_max = self.disk_await_max.max(report.disk_await_ms);
+        self.disk_utilization_max = self.disk_utilization_max.max(report.disk_utilization);
+        self.disk_used_max = self.disk_used_max.max(report.disk_used);
+        self.processes_max = self.processes_max.max(report.processes);
+        self.tcp_connections_max = self.tcp_connections_max.max(report.tcp_connections);
+        self.udp_connections_max = self.udp_connections_max.max(report.udp_connections);
+        let memory = capacity_percentage(report.mem_used, report.mem_total);
+        let disk = capacity_percentage(report.disk_used, report.disk_total);
+        self.memory_sum += memory;
+        self.memory_min = self.memory_min.min(memory);
+        self.disk_sum += disk;
+        self.disk_min = self.disk_min.min(disk);
+        self.net_in_sum += report.net_in;
+        self.net_in_min = self.net_in_min.min(report.net_in);
+        self.net_out_sum += report.net_out;
+        self.net_out_min = self.net_out_min.min(report.net_out);
+    }
+
+    fn finish(mut self) -> HistoryRow {
+        let count = self.count.max(1.0);
+        let last_timestamp = self.latest.timestamp;
+        self.latest.timestamp = self.timestamp;
+        self.latest.cpu = self.cpu_sum / count;
+        self.latest.load1 = self.load1_sum / count;
+        self.latest.load5 = self.load5_sum / count;
+        self.latest.load15 = self.load15_sum / count;
+        self.latest.mem_used = (self.mem_sum / count).round() as i64;
+        self.latest.swap_used = (self.swap_sum / count).round() as i64;
+        self.latest.net_in = self.net_in_max;
+        self.latest.net_out = self.net_out_max;
+        self.latest.gpu_usage = self.gpu_sum / count;
+        self.latest.disk_read_bps = self.disk_read_bps_max;
+        self.latest.disk_write_bps = self.disk_write_bps_max;
+        self.latest.disk_read_iops = self.disk_read_iops_max;
+        self.latest.disk_write_iops = self.disk_write_iops_max;
+        self.latest.disk_await_ms = self.disk_await_max;
+        self.latest.disk_utilization = self.disk_utilization_max;
+        self.latest.disk_used = self.disk_used_max;
+        self.latest.processes = self.processes_max;
+        self.latest.tcp_connections = self.tcp_connections_max;
+        self.latest.udp_connections = self.udp_connections_max;
+        HistoryRow {
+            report: self.latest,
+            sample_count: self.count as i64,
+            first_timestamp: self.first_timestamp,
+            last_timestamp,
+            cpu_min: self.cpu_min,
+            cpu_max: self.cpu_max,
+            mem_used_max: self.mem_max,
+            memory_avg: self.memory_sum / count,
+            memory_min: self.memory_min,
+            disk_avg: self.disk_sum / count,
+            disk_min: self.disk_min,
+            net_in_avg: self.net_in_sum / count,
+            net_in_min: self.net_in_min,
+            net_out_avg: self.net_out_sum / count,
+            net_out_min: self.net_out_min,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HistoryRow {
+    report: AgentReport,
+    sample_count: i64,
+    first_timestamp: i64,
+    last_timestamp: i64,
+    cpu_min: f64,
+    cpu_max: f64,
+    mem_used_max: i64,
+    memory_avg: f64,
+    memory_min: f64,
+    disk_avg: f64,
+    disk_min: f64,
+    net_in_avg: f64,
+    net_in_min: f64,
+    net_out_avg: f64,
+    net_out_min: f64,
+}
+
+fn capacity_percentage(used: i64, total: i64) -> f64 {
+    if total > 0 {
+        used as f64 * 100.0 / total as f64
+    } else {
+        0.0
+    }
+}
+
+fn aggregate_history(reports: &[AgentReport], interval: i64) -> Vec<HistoryRow> {
+    let interval = interval.clamp(15, 3600);
+    let mut buckets = BTreeMap::<i64, HistoryAggregate>::new();
+    for report in reports {
+        let timestamp = report.timestamp.div_euclid(interval) * interval;
+        buckets
+            .entry(timestamp)
+            .or_insert_with(|| HistoryAggregate::new(report, timestamp))
+            .add(report);
+    }
+    buckets
+        .into_values()
+        .map(HistoryAggregate::finish)
+        .collect()
 }
 
 pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<ServerView>> {
@@ -357,6 +583,7 @@ pub async fn save_agent_batch(
     batch_id: &str,
     reports: &[AgentReport],
     remote_ip: &str,
+    persist: Option<bool>,
 ) -> Result<PersistResult> {
     let mut reports = reports.to_vec();
     reports.sort_by_key(|report| report.timestamp);
@@ -375,7 +602,21 @@ pub async fn save_agent_batch(
         anyhow::bail!("report batch exceeds 720 samples");
     }
 
-    let mut transaction = db.pool().begin().await?;
+    let needs_write = persist != Some(false)
+        || reports
+            .iter()
+            .any(|report| !report.latency_results.is_empty());
+    let mut transaction = if db.is_postgres() || !needs_write {
+        db.pool().begin().await?
+    } else {
+        db.pool().begin_with("BEGIN IMMEDIATE").await?
+    };
+    if db.is_postgres() && needs_write {
+        sqlx::query("SELECT id FROM servers WHERE id=$1 FOR UPDATE")
+            .bind(&identity.server_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+    }
     let latest_row = sqlx::query(
         db.sql("SELECT latest_timestamp, last_batch_id FROM server_latest_state WHERE server_id=?"),
     )
@@ -415,7 +656,11 @@ pub async fn save_agent_batch(
     let latest = reports.last().context("report batch became empty")?;
     let report_interval = identity.report_interval.clamp(15, 3600);
     let next_persist_at = persisted_before.saturating_add(report_interval);
-    if persisted_before > 0 && latest.timestamp < next_persist_at {
+    // Only a complete persistence batch may advance the durable watermark.
+    // Older agents omit this flag and retain their scheduled persistence behavior.
+    if persist == Some(false)
+        || (persist.is_none() && persisted_before > 0 && latest.timestamp < next_persist_at)
+    {
         let next_persist_after_ms =
             next_persist_at.saturating_sub(latest.timestamp).max(1) as u64 * 1000;
         if reports
@@ -435,13 +680,8 @@ pub async fn save_agent_batch(
         });
     }
 
-    save_history_rows(
-        db,
-        &mut transaction,
-        &identity.server_id,
-        std::slice::from_ref(latest),
-    )
-    .await?;
+    let history_rows = aggregate_history(&reports, report_interval);
+    save_history_rows(db, &mut transaction, &identity.server_id, &history_rows).await?;
     save_latency_rows(db, &mut transaction, &identity.server_id, &reports).await?;
     let latest = reports.last().context("report batch became empty")?;
     let persisted_through = latest.timestamp;
@@ -486,7 +726,7 @@ pub async fn save_agent_batch(
     .await?;
     transaction.commit().await?;
     Ok(PersistResult {
-        reports: vec![latest.clone()],
+        reports,
         persisted: true,
         persisted_through,
         next_persist_after_ms: report_interval as u64 * 1000,
@@ -677,15 +917,16 @@ async fn save_history_rows(
     db: &Database,
     transaction: &mut Transaction<'_, Any>,
     server_id: &str,
-    reports: &[AgentReport],
+    rows: &[HistoryRow],
 ) -> Result<()> {
-    for batch in reports.chunks(HISTORY_INSERT_BATCH_ROWS) {
+    for batch in rows.chunks(HISTORY_INSERT_BATCH_ROWS) {
         let mut arguments = AnyArguments::default();
         let mut parameter_index = 1_usize;
         let mut value_groups = Vec::with_capacity(batch.len());
-        for report in batch {
-            let mut placeholders = Vec::with_capacity(27);
-            for _ in 0..27 {
+        for row in batch {
+            let report = &row.report;
+            let mut placeholders = Vec::with_capacity(27 + HISTORY_AGGREGATE_COLUMNS.len());
+            for _ in 0..27 + HISTORY_AGGREGATE_COLUMNS.len() {
                 placeholders.push(if db.is_postgres() {
                     let placeholder = format!("${parameter_index}");
                     parameter_index += 1;
@@ -729,32 +970,130 @@ async fn save_history_rows(
             add!(report.disk_write_iops);
             add!(report.disk_await_ms);
             add!(report.disk_utilization);
+            add!(row.sample_count);
+            add!(row.first_timestamp);
+            add!(row.last_timestamp);
+            add!(row.cpu_min);
+            add!(row.cpu_max);
+            add!(row.mem_used_max);
+            add!(row.memory_avg);
+            add!(row.memory_min);
+            add!(row.disk_avg);
+            add!(row.disk_min);
+            add!(row.net_in_avg);
+            add!(row.net_in_min);
+            add!(row.net_out_avg);
+            add!(row.net_out_min);
         }
         let sql = format!(
             "INSERT INTO metric_history(server_id, timestamp, cpu, load1, load5, load15, \
              mem_used, mem_total, swap_used, swap_total, disk_used, disk_total, net_in, net_out, \
              net_rx_total, net_tx_total, uptime, processes, tcp_connections, udp_connections, \
              gpu_usage, disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops, \
-             disk_await_ms, disk_utilization) VALUES {} \
-             ON CONFLICT(server_id, timestamp) DO UPDATE SET cpu=excluded.cpu, \
-             load1=excluded.load1, load5=excluded.load5, load15=excluded.load15, \
-             mem_used=excluded.mem_used, mem_total=excluded.mem_total, \
-             swap_used=excluded.swap_used, swap_total=excluded.swap_total, \
-             disk_used=excluded.disk_used, disk_total=excluded.disk_total, net_in=excluded.net_in, \
-             net_out=excluded.net_out, net_rx_total=excluded.net_rx_total, \
-             net_tx_total=excluded.net_tx_total, uptime=excluded.uptime, \
-             processes=excluded.processes, tcp_connections=excluded.tcp_connections, \
-             udp_connections=excluded.udp_connections, gpu_usage=excluded.gpu_usage, \
-             disk_read_bps=excluded.disk_read_bps, disk_write_bps=excluded.disk_write_bps, \
-             disk_read_iops=excluded.disk_read_iops, disk_write_iops=excluded.disk_write_iops, \
-             disk_await_ms=excluded.disk_await_ms, disk_utilization=excluded.disk_utilization",
-            value_groups.join(",")
+             disk_await_ms, disk_utilization, {}) VALUES {} \
+             ON CONFLICT(server_id, timestamp) DO UPDATE SET {}",
+            HISTORY_AGGREGATE_COLUMNS.join(","),
+            value_groups.join(","),
+            history_merge_sql(),
         );
         sqlx::query_with(AssertSqlSafe(sql), arguments)
             .execute(&mut **transaction)
             .await?;
     }
     Ok(())
+}
+
+fn history_merge_sql() -> String {
+    let mut updates = Vec::new();
+    for column in [
+        "cpu",
+        "load1",
+        "load5",
+        "load15",
+        "gpu_usage",
+        "mem_used",
+        "swap_used",
+    ] {
+        let mean = format!(
+            "(CAST(metric_history.{column} AS DOUBLE PRECISION)*metric_history.sample_count \
+             +excluded.{column}*excluded.sample_count)/(metric_history.sample_count+excluded.sample_count)"
+        );
+        let value = if matches!(column, "mem_used" | "swap_used") {
+            format!("CAST(ROUND({mean}) AS BIGINT)")
+        } else {
+            mean
+        };
+        updates.push(format!("{column}={value}"));
+    }
+    for column in [
+        "mem_total",
+        "swap_total",
+        "disk_used",
+        "disk_total",
+        "net_in",
+        "net_out",
+        "processes",
+        "tcp_connections",
+        "udp_connections",
+        "disk_read_bps",
+        "disk_write_bps",
+        "disk_read_iops",
+        "disk_write_iops",
+        "disk_await_ms",
+        "disk_utilization",
+    ] {
+        updates.push(format!(
+            "{column}=CASE WHEN metric_history.{column}>excluded.{column} \
+            THEN metric_history.{column} ELSE excluded.{column} END"
+        ));
+    }
+    for (column, fallback, minimum) in [
+        ("cpu_min", "cpu", true),
+        ("cpu_max", "cpu", false),
+        ("mem_used_max", "mem_used", false),
+    ] {
+        let old = format!("COALESCE(metric_history.{column},metric_history.{fallback})");
+        let comparison = if minimum { "<" } else { ">" };
+        updates.push(format!(
+            "{column}=CASE WHEN {old}{comparison}excluded.{column} \
+            THEN {old} ELSE excluded.{column} END"
+        ));
+    }
+    for (prefix, fallback) in [
+        (
+            "memory",
+            "CASE WHEN metric_history.mem_total>0 THEN \
+            CAST(metric_history.mem_used AS DOUBLE PRECISION)*100.0/metric_history.mem_total ELSE 0.0 END",
+        ),
+        (
+            "disk",
+            "CASE WHEN metric_history.disk_total>0 THEN \
+            CAST(metric_history.disk_used AS DOUBLE PRECISION)*100.0/metric_history.disk_total ELSE 0.0 END",
+        ),
+        ("net_in", "metric_history.net_in"),
+        ("net_out", "metric_history.net_out"),
+    ] {
+        let mean = format!("COALESCE(metric_history.{prefix}_avg,{fallback})");
+        let min = format!("COALESCE(metric_history.{prefix}_min,{fallback})");
+        updates.push(format!("{prefix}_avg=({mean}*metric_history.sample_count \
+            +excluded.{prefix}_avg*excluded.sample_count)/(metric_history.sample_count+excluded.sample_count)"));
+        updates.push(format!(
+            "{prefix}_min=CASE WHEN {min}<excluded.{prefix}_min \
+            THEN {min} ELSE excluded.{prefix}_min END"
+        ));
+    }
+    for column in ["net_rx_total", "net_tx_total", "uptime", "last_timestamp"] {
+        updates.push(format!("{column}=excluded.{column}"));
+    }
+    updates.push(
+        "first_timestamp=CASE WHEN COALESCE(NULLIF(metric_history.first_timestamp,0),\
+        metric_history.timestamp)<excluded.first_timestamp THEN \
+        COALESCE(NULLIF(metric_history.first_timestamp,0),metric_history.timestamp) \
+        ELSE excluded.first_timestamp END"
+            .to_string(),
+    );
+    updates.push("sample_count=metric_history.sample_count+excluded.sample_count".to_string());
+    updates.join(",")
 }
 
 async fn save_latency_rows(
@@ -827,22 +1166,28 @@ pub async fn history(db: &Database, server_id: &str, hours: i64) -> Result<Vec<H
     let bucket = (hours * 3600 / 720).max(1);
     let since = now() - hours * 3600;
     let rows = sqlx::query(db.sql(
-        "SELECT bucket_timestamp, AVG(cpu) AS cpu, AVG(load1) AS load1, \
-         AVG(load5) AS load5, AVG(load15) AS load15, \
-         AVG(CAST(mem_used AS DOUBLE PRECISION)) AS mem_used, \
+        "SELECT bucket_timestamp, SUM(cpu * sample_count) / SUM(sample_count) AS cpu, \
+         MIN(COALESCE(cpu_min, cpu)) AS cpu_min, MAX(COALESCE(cpu_max, cpu)) AS cpu_max, \
+         CAST(SUM(sample_count) AS BIGINT) AS sample_count, \
+         SUM(load1 * sample_count) / SUM(sample_count) AS load1, \
+         SUM(load5 * sample_count) / SUM(sample_count) AS load5, \
+         SUM(load15 * sample_count) / SUM(sample_count) AS load15, \
+         SUM(CAST(mem_used AS DOUBLE PRECISION) * sample_count) / SUM(sample_count) AS mem_used, \
+         MAX(COALESCE(mem_used_max, mem_used)) AS mem_used_max, \
          MAX(mem_total) AS mem_total, \
-         AVG(CAST(swap_used AS DOUBLE PRECISION)) AS swap_used, \
+         SUM(CAST(swap_used AS DOUBLE PRECISION) * sample_count) / SUM(sample_count) AS swap_used, \
          MAX(swap_total) AS swap_total, \
          MAX(disk_used) AS disk_used, MAX(disk_total) AS disk_total, MAX(net_in) AS net_in, \
          MAX(net_out) AS net_out, MAX(net_rx_total) AS net_rx_total, \
          MAX(net_tx_total) AS net_tx_total, MAX(processes) AS processes, \
          MAX(tcp_connections) AS tcp_connections, MAX(udp_connections) AS udp_connections, \
-         AVG(gpu_usage) AS gpu_usage, MAX(disk_read_bps) AS disk_read_bps, \
+         SUM(gpu_usage * sample_count) / SUM(sample_count) AS gpu_usage, MAX(disk_read_bps) AS disk_read_bps, \
          MAX(disk_write_bps) AS disk_write_bps, MAX(disk_read_iops) AS disk_read_iops, \
          MAX(disk_write_iops) AS disk_write_iops, MAX(disk_await_ms) AS disk_await_ms, \
          MAX(disk_utilization) AS disk_utilization FROM ( \
            SELECT (timestamp / ?) * ? AS bucket_timestamp, metric_history.* \
-           FROM metric_history WHERE server_id=? AND timestamp>=? \
+           FROM metric_history WHERE server_id=? \
+             AND COALESCE(NULLIF(last_timestamp,0),timestamp)>=? \
          ) samples GROUP BY bucket_timestamp ORDER BY bucket_timestamp",
     ))
     .bind(bucket)
@@ -856,10 +1201,14 @@ pub async fn history(db: &Database, server_id: &str, hours: i64) -> Result<Vec<H
             Ok(HistoryPoint {
                 timestamp: row.try_get("bucket_timestamp")?,
                 cpu: row.try_get::<f64, _>("cpu")?,
+                cpu_min: row.try_get("cpu_min")?,
+                cpu_max: row.try_get("cpu_max")?,
+                sample_count: row.try_get("sample_count")?,
                 load1: row.try_get::<f64, _>("load1")?,
                 load5: row.try_get::<f64, _>("load5")?,
                 load15: row.try_get::<f64, _>("load15")?,
                 mem_used: row.try_get::<f64, _>("mem_used")?.round() as i64,
+                mem_used_max: row.try_get("mem_used_max")?,
                 mem_total: row.try_get("mem_total")?,
                 swap_used: row.try_get::<f64, _>("swap_used")?.round() as i64,
                 swap_total: row.try_get("swap_total")?,
@@ -886,39 +1235,74 @@ pub async fn history(db: &Database, server_id: &str, hours: i64) -> Result<Vec<H
 }
 
 pub async fn cleanup_database(db: &Database, retention_days: i64) -> Result<()> {
+    cleanup_database_with_budget(db, retention_days, CLEANUP_MAX_PASSES, CLEANUP_TIME_BUDGET).await
+}
+
+async fn cleanup_database_with_budget(
+    db: &Database,
+    retention_days: i64,
+    max_passes: usize,
+    budget: std::time::Duration,
+) -> Result<()> {
     let current = now();
     let cutoff = current - retention_days.clamp(1, 3650) * 86_400;
     let active_task_cutoff = current - REMOTE_TASK_ACTIVE_TTL_SECONDS;
-    let mut transaction = db.pool().begin().await?;
-    sqlx::query(db.sql(
-        "UPDATE remote_tasks SET status='failed', completed_at=?, \
-         result=CASE WHEN result='' THEN '任务等待超过 24 小时，已自动取消' ELSE result END \
-         WHERE status IN ('pending','sent') AND requested_at<?",
-    ))
-    .bind(current)
-    .bind(active_task_cutoff)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(db.sql("DELETE FROM metric_history WHERE timestamp<?"))
-        .bind(cutoff)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(db.sql("DELETE FROM latency_results WHERE timestamp<?"))
-        .bind(cutoff)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(db.sql(
-        "DELETE FROM remote_tasks WHERE status IN ('success','failed') \
-         AND completed_at IS NOT NULL AND completed_at<?",
-    ))
-    .bind(cutoff)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(db.sql("DELETE FROM alert_states WHERE active=0 AND updated_at<?"))
-        .bind(cutoff)
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
+    let statements = [
+        "DELETE FROM metric_history WHERE (server_id, timestamp) IN ( \
+           SELECT server_id, timestamp FROM metric_history WHERE \
+           COALESCE(NULLIF(last_timestamp,0),timestamp)<? \
+           ORDER BY timestamp LIMIT ?)",
+        "DELETE FROM latency_results WHERE (task_id, server_id, timestamp) IN ( \
+           SELECT task_id, server_id, timestamp FROM latency_results WHERE timestamp<? \
+           ORDER BY timestamp LIMIT ?)",
+        "DELETE FROM remote_tasks WHERE status IN ('success','failed') AND id IN ( \
+           SELECT id FROM remote_tasks WHERE status IN ('success','failed') AND completed_at<? \
+           ORDER BY completed_at LIMIT ?)",
+        "DELETE FROM alert_states WHERE active=0 AND state_key IN ( \
+           SELECT state_key FROM alert_states WHERE active=0 AND updated_at<? \
+           ORDER BY updated_at LIMIT ?)",
+    ];
+    let started = std::time::Instant::now();
+    let mut done = [false; 5];
+    // Each statement commits its own bounded batch; rotate tables so a large
+    // metrics backlog cannot starve latency, task or alert cleanup.
+    for _ in 0..max_passes {
+        for (index, finished) in done.iter_mut().enumerate() {
+            if started.elapsed() >= budget {
+                return Ok(());
+            }
+            if *finished {
+                continue;
+            }
+            let affected = if index == 0 {
+                sqlx::query(db.sql(
+                    "UPDATE remote_tasks SET status='failed', completed_at=?, \
+                     result=CASE WHEN result='' THEN '任务等待超过 24 小时，已自动取消' ELSE result END \
+                     WHERE status IN ('pending','sent') AND id IN ( \
+                       SELECT id FROM remote_tasks WHERE status IN ('pending','sent') AND requested_at<? \
+                       ORDER BY requested_at LIMIT ?)",
+                ))
+                .bind(current)
+                .bind(active_task_cutoff)
+                .bind(CLEANUP_DELETE_BATCH_ROWS)
+                .execute(db.pool())
+                .await?
+                .rows_affected()
+            } else {
+                sqlx::query(db.sql(statements[index - 1]))
+                    .bind(cutoff)
+                    .bind(CLEANUP_DELETE_BATCH_ROWS)
+                    .execute(db.pool())
+                    .await?
+                    .rows_affected()
+            };
+            *finished = affected < CLEANUP_DELETE_BATCH_ROWS as u64;
+            tokio::task::yield_now().await;
+        }
+        if done.iter().all(|finished| *finished) {
+            break;
+        }
+    }
     Ok(())
 }
 
@@ -1352,47 +1736,57 @@ pub async fn evaluate_resource_rules(
     server_id: &str,
 ) -> Result<Vec<ResourceAlertEvaluation>> {
     let rules = list_alert_rules(db).await?;
+    let report_interval =
+        sqlx::query_scalar::<_, i64>(db.sql("SELECT report_interval FROM servers WHERE id=?"))
+            .bind(server_id)
+            .fetch_optional(db.pool())
+            .await?
+            .unwrap_or(60);
     let mut evaluations = Vec::new();
     for rule in rules.into_iter().filter(|rule| {
         rule.enabled
             && (rule.server_ids.is_empty() || rule.server_ids.iter().any(|id| id == server_id))
     }) {
-        let expression = match rule.metric.as_str() {
-            "cpu" => "cpu",
-            "memory" => {
-                "CASE WHEN mem_total>0 THEN CAST(mem_used AS DOUBLE PRECISION) * \
-                 CAST(100 AS DOUBLE PRECISION) / CAST(mem_total AS DOUBLE PRECISION) \
-                 ELSE CAST(0 AS DOUBLE PRECISION) END"
-            }
-            "disk" => {
-                "CASE WHEN disk_total>0 THEN CAST(disk_used AS DOUBLE PRECISION) * \
-                 CAST(100 AS DOUBLE PRECISION) / CAST(disk_total AS DOUBLE PRECISION) \
-                 ELSE CAST(0 AS DOUBLE PRECISION) END"
-            }
-            "net_in" => "net_in / CAST(1048576 AS DOUBLE PRECISION)",
-            "net_out" => "net_out / CAST(1048576 AS DOUBLE PRECISION)",
+        let (average_expression, minimum_expression) = match rule.metric.as_str() {
+            "cpu" => ("cpu", "COALESCE(cpu_min, cpu)"),
+            "memory" => (
+                "COALESCE(memory_avg, CASE WHEN mem_total>0 THEN CAST(mem_used AS DOUBLE PRECISION)*100.0/mem_total ELSE 0.0 END)",
+                "COALESCE(memory_min, CASE WHEN mem_total>0 THEN CAST(mem_used AS DOUBLE PRECISION)*100.0/mem_total ELSE 0.0 END)",
+            ),
+            "disk" => (
+                "COALESCE(disk_avg, CASE WHEN disk_total>0 THEN CAST(disk_used AS DOUBLE PRECISION)*100.0/disk_total ELSE 0.0 END)",
+                "COALESCE(disk_min, CASE WHEN disk_total>0 THEN CAST(disk_used AS DOUBLE PRECISION)*100.0/disk_total ELSE 0.0 END)",
+            ),
+            "net_in" => (
+                "COALESCE(net_in_avg, net_in)/1048576.0",
+                "COALESCE(net_in_min, net_in)/1048576.0",
+            ),
+            "net_out" => (
+                "COALESCE(net_out_avg, net_out)/1048576.0",
+                "COALESCE(net_out_min, net_out)/1048576.0",
+            ),
             _ => continue,
         };
-        let query = if db.is_postgres() {
-            format!(
-                "SELECT MIN(timestamp) AS first_timestamp, AVG({expression}) AS average_value, \
-                 MIN({expression}) AS minimum_value, COUNT(*) AS sample_count \
-                 FROM metric_history WHERE server_id=$1 AND timestamp>=$2"
-            )
-        } else {
-            format!(
-                "SELECT MIN(timestamp) AS first_timestamp, AVG({expression}) AS average_value, \
-                 MIN({expression}) AS minimum_value, COUNT(*) AS sample_count \
-                 FROM metric_history WHERE server_id=? AND timestamp>=?"
-            )
-        };
-        let since = now() - rule.duration_minutes * 60;
+        let filter = db.sql(
+            "server_id=? AND timestamp>=? AND COALESCE(NULLIF(last_timestamp,0),timestamp)>=?",
+        );
+        let query = format!(
+            "SELECT MIN(COALESCE(NULLIF(first_timestamp,0),timestamp)) AS first_timestamp, \
+             MAX(COALESCE(NULLIF(last_timestamp,0),timestamp)) AS last_timestamp, \
+             SUM(({average_expression}) * sample_count) / NULLIF(SUM(sample_count), 0) AS average_value, \
+             MIN({minimum_expression}) AS minimum_value, COUNT(*) AS sample_count \
+             FROM metric_history WHERE {filter}"
+        );
+        let current = now();
+        let since = current - rule.duration_minutes * 60;
         let row = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
             .bind(server_id)
+            .bind(since - 3600)
             .bind(since)
             .fetch_one(db.pool())
             .await?;
         let first: Option<i64> = row.try_get("first_timestamp")?;
+        let last: Option<i64> = row.try_get("last_timestamp")?;
         let count: i64 = row.try_get("sample_count")?;
         let average: Option<f64> = row.try_get("average_value")?;
         let minimum: Option<f64> = row.try_get("minimum_value")?;
@@ -1401,7 +1795,9 @@ pub async fn evaluate_resource_rules(
         } else {
             average.unwrap_or_default()
         };
-        let covered = count > 0 && first.is_some_and(|first| first <= since + 5);
+        let covered = count > 0
+            && first.is_some_and(|first| first <= since + 5)
+            && last.is_some_and(|last| last >= current - report_interval - 5);
         evaluations.push(ResourceAlertEvaluation {
             triggered: covered && value >= rule.threshold,
             rule,
@@ -1984,6 +2380,327 @@ mod tests {
         }
     }
 
+    async fn test_server() -> (Database, AgentIdentity) {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let (_, token) = create_server(&db, &server_input(0)).await.unwrap();
+        let identity = agent_identity(&db, &token).await.unwrap().unwrap();
+        (db, identity)
+    }
+
+    fn sample(timestamp: i64, cpu: f64) -> AgentReport {
+        AgentReport {
+            timestamp,
+            cpu,
+            load1: cpu / 10.0,
+            mem_used: cpu as i64 * 10,
+            mem_total: 1000,
+            disk_used: cpu as i64 * 10,
+            disk_total: 1000,
+            net_in: cpu * 1_048_576.0,
+            net_out: cpu * 2_097_152.0,
+            disk_read_bps: cpu * 100.0,
+            gpu_usage: cpu,
+            net_rx_total: timestamp * 10,
+            net_tx_total: timestamp * 20,
+            ..AgentReport::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregate_batches_merge_weighted_values_and_ignore_retries() {
+        let (db, identity) = test_server().await;
+        let start = now().div_euclid(60) * 60 - 120;
+        let reports = [
+            sample(start, 10.0),
+            sample(start + 1, 90.0),
+            sample(start + 2, 20.0),
+        ];
+        let first = save_agent_batch(&db, &identity, "first", &reports[..2], "", Some(true))
+            .await
+            .unwrap();
+        assert_eq!(first.persisted_through, start + 1);
+        // Reconnect with an overlapping batch: only the unacknowledged sample is added.
+        let second = save_agent_batch(&db, &identity, "overlap", &reports[1..], "", Some(true))
+            .await
+            .unwrap();
+        assert_eq!(second.persisted_through, start + 2);
+        for id in ["overlap", "another-retry"] {
+            let retry = save_agent_batch(&db, &identity, id, &reports, "", Some(true))
+                .await
+                .unwrap();
+            assert!(retry.reports.is_empty());
+            assert_eq!(retry.persisted_through, start + 2);
+        }
+        let points = history(&db, &identity.server_id, 1).await.unwrap();
+        assert_eq!(points.len(), 1);
+        let point = &points[0];
+        assert_eq!(point.sample_count, 3);
+        assert_eq!(point.cpu, 40.0);
+        assert_eq!(point.cpu_min, 10.0);
+        assert_eq!(point.cpu_max, 90.0);
+        assert_eq!(point.mem_used, 400);
+        assert_eq!(point.mem_used_max, 900);
+        assert_eq!(point.net_in, 90.0 * 1_048_576.0);
+        assert_eq!(point.disk_read_bps, 9000.0);
+        assert_eq!(point.net_rx_total, reports[2].net_rx_total);
+        let latest = list_servers(&db, true).await.unwrap().remove(0);
+        assert_eq!(latest.timestamp, Some(start + 2));
+        assert_eq!(latest.cpu, Some(20.0));
+    }
+
+    #[tokio::test]
+    async fn realtime_batches_cannot_acknowledge_unpersisted_history() {
+        let (db, identity) = test_server().await;
+        let start = now() - 180;
+        let reports = (0..121)
+            .map(|offset| sample(start + offset, 25.0))
+            .collect::<Vec<_>>();
+        save_agent_batch(&db, &identity, "initial", &reports[..1], "", Some(true))
+            .await
+            .unwrap();
+        let live = save_agent_batch(&db, &identity, "live", &reports[120..], "", Some(false))
+            .await
+            .unwrap();
+        assert!(!live.persisted);
+        assert_eq!(live.persisted_through, start);
+        // Even a payload-size-limited batch shorter than report_interval must commit.
+        for (index, batch) in reports[1..].chunks(3).enumerate() {
+            let result = save_agent_batch(
+                &db,
+                &identity,
+                &format!("batch-{index}"),
+                batch,
+                "",
+                Some(true),
+            )
+            .await
+            .unwrap();
+            assert!(result.persisted);
+            assert_eq!(result.persisted_through, batch.last().unwrap().timestamp);
+        }
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT CAST(SUM(sample_count) AS BIGINT) FROM metric_history",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 121);
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_rolls_back_history_and_watermark() {
+        let (db, identity) = test_server().await;
+        let start = now() - 60;
+        save_agent_batch(
+            &db,
+            &identity,
+            "initial",
+            &[sample(start, 10.0)],
+            "",
+            Some(true),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_latest BEFORE UPDATE ON server_latest_state \
+            BEGIN SELECT RAISE(ABORT, 'test write failure'); END",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let next = sample(start + 1, 90.0);
+        assert!(
+            save_agent_batch(
+                &db,
+                &identity,
+                "next",
+                std::slice::from_ref(&next),
+                "",
+                Some(true)
+            )
+            .await
+            .is_err()
+        );
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT CAST(SUM(sample_count) AS BIGINT) FROM metric_history",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        let timestamp =
+            sqlx::query_scalar::<_, i64>("SELECT latest_timestamp FROM server_latest_state")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(timestamp, start);
+        sqlx::query("DROP TRIGGER reject_latest")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let result = save_agent_batch(&db, &identity, "next", &[next], "", Some(true))
+            .await
+            .unwrap();
+        assert_eq!(result.persisted_through, start + 1);
+    }
+
+    #[tokio::test]
+    async fn history_query_weights_different_windows_and_reads_legacy_snapshots() {
+        let (db, identity) = test_server().await;
+        let start = (now() - 1200).div_euclid(120) * 120;
+        let reports = [
+            sample(start, 90.0),
+            sample(start + 1, 90.0),
+            sample(start + 2, 90.0),
+            sample(start + 60, 10.0),
+        ];
+        save_agent_batch(&db, &identity, "weighted", &reports, "", Some(true))
+            .await
+            .unwrap();
+        let points = history(&db, &identity.server_id, 24).await.unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].cpu, 70.0);
+        assert_eq!(points[0].cpu_min, 10.0);
+        assert_eq!(points[0].cpu_max, 90.0);
+        assert_eq!(points[0].sample_count, 4);
+        sqlx::query(
+            "INSERT INTO metric_history(server_id,timestamp,cpu,mem_used) VALUES (?,?,33.0,44)",
+        )
+        .bind(&identity.server_id)
+        .bind(start + 240)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let points = history(&db, &identity.server_id, 24).await.unwrap();
+        let legacy = points.last().unwrap();
+        assert_eq!(legacy.cpu_min, 33.0);
+        assert_eq!(legacy.cpu_max, 33.0);
+        assert_eq!(legacy.mem_used_max, 44);
+        assert_eq!(legacy.sample_count, 1);
+    }
+
+    #[tokio::test]
+    async fn history_includes_a_bucket_crossing_the_query_start() {
+        let (db, identity) = test_server().await;
+        let current = now();
+        let since = current - 3600;
+        sqlx::query(
+            "INSERT INTO metric_history(server_id,timestamp,cpu,first_timestamp,last_timestamp) \
+             VALUES (?,?,?,?,?)",
+        )
+        .bind(&identity.server_id)
+        .bind(since - 4)
+        .bind(42.0)
+        .bind(since - 4)
+        .bind(since + 10)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let points = history(&db, &identity.server_id, 1).await.unwrap();
+        assert!(points.iter().any(|point| point.cpu == 42.0));
+    }
+
+    #[tokio::test]
+    async fn aggregate_alerts_use_average_and_minimum_not_bucket_peaks() {
+        let (db, identity) = test_server().await;
+        let start = now() - 120;
+        let reports = (0..=120)
+            .map(|offset| sample(start + offset, if offset == 60 { 10.0 } else { 90.0 }))
+            .collect::<Vec<_>>();
+        save_agent_batch(&db, &identity, "alert-data", &reports, "", Some(true))
+            .await
+            .unwrap();
+        for metric in ["cpu", "memory", "disk", "net_in", "net_out"] {
+            for aggregation in ["average", "continuous"] {
+                create_alert_rule(
+                    &db,
+                    &AlertRuleInput {
+                        name: format!("{metric}-{aggregation}"),
+                        metric: metric.to_string(),
+                        threshold: 50.0,
+                        duration_minutes: 2,
+                        aggregation: aggregation.to_string(),
+                        enabled: true,
+                        server_ids: vec![identity.server_id.clone()],
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let evaluations = evaluate_resource_rules(&db, &identity.server_id)
+            .await
+            .unwrap();
+        assert_eq!(evaluations.len(), 10);
+        for evaluation in evaluations {
+            assert_eq!(
+                evaluation.triggered,
+                evaluation.rule.aggregation == "average",
+                "{}: {}",
+                evaluation.rule.name,
+                evaluation.value
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_sqlite_retries_are_counted_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = crate::db::connect(&format!(
+            "sqlite://{}",
+            directory.path().join("concurrent.db").display()
+        ))
+        .await
+        .unwrap();
+        db.migrate().await.unwrap();
+        let (_, token) = create_server(&db, &server_input(0)).await.unwrap();
+        let identity = agent_identity(&db, &token).await.unwrap().unwrap();
+        let reports = vec![sample(now() - 60, 20.0)];
+        let mut handles = Vec::new();
+        for index in 0..8 {
+            let db = db.clone();
+            let identity = identity.clone();
+            let reports = reports.clone();
+            handles.push(tokio::spawn(async move {
+                save_agent_batch(
+                    &db,
+                    &identity,
+                    &format!("retry-{index}"),
+                    &reports,
+                    "",
+                    Some(true),
+                )
+                .await
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT CAST(SUM(sample_count) AS BIGINT) FROM metric_history",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        db.pool().close().await;
+    }
+
+    #[test]
+    fn aggregation_uses_the_configured_window_and_preserves_counter_resets() {
+        let reports = [sample(3600, 10.0), sample(3614, 30.0), sample(3615, 90.0)];
+        let rows = aggregate_history(&reports, 15);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].report.cpu, 20.0);
+        assert_eq!(rows[0].sample_count, 2);
+        assert_eq!(aggregate_history(&reports, 3600).len(), 1);
+        let mut reports = reports;
+        reports[2].net_rx_total = 5;
+        assert_eq!(aggregate_history(&reports, 60)[0].report.net_rx_total, 5);
+    }
+
     #[test]
     fn validates_agent_report_bounds() {
         let current = now();
@@ -2065,7 +2782,7 @@ mod tests {
         .await
         .unwrap();
         let identity = agent_identity(&db, &token).await.unwrap().unwrap();
-        let start = now() - 600;
+        let start = now().div_euclid(60) * 60 - 600;
         let reports = (0..600)
             .map(|offset| AgentReport {
                 timestamp: start + offset,
@@ -2084,7 +2801,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let result = save_agent_batch(&db, &identity, "large-batch", &reports, "127.0.0.1")
+        let result = save_agent_batch(&db, &identity, "large-batch", &reports, "127.0.0.1", None)
             .await
             .unwrap();
         let rows = sqlx::query_scalar::<_, i64>(
@@ -2102,8 +2819,8 @@ mod tests {
         .await
         .unwrap();
         assert!(result.persisted);
-        assert_eq!(result.reports.len(), 1);
-        assert_eq!(rows, 1);
+        assert_eq!(result.reports.len(), 600);
+        assert_eq!(rows, 10);
         assert_eq!(latency_rows, 600);
 
         let persisted_at = start + 599;
@@ -2116,6 +2833,7 @@ mod tests {
                 ..AgentReport::default()
             }],
             "127.0.0.1",
+            None,
         )
         .await
         .unwrap();
@@ -2132,6 +2850,7 @@ mod tests {
                 ..AgentReport::default()
             }],
             "127.0.0.1",
+            None,
         )
         .await
         .unwrap();
@@ -2143,7 +2862,7 @@ mod tests {
         .fetch_one(db.pool())
         .await
         .unwrap();
-        assert_eq!(rows, 2);
+        assert_eq!(rows, 11);
     }
 
     #[tokio::test]
@@ -2182,6 +2901,7 @@ mod tests {
                 ..AgentReport::default()
             }],
             "127.0.0.1",
+            None,
         )
         .await
         .unwrap();
@@ -2254,6 +2974,163 @@ mod tests {
         assert_eq!(completed_count, 0);
         assert_eq!(inactive_count, 0);
         assert_eq!(active_count, 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_is_bounded_and_keeps_current_data_and_server_state() {
+        let (db, identity) = test_server().await;
+        let current = now();
+        save_agent_batch(
+            &db,
+            &identity,
+            "latest",
+            &[sample(current, 40.0)],
+            "",
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let task_id = create_latency_task(
+            &db,
+            &LatencyTaskInput {
+                name: "Cleanup".to_string(),
+                task_type: "tcp".to_string(),
+                target: "example.com".to_string(),
+                port: Some(443),
+                interval_seconds: 60,
+                default_enabled: false,
+                server_ids: vec![identity.server_id.clone()],
+            },
+        )
+        .await
+        .unwrap();
+        let old = current - 3 * 86_400;
+        sqlx::query(
+            "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<2100) \
+            INSERT INTO metric_history(server_id,timestamp) SELECT ?,?+n FROM seq",
+        )
+        .bind(&identity.server_id)
+        .bind(old)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO latency_results(task_id,server_id,timestamp,latency_ms,packet_loss) \
+            SELECT ?,server_id,timestamp,10.0,0.0 FROM metric_history",
+        )
+        .bind(&task_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO alert_states(state_key,active,updated_at) VALUES ('active',1,?),('expired',0,?)")
+            .bind(old).bind(old).execute(db.pool()).await.unwrap();
+        cleanup_database_with_budget(&db, 1, 1, std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM metric_history")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            2101
+        );
+        cleanup_database_with_budget(&db, 1, 1, std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        for table in ["metric_history", "latency_results"] {
+            let count = sqlx::query_scalar::<_, i64>(AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {table}"
+            )))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(count, 1101, "{table}");
+        }
+        // Later tables still get a turn while metrics have a backlog.
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alert_states WHERE active=0")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        cleanup_database(&db, 1).await.unwrap();
+        for table in [
+            "metric_history",
+            "latency_results",
+            "servers",
+            "server_latest_state",
+            "server_traffic_state",
+            "latency_task_servers",
+            "alert_states",
+        ] {
+            let count = sqlx::query_scalar::<_, i64>(AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {table}"
+            )))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(count, 1, "{table}");
+        }
+        delete_server(&db, &identity.server_id).await.unwrap();
+        for table in [
+            "metric_history",
+            "latency_results",
+            "servers",
+            "server_latest_state",
+            "server_traffic_state",
+            "latency_task_servers",
+        ] {
+            let count = sqlx::query_scalar::<_, i64>(AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {table}"
+            )))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_bounds_expired_task_updates_and_keeps_live_tasks() {
+        let (db, identity) = test_server().await;
+        let old = now() - 3 * 86_400;
+        sqlx::query(
+            "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<1100) \
+            INSERT INTO remote_tasks(id,server_id,command,requested_by,requested_at) \
+            SELECT CAST(n AS TEXT),?,'uptime','admin',? FROM seq",
+        )
+        .bind(&identity.server_id)
+        .bind(old)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let live = create_remote_task(&db, &identity.server_id, "uptime", "admin")
+            .await
+            .unwrap();
+        cleanup_database_with_budget(&db, 1, 1, std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM remote_tasks WHERE status='failed'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            1000
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM remote_tasks WHERE status='pending'"
+            )
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            101
+        );
+        assert_eq!(
+            remote_task(&db, &live.id).await.unwrap().unwrap().status,
+            "pending"
+        );
     }
 
     #[tokio::test]

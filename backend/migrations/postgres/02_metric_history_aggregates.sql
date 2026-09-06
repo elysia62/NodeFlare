@@ -1,0 +1,14 @@
+ALTER TABLE metric_history ADD COLUMN sample_count BIGINT NOT NULL DEFAULT 1 CHECK(sample_count > 0);
+ALTER TABLE metric_history ADD COLUMN first_timestamp BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE metric_history ADD COLUMN last_timestamp BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE metric_history ADD COLUMN cpu_min DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN cpu_max DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN mem_used_max BIGINT;
+ALTER TABLE metric_history ADD COLUMN memory_avg DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN memory_min DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN disk_avg DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN disk_min DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN net_in_avg DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN net_in_min DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN net_out_avg DOUBLE PRECISION;
+ALTER TABLE metric_history ADD COLUMN net_out_min DOUBLE PRECISION;

@@ -221,10 +221,14 @@ export interface AdminServer extends ServerSummary {
 export interface HistoryPoint {
   timestamp: number;
   cpu: number;
+  cpu_min?: number;
+  cpu_max?: number;
+  sample_count?: number;
   load1: number;
   load5: number;
   load15: number;
   mem_used: number;
+  mem_used_max?: number;
   mem_total: number;
   swap_used: number;
   swap_total: number;

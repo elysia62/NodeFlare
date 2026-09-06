@@ -30,6 +30,8 @@ struct UpdateMessage {
     #[serde(rename = "batchId")]
     batch_id: String,
     samples: Vec<AgentReport>,
+    #[serde(default)]
+    persist: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -86,9 +88,15 @@ pub async fn handle(
     };
     let remote_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
     let token = token.to_string();
-    ws.max_message_size(MAX_AGENT_MESSAGE_BYTES)
+    let mut response = ws
+        .max_message_size(MAX_AGENT_MESSAGE_BYTES)
         .max_frame_size(MAX_AGENT_MESSAGE_BYTES)
-        .on_upgrade(move |socket| run(socket, state, identity, remote_ip, token))
+        .on_upgrade(move |socket| run(socket, state, identity, remote_ip, token));
+    response.headers_mut().insert(
+        "x-nodeflare-persistence-batches",
+        axum::http::HeaderValue::from_static("1"),
+    );
+    response
 }
 
 async fn run(
@@ -233,6 +241,7 @@ async fn handle_text(
                 &update.batch_id,
                 &update.samples,
                 remote_ip,
+                update.persist,
             )
             .await
             {
