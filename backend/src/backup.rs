@@ -21,6 +21,27 @@ const INSERT_BATCH_ROWS: usize = 100;
 const MAX_NDJSON_LINE_BYTES: usize = 16 * 1024 * 1024;
 const THEME_BACKUP_FILE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
+#[derive(Debug)]
+pub struct BackupSizeExceeded;
+
+impl std::fmt::Display for BackupSizeExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("备份超过恢复上限（ZIP 512 MiB、解压后 4 GiB），请减少历史数据后重新备份")
+    }
+}
+
+impl std::error::Error for BackupSizeExceeded {}
+
+fn validate_backup_size(compressed: u64, extracted: u64) -> Result<()> {
+    if compressed > DATABASE_BACKUP_MAX_BYTES as u64
+        || extracted > DATABASE_BACKUP_MAX_EXTRACTED_BYTES
+    {
+        return Err(BackupSizeExceeded.into());
+    }
+    Ok(())
+}
+
 const BACKUP_TABLES: &[&str] = &[
     "settings",
     "servers",
@@ -248,9 +269,9 @@ async fn table_columns(db: &Database, table: &str) -> Result<Vec<BackupColumn>> 
         .collect()
 }
 
-async fn database_schema(db: &Database) -> Result<Vec<Vec<BackupColumn>>> {
-    let mut schema = Vec::with_capacity(BACKUP_TABLES.len());
-    for table in BACKUP_TABLES {
+async fn database_schema(db: &Database, tables: &[&str]) -> Result<Vec<Vec<BackupColumn>>> {
+    let mut schema = Vec::with_capacity(tables.len());
+    for table in tables {
         schema.push(table_columns(db, table).await?);
     }
     Ok(schema)
@@ -299,8 +320,12 @@ fn row_values(row: &AnyRow, columns: &[BackupColumn]) -> Result<Vec<Value>> {
         .collect()
 }
 
-async fn export(db: &Database, theme_dir: Option<&Path>) -> Result<DatabaseArchive> {
-    let schema = database_schema(db).await?;
+async fn export(
+    db: &Database,
+    theme_dir: Option<&Path>,
+    tables: &[&str],
+) -> Result<DatabaseArchive> {
+    let schema = database_schema(db, tables).await?;
     let theme_files = collect_theme_files(theme_dir)?;
     let created_at = crate::db::now();
     let manifest = BackupManifest {
@@ -312,10 +337,7 @@ async fn export(db: &Database, theme_dir: Option<&Path>) -> Result<DatabaseArchi
             DatabaseKind::Postgres => "postgresql",
         }
         .to_string(),
-        tables: BACKUP_TABLES
-            .iter()
-            .map(|table| (*table).to_string())
-            .collect(),
+        tables: tables.iter().map(|table| (*table).to_string()).collect(),
         theme_files: theme_files
             .iter()
             .map(|(relative, _, _)| relative.clone())
@@ -325,7 +347,10 @@ async fn export(db: &Database, theme_dir: Option<&Path>) -> Result<DatabaseArchi
             "dashboard_proofs".to_string(),
             "theme_previews".to_string(),
             "server_install_tokens".to_string(),
-        ],
+        ]
+        .into_iter()
+        .filter(|table| !tables.contains(&table.as_str()))
+        .collect(),
     };
 
     let mut transaction = db.pool().begin().await?;
@@ -344,7 +369,7 @@ async fn export(db: &Database, theme_dir: Option<&Path>) -> Result<DatabaseArchi
     serde_json::to_writer(&mut writer, &manifest)?;
     writer.write_all(b"\n")?;
 
-    for ((table, columns), index) in BACKUP_TABLES.iter().zip(schema.iter()).zip(0..) {
+    for ((table, columns), index) in tables.iter().zip(schema.iter()).zip(0..) {
         writer.start_file(table_entry_name(table), options)?;
         serde_json::to_writer(
             &mut writer,
@@ -383,6 +408,10 @@ async fn export(db: &Database, theme_dir: Option<&Path>) -> Result<DatabaseArchi
     }
     let mut file = writer.finish()?;
     let size = file.metadata()?.len();
+    if theme_dir.is_some() {
+        validate_backup_size(size, 0)?;
+    }
+    validate_archive(&mut ZipArchive::new(&mut file)?, tables)?;
     file.seek(SeekFrom::Start(0))?;
     Ok(DatabaseArchive {
         file,
@@ -392,10 +421,13 @@ async fn export(db: &Database, theme_dir: Option<&Path>) -> Result<DatabaseArchi
 }
 
 pub async fn export_archive(db: &Database, theme_dir: &Path) -> Result<DatabaseArchive> {
-    export(db, Some(theme_dir)).await
+    export(db, Some(theme_dir), BACKUP_TABLES).await
 }
 
-fn validate_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<BackupManifest> {
+fn validate_archive<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    tables: &[&str],
+) -> Result<BackupManifest> {
     if archive.is_empty() || archive.len() > DATABASE_BACKUP_MAX_ENTRIES {
         bail!("备份 ZIP 文件条目数量无效");
     }
@@ -418,7 +450,7 @@ fn validate_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Backu
     if manifest.format != DATABASE_BACKUP_FORMAT
         || manifest.version != DATABASE_BACKUP_VERSION
         || manifest.tables
-            != BACKUP_TABLES
+            != tables
                 .iter()
                 .map(|table| (*table).to_string())
                 .collect::<Vec<_>>()
@@ -426,7 +458,7 @@ fn validate_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Backu
         bail!("不是受支持的 NodeFlare 数据库备份");
     }
 
-    let mut expected = BACKUP_TABLES
+    let mut expected = tables
         .iter()
         .map(|table| table_entry_name(table))
         .collect::<HashSet<_>>();
@@ -454,9 +486,7 @@ fn validate_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Backu
         extracted_bytes = extracted_bytes
             .checked_add(entry.size())
             .context("备份 ZIP 解压大小溢出")?;
-        if extracted_bytes > DATABASE_BACKUP_MAX_EXTRACTED_BYTES {
-            bail!("备份 ZIP 解压后不能超过 4 GiB");
-        }
+        validate_backup_size(0, extracted_bytes)?;
     }
     if seen != expected {
         bail!("备份 ZIP 缺少必要文件");
@@ -792,15 +822,16 @@ async fn restore<R: Read + Seek + Send>(
     db: &Database,
     source: R,
     theme_dir: Option<&Path>,
+    tables: &[&str],
 ) -> Result<usize> {
     let mut archive = ZipArchive::new(source).context("文件不是有效的 ZIP")?;
-    let manifest = validate_archive(&mut archive)?;
+    let manifest = validate_archive(&mut archive, tables)?;
     let staged_themes = match theme_dir {
         Some(theme_dir) => Some(extract_theme_files(&mut archive, &manifest, theme_dir)?),
         None if manifest.theme_files.is_empty() => None,
         None => bail!("数据库迁移备份不能包含主题文件"),
     };
-    let schema = database_schema(db).await?;
+    let schema = database_schema(db, tables).await?;
 
     let mut transaction = db.pool().begin().await?;
     if db.is_postgres() {
@@ -816,7 +847,7 @@ async fn restore<R: Read + Seek + Send>(
     }
 
     let mut restored = 0_usize;
-    for (table, columns) in BACKUP_TABLES.iter().zip(schema.iter()) {
+    for (table, columns) in tables.iter().zip(schema.iter()) {
         restored += restore_table(&mut archive, db, &mut transaction, table, columns).await?;
     }
     // Current-format backups can contain snapshot rows with unset aggregates.
@@ -878,17 +909,28 @@ pub async fn restore_archive(db: &Database, theme_dir: &Path, archive: &[u8]) ->
     if archive.is_empty() || archive.len() > DATABASE_BACKUP_MAX_BYTES {
         bail!("数据库备份 ZIP 大小无效");
     }
-    restore(db, Cursor::new(archive), Some(theme_dir)).await
+    restore(db, Cursor::new(archive), Some(theme_dir), BACKUP_TABLES).await
 }
 
 pub async fn copy_database(source: &Database, target: &Database) -> Result<usize> {
-    let archive = export(source, None).await?;
-    restore(target, archive.file, None).await
+    let mut tables = BACKUP_TABLES.to_vec();
+    tables.push("server_install_tokens");
+    let archive = export(source, None, &tables).await?;
+    restore(target, archive.file, None, &tables).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exported_archives_must_fit_both_restore_limits() {
+        let compressed = DATABASE_BACKUP_MAX_BYTES as u64;
+        let extracted = DATABASE_BACKUP_MAX_EXTRACTED_BYTES;
+        assert!(validate_backup_size(compressed, extracted).is_ok());
+        assert!(validate_backup_size(compressed + 1, 0).is_err());
+        assert!(validate_backup_size(0, extracted + 1).is_err());
+    }
 
     #[tokio::test]
     async fn copies_database_through_a_streamed_archive() {
@@ -918,6 +960,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_backups_keep_the_current_format_and_token_policy() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        sqlx::query(
+            "INSERT INTO settings(key,value) VALUES \
+             ('admin_username','admin'),('admin_password_hash','hash'), \
+             ('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node',?,1,1)")
+            .bind(crate::auth::token_hash("primary-token"))
+            .execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO server_install_tokens(token_hash,server_id,created_at) VALUES (?,'node',1)")
+            .bind(crate::auth::token_hash("install-token"))
+            .execute(db.pool()).await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        let mut exported = export_archive(&db, &themes).await.unwrap();
+        let mut bytes = Vec::new();
+        exported.file.read_to_end(&mut bytes).unwrap();
+        let manifest = validate_archive(
+            &mut ZipArchive::new(Cursor::new(&bytes)).unwrap(),
+            BACKUP_TABLES,
+        )
+        .unwrap();
+        assert_eq!(manifest.version, 2);
+        assert!(
+            manifest
+                .excluded_ephemeral_tables
+                .iter()
+                .any(|table| table == "server_install_tokens")
+        );
+        restore_archive(&db, &themes, &bytes).await.unwrap();
+        assert!(
+            crate::db::queries::agent_identity(&db, "primary-token")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            crate::db::queries::agent_identity(&db, "install-token")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn restores_current_format_snapshots_and_round_trips_aggregates() {
         let source = crate::db::connect("sqlite::memory:").await.unwrap();
         let target = crate::db::connect("sqlite::memory:").await.unwrap();
@@ -940,7 +1032,7 @@ mod tests {
         sqlx::query("INSERT INTO server_install_tokens(token_hash,server_id,created_at) VALUES (?,'node',1)")
             .bind(crate::auth::token_hash("install-token"))
             .execute(source.pool()).await.unwrap();
-        assert_eq!(copy_database(&source, &target).await.unwrap(), 6);
+        assert_eq!(copy_database(&source, &target).await.unwrap(), 7);
         let server = sqlx::query("SELECT price,hidden FROM servers WHERE id='node'")
             .fetch_one(target.pool())
             .await
@@ -957,7 +1049,7 @@ mod tests {
             crate::db::queries::agent_identity(&target, "install-token")
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
         let points = crate::db::queries::history(&target, "node", 1)
             .await
@@ -990,7 +1082,7 @@ mod tests {
             memory_avg=50.0,memory_min=10.0,net_in_avg=20.0,net_in_min=1.0,first_timestamp=?,last_timestamp=?")
             .bind(crate::db::now() - 3).bind(crate::db::now()).execute(target.pool()).await.unwrap();
         source.migrate().await.unwrap();
-        assert_eq!(copy_database(&target, &source).await.unwrap(), 6);
+        assert_eq!(copy_database(&target, &source).await.unwrap(), 7);
         let row = sqlx::query(
             "SELECT sample_count,cpu_min,cpu_max,memory_avg,memory_min FROM metric_history",
         )
@@ -1014,7 +1106,7 @@ mod tests {
             crate::db::queries::agent_identity(&source, "install-token")
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
     }
 

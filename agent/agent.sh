@@ -131,6 +131,31 @@ detect_init_system() {
   fi
 }
 
+ensure_not_agent_service() {
+  [ "$init_system" = systemd ] || return 0
+  [ -r "/proc/$$/cgroup" ] || fail "无法检查当前进程所属服务，已停止安装"
+  while IFS=: read -r cgroup_id cgroup_controllers cgroup_path; do
+    case "$cgroup_path/" in
+      */"$SERVICE_NAME.service"/*)
+        fail "不能在当前 Agent 的远程执行中重装、更新或卸载自身，请通过 SSH 执行；服务未停止"
+        ;;
+    esac
+  done < "/proc/$$/cgroup"
+}
+
+verify_agent_started() {
+  started_pid=$(systemctl show -p MainPID --value "$SERVICE_NAME") || return 1
+  case "$started_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  attempt=1
+  while [ "$attempt" -le 10 ]; do
+    sleep 1
+    systemctl is-active --quiet "$SERVICE_NAME" || return 1
+    current_pid=$(systemctl show -p MainPID --value "$SERVICE_NAME") || return 1
+    [ "$current_pid" = "$started_pid" ] || return 1
+    attempt=$((attempt + 1))
+  done
+}
+
 ensure_curl() {
   command -v curl >/dev/null 2>&1 && return
   log "未找到 curl，正在通过系统包管理器安装"
@@ -225,13 +250,17 @@ install_agent() {
   fi
   init_system=$(detect_init_system)
   [ "$init_system" != "unknown" ] || fail "未检测到正在运行的 systemd 或 OpenRC"
+  ensure_not_agent_service
 
   mkdir -p "$INSTALL_DIR" "$STATE_ROOT" "$STATE_DIR"
   chmod 755 "$INSTALL_DIR"
   chmod 700 "$STATE_ROOT"
   chmod 750 "$STATE_DIR"
   temporary="$INSTALL_DIR/.agent.$$.download"
-  trap cleanup_agent_install EXIT HUP INT TERM
+  trap cleanup_agent_install EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   artifact="agent-linux-$arch-$libc"
   release_api="https://api.github.com/repos/imengying/NodeFlare/releases/latest"
   log "正在获取 GitHub 最新正式版本（$artifact）"
@@ -302,8 +331,16 @@ install_agent() {
   fi
   rollback_agent=true
   case "$init_system" in
-    systemd) systemctl stop "$SERVICE_NAME" 2>/dev/null || true ;;
-    openrc) rc-service "$SERVICE_NAME" stop 2>/dev/null || true ;;
+    systemd)
+      systemctl stop "$SERVICE_NAME" 2>/dev/null || {
+        [ "$had_service" = false ] || fail "无法停止已有 Agent 服务，未替换程序"
+      }
+      ;;
+    openrc)
+      rc-service "$SERVICE_NAME" stop 2>/dev/null || {
+        [ "$had_service" = false ] || fail "无法停止已有 Agent 服务，未替换程序"
+      }
+      ;;
   esac
   mv "$temporary" "$AGENT_FILE"
   log "正在启动 $init_system 服务"
@@ -328,7 +365,7 @@ install_agent() {
     chmod 600 "$SERVICE_FILE"
     systemctl daemon-reload
     systemctl enable --now --quiet "$SERVICE_NAME"
-    systemctl is-active --quiet "$SERVICE_NAME" || {
+    verify_agent_started || {
       systemctl status "$SERVICE_NAME" --no-pager >&2 || true
       fail "服务启动失败，请查看上方状态信息"
     }
@@ -429,6 +466,7 @@ uninstall_agent() {
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行卸载"
   log "正在停止并移除 Agent 服务"
   init_system=$(detect_init_system)
+  ensure_not_agent_service
   case "$init_system" in
     systemd) systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true ;;
     openrc)

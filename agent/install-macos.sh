@@ -187,7 +187,10 @@ chmod 755 "$INSTALL_DIR"
 chmod 750 "$STATE_ROOT"
 chmod 750 "$STATE_DIR"
 temporary="$INSTALL_DIR/.agent.$$.download"
-trap cleanup_agent_install EXIT HUP INT TERM
+trap cleanup_agent_install EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 artifact="agent-macos-aarch64"
 release_api="https://api.github.com/repos/imengying/NodeFlare/releases/latest"
 log "正在获取 GitHub 最新正式版本（$artifact）"

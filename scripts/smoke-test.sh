@@ -62,6 +62,7 @@ alert_rule_id=
 backup_file=
 agent_pid=
 agent_state_dir=
+migration_completed=false
 cleanup() {
   if [ -n "$agent_pid" ]; then
     kill "$agent_pid" 2>/dev/null || true
@@ -69,7 +70,7 @@ cleanup() {
   fi
   [ -z "$agent_state_dir" ] || rm -rf "$agent_state_dir"
   [ -z "$backup_file" ] || rm -f -- "$backup_file"
-  if [ "${MONITOR_KEEP_RESOURCES:-0}" != "1" ] && [ -n "$admin_token" ]; then
+  if [ "$migration_completed" = false ] && [ "${MONITOR_KEEP_RESOURCES:-0}" != "1" ] && [ -n "$admin_token" ]; then
     if [ -n "$alert_rule_id" ]; then
       monitor_curl --silent --show-error -H "Authorization: Bearer $admin_token" \
         -X DELETE "$MONITOR_BASE_URL/api/admin/alert-rules/$alert_rule_id" >/dev/null || true
@@ -348,6 +349,26 @@ if [ -n "${MONITOR_MIGRATION_URL:-}" ]; then
     --data "$migration_payload" "$MONITOR_BASE_URL/api/admin/database/migrate" | \
     jq -e --arg kind "${MONITOR_MIGRATION_KIND:-postgresql}" \
       '.migrated_rows > 0 and .target_kind == $kind and .size_bytes > 0 and .restart_required == true' >/dev/null
+  migration_completed=true
+  step "database migration write freeze"
+  request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/database" | \
+    jq -e '.restart_required == true' >/dev/null
+  frozen_settings_status=$(monitor_curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
+    --data "$settings_payload" "$MONITOR_BASE_URL/api/admin/settings")
+  [ "$frozen_settings_status" = "503" ]
+  frozen_delete_status=$(monitor_curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    -H "Authorization: Bearer $admin_token" -X DELETE "$MONITOR_BASE_URL/api/admin/servers/$server_id")
+  [ "$frozen_delete_status" = "503" ]
+  frozen_agent_status=$(monitor_curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    -H "Authorization: Bearer $agent_token" -H 'X-NodeFlare-Agent-Protocol: 2' \
+    -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$MONITOR_BASE_URL/api/agent/ws")
+  [ "$frozen_agent_status" = "503" ]
+  request -H "Authorization: Bearer $admin_token" -X POST "$MONITOR_BASE_URL/api/admin/logout" >/dev/null
+  admin_token=$(login_admin | jq -er '.token')
+  request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/database" | \
+    jq -e '.restart_required == true' >/dev/null
 fi
 
 echo "Smoke test passed"

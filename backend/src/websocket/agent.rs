@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::AtomicI64;
 use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -58,13 +58,10 @@ pub async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if state.database_maintenance_active.load(Ordering::Acquire) {
-        return ApiResponse::error(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "数据库正在维护，请稍后重试",
-        )
-        .into_response();
-    }
+    let _activity = match state.database_activity.write() {
+        Ok(access) => access,
+        Err(error) => return error.into_response(),
+    };
     if !agent_protocol_supported(&headers) {
         return ApiResponse::error(
             axum::http::StatusCode::UPGRADE_REQUIRED,
@@ -87,10 +84,11 @@ pub async fn handle(
     };
     let remote_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
     let token = token.to_string();
+    let connection_state = Arc::clone(&state);
     let mut response = ws
         .max_message_size(MAX_AGENT_MESSAGE_BYTES)
         .max_frame_size(MAX_AGENT_MESSAGE_BYTES)
-        .on_upgrade(move |socket| run(socket, state, identity, remote_ip, token));
+        .on_upgrade(move |socket| run(socket, connection_state, identity, remote_ip, token));
     response.headers_mut().insert(
         AGENT_PROTOCOL_HEADER,
         axum::http::HeaderValue::from_static(AGENT_PROTOCOL_VERSION),
@@ -107,6 +105,10 @@ async fn run(
 ) {
     let connection_id = uuid::Uuid::new_v4().to_string();
     let (mut websocket_tx, mut websocket_rx) = socket.split();
+    let Ok(activity) = state.database_activity.write() else {
+        let _ = websocket_tx.send(Message::Close(None)).await;
+        return;
+    };
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentCommand>(256);
     let previous = state.agents.write().await.insert(
         identity.server_id.clone(),
@@ -159,6 +161,7 @@ async fn run(
             send_task(&outbound_tx, &task);
         }
     }
+    drop(activity);
 
     let writer = tokio::spawn(async move {
         while let Some(command) = outbound_rx.recv().await {
@@ -217,10 +220,10 @@ async fn handle_text(
     outbound: &mpsc::Sender<AgentCommand>,
     text: &str,
 ) {
-    if state.database_maintenance_active.load(Ordering::Acquire) {
+    let Ok(_activity) = state.database_activity.write() else {
         send_persistence_error(outbound, 0);
         return;
-    }
+    };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
@@ -245,6 +248,11 @@ async fn handle_text(
             .await
             {
                 Ok(result) => {
+                    state
+                        .last_agent_reports
+                        .write()
+                        .await
+                        .insert(identity.server_id.clone(), crate::db::now());
                     let next_wss_report_after_ms =
                         state.agent_wss_interval_ms(&identity.server_id).await;
                     send_ack(outbound, &result, next_wss_report_after_ms);
@@ -255,6 +263,9 @@ async fn handle_text(
                         let state = Arc::clone(state);
                         let server_id = identity.server_id.clone();
                         tokio::spawn(async move {
+                            let Ok(_activity) = state.database_activity.write() else {
+                                return;
+                            };
                             let settings = match crate::db::load_settings(&state.db).await {
                                 Ok(settings) => settings,
                                 Err(error) => {

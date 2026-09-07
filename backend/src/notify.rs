@@ -2,6 +2,7 @@ use crate::db::{self, Database, Settings, queries};
 use crate::models::TelegramSettingsView;
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::time::Duration;
 
 pub async fn test_telegram(db: &Database, client: &reqwest::Client) -> Result<()> {
@@ -78,22 +79,29 @@ pub async fn run_periodic(
     db: &Database,
     client: &reqwest::Client,
     settings: &Settings,
+    last_reports: &HashMap<String, i64>,
+    started_at: i64,
 ) -> Result<()> {
     if !settings.notification_enabled {
         return Ok(());
     }
     let current = db::now();
     for server in queries::list_servers(db, true).await? {
-        if !server.offline_notify_disabled {
-            let offline = server.timestamp.is_none_or(|timestamp| {
-                current.saturating_sub(timestamp) >= settings.offline_alert_minutes * 60
-            });
+        if !server.offline_notify_disabled
+            && let Some((offline, last_seen)) = offline_status(
+                server.timestamp,
+                last_reports.get(&server.id).copied(),
+                started_at,
+                current,
+                settings.offline_alert_minutes * 60,
+            )
+        {
             let key = format!("offline:{}", server.id);
             if queries::update_alert_state(
                 db,
                 &key,
                 offline,
-                &serde_json::json!({"timestamp": server.timestamp}),
+                &serde_json::json!({"timestamp": last_seen}),
             )
             .await?
             {
@@ -177,6 +185,22 @@ pub async fn run_periodic(
         }
     }
     Ok(())
+}
+
+fn offline_status(
+    persisted_at: Option<i64>,
+    received_at: Option<i64>,
+    started_at: i64,
+    current: i64,
+    delay: i64,
+) -> Option<(bool, i64)> {
+    // No status transition until the first report or the end of the restart grace period.
+    let last_seen = received_at.or(persisted_at)?;
+    if received_at.is_none() && current.saturating_sub(started_at) < delay {
+        return None;
+    }
+    let elapsed = current.saturating_sub(last_seen);
+    Some((elapsed >= delay, last_seen))
 }
 
 fn traffic_milestones(start: i64) -> Vec<i64> {
@@ -277,7 +301,81 @@ fn render(template: &str, title: &str, server: &str, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::traffic_milestones;
+    use super::{offline_status, traffic_milestones};
+
+    #[tokio::test]
+    async fn offline_alerts_start_only_after_the_first_valid_report() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','token',1,1)")
+            .execute(db.pool()).await.unwrap();
+        let mut settings = crate::db::load_settings(&db).await.unwrap();
+        settings.notification_enabled = true;
+        settings.offline_alert_minutes = 1;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::new();
+        let now = crate::db::now();
+        let mut reports = std::collections::HashMap::new();
+        super::run_periodic(&db, &client, &settings, &reports, now - 3_600)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alert_states")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        for (received_at, expected_active) in [(now, 0), (now - 120, 1), (now, 0)] {
+            reports.insert("node".to_string(), received_at);
+            super::run_periodic(&db, &client, &settings, &reports, now - 3_600)
+                .await
+                .unwrap();
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT active FROM alert_states WHERE state_key='offline:node'"
+                )
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+                expected_active
+            );
+        }
+    }
+
+    #[test]
+    fn unreported_nodes_never_trigger_offline_alerts() {
+        assert_eq!(offline_status(None, None, 100, 10_000, 300), None);
+    }
+
+    #[test]
+    fn live_reports_override_old_persisted_history() {
+        assert_eq!(
+            offline_status(Some(100), Some(999), 100, 1_000, 300),
+            Some((false, 999))
+        );
+        assert_eq!(
+            offline_status(None, Some(999), 100, 1_000, 300),
+            Some((false, 999))
+        );
+        assert_eq!(
+            offline_status(Some(100), Some(600), 100, 1_000, 300),
+            Some((true, 600))
+        );
+    }
+
+    #[test]
+    fn backend_restart_allows_agents_time_to_reconnect() {
+        assert_eq!(offline_status(Some(100), None, 900, 1_000, 300), None);
+        assert_eq!(
+            offline_status(Some(100), Some(999), 900, 1_000, 300),
+            Some((false, 999))
+        );
+        assert_eq!(
+            offline_status(Some(100), None, 900, 1_200, 300),
+            Some((true, 100))
+        );
+    }
 
     #[test]
     fn traffic_alerts_advance_in_five_percent_steps() {

@@ -1,3 +1,4 @@
+mod activity;
 mod auth;
 mod backup;
 mod config;
@@ -23,7 +24,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, watch};
 use tower_http::trace::TraceLayer;
 
@@ -36,11 +37,12 @@ pub struct AppState {
     pub database_overridden: bool,
     pub http: reqwest::Client,
     pub agents: RwLock<HashMap<String, websocket::AgentConnection>>,
+    pub last_agent_reports: RwLock<HashMap<String, i64>>,
+    pub started_at: i64,
     pub dashboard_tx: broadcast::Sender<websocket::DashboardEvent>,
     pub database_maintenance: Mutex<()>,
     pub theme_operations: Mutex<()>,
-    pub database_maintenance_active: AtomicBool,
-    pub database_restart_required: AtomicBool,
+    pub database_activity: activity::DatabaseActivity,
     pub restart_tx: watch::Sender<bool>,
     pub login_attempts: security::AttemptLimiter,
     pub sensitive_attempts: security::AttemptLimiter,
@@ -202,11 +204,12 @@ async fn main() -> Result<()> {
         database_overridden,
         http,
         agents: RwLock::new(HashMap::new()),
+        last_agent_reports: RwLock::new(HashMap::new()),
+        started_at: db::now(),
         dashboard_tx,
         database_maintenance: Mutex::new(()),
         theme_operations: Mutex::new(()),
-        database_maintenance_active: AtomicBool::new(false),
-        database_restart_required: AtomicBool::new(false),
+        database_activity: activity::DatabaseActivity::default(),
         restart_tx,
         login_attempts: security::AttemptLimiter::new(
             5,
@@ -357,6 +360,10 @@ async fn main() -> Result<()> {
         .merge(protected)
         .fallback(routes::site::handle)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(axum_middleware::from_fn_with_state(
+            Arc::clone(&state),
+            middleware::database_activity,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(axum_middleware::from_fn(middleware::security_headers))
         .with_state(Arc::clone(&state));
@@ -383,6 +390,10 @@ fn spawn_maintenance(state: Arc<AppState>) {
         let mut maintenance_runs = 0_u64;
         loop {
             interval.tick().await;
+            let _maintenance = state.database_maintenance.lock().await;
+            let Ok(_activity) = state.database_activity.write() else {
+                continue;
+            };
             if let Err(error) = db::cleanup_auth(&state.db).await {
                 tracing::error!(%error, "session cleanup failed");
             }
@@ -396,12 +407,20 @@ fn spawn_maintenance(state: Arc<AppState>) {
                     continue;
                 }
             };
-            if let Err(error) = notify::run_periodic(&state.db, &state.http, &settings).await {
+            let last_reports = state.last_agent_reports.read().await.clone();
+            if let Err(error) = notify::run_periodic(
+                &state.db,
+                &state.http,
+                &settings,
+                &last_reports,
+                state.started_at,
+            )
+            .await
+            {
                 tracing::error!(%error, "notification maintenance failed");
             }
             maintenance_runs = maintenance_runs.wrapping_add(1);
             {
-                let _maintenance = state.database_maintenance.lock().await;
                 if let Err(error) =
                     db::queries::cleanup_database(&state.db, settings.history_retention_days).await
                 {

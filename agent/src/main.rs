@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 use sysinfo::{Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 use tungstenite::client::IntoClientRequest;
-use tungstenite::{Error as WebSocketError, Message, connect};
+use tungstenite::{Error as WebSocketError, Message, client_tls};
 
 #[cfg(not(any(
     target_os = "linux",
@@ -57,6 +57,7 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const UPDATE_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const UPDATE_CHECK_JITTER_MAX_SECONDS: u64 = 30 * 60;
 const LIVE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const LIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIVE_QUEUE_CAPACITY: usize = 720;
 const MAX_PENDING_SPOOL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PENDING_SPOOL_LINE_BYTES: usize = 1024 * 1024;
@@ -1747,23 +1748,48 @@ fn report_batch_id(reports: &[Report]) -> String {
 type LiveSocket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
 
 fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)> {
-    let mut request = endpoint.into_client_request()?;
-    request
-        .headers_mut()
-        .insert("Authorization", format!("Bearer {token}").parse()?);
-    request
-        .headers_mut()
-        .insert("User-Agent", format!("nodeflare-agent/{VERSION}").parse()?);
-    request.headers_mut().insert(
-        "X-NodeFlare-Agent-Protocol",
-        AGENT_PROTOCOL_VERSION.parse()?,
-    );
-    request.headers_mut().insert(
-        "X-NodeFlare-Agent-Capabilities",
-        AGENT_CAPABILITIES.parse()?,
-    );
     let started_ms = unix_timestamp_millis();
-    let (socket, response) = connect(request)?;
+    let deadline = Instant::now() + LIVE_CONNECT_TIMEOUT;
+    let mut url = url::Url::parse(endpoint)?;
+    let mut redirects = 0;
+    let (socket, response) = loop {
+        let mut request = url.as_str().into_client_request()?;
+        request
+            .headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse()?);
+        request
+            .headers_mut()
+            .insert("User-Agent", format!("nodeflare-agent/{VERSION}").parse()?);
+        request.headers_mut().insert(
+            "X-NodeFlare-Agent-Protocol",
+            AGENT_PROTOCOL_VERSION.parse()?,
+        );
+        request.headers_mut().insert(
+            "X-NodeFlare-Agent-Capabilities",
+            AGENT_CAPABILITIES.parse()?,
+        );
+        let stream = connect_live_stream(&url, deadline)?;
+        match client_tls(request, stream) {
+            Ok(connected) => break connected,
+            Err(tungstenite::HandshakeError::Failure(WebSocketError::Http(response)))
+                if response.status().is_redirection() && redirects < 3 =>
+            {
+                let location = response
+                    .headers()
+                    .get("location")
+                    .ok_or("WebSocket redirect has no location")?
+                    .to_str()?;
+                let redirected = url.join(location)?;
+                // Never forward the Agent token to a different origin.
+                if redirected.origin() != url.origin() {
+                    return Err("WebSocket redirect must stay on the configured origin".into());
+                }
+                url = redirected;
+                redirects += 1;
+            }
+            Err(error) => return Err(format!("WebSocket handshake failed: {error}").into()),
+        }
+    };
     let ended_ms = unix_timestamp_millis();
     let clock_offset_ms = response
         .headers()
@@ -1781,6 +1807,47 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
         .into());
     }
     Ok((socket, clock_offset_ms))
+}
+
+fn connect_live_stream(url: &url::Url, deadline: Instant) -> Result<TcpStream> {
+    let host = url
+        .host_str()
+        .ok_or("WebSocket endpoint has no hostname")?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let port = url
+        .port_or_known_default()
+        .ok_or("WebSocket endpoint has no port")?;
+    let addresses = (host, port).to_socket_addrs()?;
+    let mut connected = None;
+    let mut last_error = io::Error::new(
+        ErrorKind::NotFound,
+        "WebSocket hostname resolved to no addresses",
+    );
+    for address in addresses {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(
+                io::Error::new(ErrorKind::TimedOut, "WebSocket connection timed out").into(),
+            );
+        }
+        match TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(3))) {
+            Ok(stream) => {
+                connected = Some(stream);
+                break;
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    let stream = connected.ok_or(last_error)?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(ErrorKind::TimedOut, "WebSocket connection timed out").into());
+    }
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(remaining))?;
+    stream.set_write_timeout(Some(remaining))?;
+    Ok(stream)
 }
 
 fn set_live_read_timeout(socket: &mut LiveSocket, timeout: Option<Duration>) -> io::Result<()> {
@@ -3331,6 +3398,23 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         {
             return Err("WSS report persistence acknowledgement timed out".into());
         }
+
+        // Check after ACK pruning, before the next sample refills the pending queue.
+        if !once
+            && !print_only
+            && config.auto_update
+            && pending_samples.is_empty()
+            && Instant::now() >= next_update_check
+        {
+            match update(&agent, &config.agent_mirror) {
+                Ok(true) => return Ok(()),
+                Ok(false) => next_update_check = Instant::now() + UPDATE_CHECK_INTERVAL,
+                Err(error) => {
+                    eprintln!("agent update failed: {error}");
+                    next_update_check = Instant::now() + UPDATE_RETRY_INTERVAL;
+                }
+            }
+        }
         pending_results.extend(latency_executor.drain());
         let current = Instant::now();
         let due = config
@@ -3415,20 +3499,6 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             );
         }
 
-        if !once
-            && config.auto_update
-            && pending_samples.is_empty()
-            && Instant::now() >= next_update_check
-        {
-            match update(&agent, &config.agent_mirror) {
-                Ok(true) => return Ok(()),
-                Ok(false) => next_update_check = Instant::now() + UPDATE_CHECK_INTERVAL,
-                Err(error) => {
-                    eprintln!("agent update failed: {error}");
-                    next_update_check = Instant::now() + UPDATE_RETRY_INTERVAL;
-                }
-            }
-        }
         if Instant::now() >= next_stats_log {
             stats.log_and_reset();
             next_stats_log = Instant::now() + RUNTIME_STATS_INTERVAL;

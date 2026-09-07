@@ -1,4 +1,4 @@
-import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, Server, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
+import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
 
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
 
@@ -51,7 +51,6 @@ export const api = {
     signal: AbortSignal.timeout(15_000),
   }),
   refreshExchangeRates: () => request<ExchangeRates>("/api/admin/exchange-rates/refresh", { method: "POST" }, true),
-  servers: () => request<{ servers: Server[] }>("/api/servers"),
   adminServers: () => request<{ servers: AdminServer[] }>("/api/admin/servers", {}, true),
   history: (id: string, hours: number) =>
     request<{ points: HistoryPoint[] }>(`/api/history/${encodeURIComponent(id)}?hours=${hours}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) }),
@@ -123,8 +122,6 @@ export const api = {
       { method: "POST", body: JSON.stringify(input) },
       true,
     ),
-  rotateServerToken: (id: string) =>
-    request<{ agent_token: string }>(`/api/admin/servers/${encodeURIComponent(id)}/token`, { method: "POST" }, true),
   createAgentInstallToken: (id: string) =>
     request<{ agent_token: string }>(`/api/admin/servers/${encodeURIComponent(id)}/agent-token`, { method: "POST" }, true),
   updateServer: (id: string, input: ServerInput) =>

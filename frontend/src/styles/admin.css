@@ -428,6 +428,7 @@
 
 @media (max-width: 639px) {
   .remote-submit { width: 100%; }
+  .usage-head { align-items: stretch; flex-direction: column; }
   .database-section-head .section-actions, .usage-head-actions { width: 100%; }
   .database-section-head .section-actions > label { width: 100%; }
   .database-section-head .section-actions > button, .usage-head-actions > button { flex: 1; }

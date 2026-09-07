@@ -19,7 +19,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use tokio_util::io::ReaderStream;
 use url::Url;
 
@@ -32,14 +31,6 @@ pub struct DatabaseRestoreInput {
 #[serde(deny_unknown_fields)]
 pub struct DatabaseMigrationInput {
     database_url: String,
-}
-
-struct DatabaseOperationFlag<'a>(&'a std::sync::atomic::AtomicBool);
-
-impl Drop for DatabaseOperationFlag<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
 }
 
 pub async fn servers_get(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
@@ -93,6 +84,7 @@ pub async fn server_delete(
         return Err(ApiResponse::not_found("节点不存在"));
     }
     state.disconnect_agent(&id).await;
+    state.last_agent_reports.write().await.remove(&id);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -106,6 +98,7 @@ pub async fn servers_delete(
         .map_err(ApiResponse::internal)?;
     for id in input.ids {
         state.disconnect_agent(&id).await;
+        state.last_agent_reports.write().await.remove(&id);
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -657,16 +650,13 @@ pub async fn exchange_refresh(State(state): State<Arc<AppState>>) -> Result<Resp
 
 pub async fn database_stats(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
     let mut database = state.db.stats().await.map_err(ApiResponse::internal)?;
-    database.restart_required = state.database_restart_required.load(Ordering::Acquire);
+    database.restart_required = state.database_activity.restart_required();
     Ok(Json(database).into_response())
 }
 
 pub async fn database_reclaim(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
     let _maintenance = state.database_maintenance.lock().await;
-    state
-        .database_maintenance_active
-        .store(true, Ordering::Release);
-    let _operation = DatabaseOperationFlag(&state.database_maintenance_active);
+    let _activity = state.database_activity.maintenance().await?;
     state.disconnect_agents().await;
 
     let before = state.db.stats().await.map_err(ApiResponse::internal)?;
@@ -676,7 +666,7 @@ pub async fn database_reclaim(State(state): State<Arc<AppState>>) -> Result<Resp
         .await
         .map_err(ApiResponse::internal)?;
     let mut database = state.db.stats().await.map_err(ApiResponse::internal)?;
-    database.restart_required = state.database_restart_required.load(Ordering::Acquire);
+    database.restart_required = state.database_activity.restart_required();
     let reclaimed_bytes = before.size_bytes.saturating_sub(database.size_bytes);
     Ok(Json(serde_json::json!({
         "database": database,
@@ -714,11 +704,8 @@ pub async fn database_migrate(
     super::auth::require_sensitive_headers(&state, &user, &headers).await?;
 
     let _maintenance = state.database_maintenance.lock().await;
+    let _activity = state.database_activity.maintenance().await?;
     let _themes = state.theme_operations.lock().await;
-    state
-        .database_maintenance_active
-        .store(true, Ordering::Release);
-    let _operation = DatabaseOperationFlag(&state.database_maintenance_active);
     state.disconnect_agents().await;
 
     let target = crate::db::connect(&target_url)
@@ -734,9 +721,7 @@ pub async fn database_migrate(
     let database = target.stats().await.map_err(ApiResponse::internal)?;
     crate::config::update_database_url(&state.config_path, &target_url)
         .map_err(ApiResponse::internal)?;
-    state
-        .database_restart_required
-        .store(true, Ordering::Release);
+    state.database_activity.require_restart();
 
     Ok(Json(serde_json::json!({
         "migrated_rows": migrated_rows,
@@ -748,7 +733,7 @@ pub async fn database_migrate(
 }
 
 pub async fn database_restart(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    if !state.database_restart_required.load(Ordering::Acquire) {
+    if !state.database_activity.restart_required() {
         return Err(ApiResponse::bad_request("当前没有等待生效的数据库迁移"));
     }
     state.disconnect_agents().await;
@@ -767,10 +752,17 @@ pub async fn database_backup(
 ) -> Result<Response, ApiResponse> {
     super::auth::require_sensitive_headers(&state, &user, &headers).await?;
     let _maintenance = state.database_maintenance.lock().await;
+    let _activity = state.database_activity.maintenance().await?;
     let _themes = state.theme_operations.lock().await;
     let archive = crate::backup::export_archive(&state.db, &state.config.theme_dir)
         .await
-        .map_err(ApiResponse::internal)?;
+        .map_err(|error| {
+            if error.is::<crate::backup::BackupSizeExceeded>() {
+                ApiResponse::unprocessable(error.to_string())
+            } else {
+                ApiResponse::internal(error)
+            }
+        })?;
     let disposition =
         HeaderValue::from_str(&format!("attachment; filename=\"{}\"", archive.filename))
             .map_err(ApiResponse::internal)?;
@@ -827,16 +819,14 @@ pub async fn database_restore(
     })?;
 
     let _maintenance = state.database_maintenance.lock().await;
+    let _activity = state.database_activity.maintenance().await?;
     let _themes = state.theme_operations.lock().await;
-    state
-        .database_maintenance_active
-        .store(true, Ordering::Release);
-    let _operation = DatabaseOperationFlag(&state.database_maintenance_active);
     state.disconnect_agents().await;
     let restored_rows =
         crate::backup::restore_archive(&state.db, &state.config.theme_dir, &archive)
             .await
             .map_err(|error| ApiResponse::unprocessable(format!("恢复失败：{error}")))?;
+    state.last_agent_reports.write().await.clear();
     Ok(Json(serde_json::json!({"restored_rows": restored_rows})).into_response())
 }
 

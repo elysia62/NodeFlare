@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::{HeaderName, HeaderValue, header},
+    http::{HeaderName, HeaderValue, Method, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -8,6 +8,48 @@ use std::sync::Arc;
 
 use crate::AppState;
 use crate::routes::{ApiResponse, bearer_or_cookie};
+
+fn maintenance_route(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/admin/database/migrate"
+            | "/api/admin/database/restore"
+            | "/api/admin/database/reclaim"
+            | "/api/admin/database/backup"
+    )
+}
+
+fn business_write(method: &Method, path: &str) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        && !matches!(
+            path,
+            "/api/admin/login"
+                | "/api/admin/logout"
+                | "/api/turnstile/verify"
+                | "/api/admin/database/restart"
+        )
+}
+
+pub async fn database_activity(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Maintenance handlers acquire exclusive access after authentication/body parsing.
+    if maintenance_route(request.uri().path()) {
+        return next.run(request).await;
+    }
+    let access = if business_write(request.method(), request.uri().path()) {
+        state.database_activity.write()
+    } else {
+        state.database_activity.read()
+    };
+    let _access = match access {
+        Ok(access) => access,
+        Err(error) => return error.into_response(),
+    };
+    next.run(request).await
+}
 
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
@@ -70,4 +112,24 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         ),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_migration_allows_login_and_restart_but_not_business_changes() {
+        assert!(!business_write(&Method::POST, "/api/admin/login"));
+        assert!(!business_write(
+            &Method::POST,
+            "/api/admin/database/restart"
+        ));
+        assert!(!business_write(&Method::GET, "/api/admin/database"));
+        assert!(business_write(&Method::PATCH, "/api/admin/settings"));
+        assert!(business_write(&Method::POST, "/api/admin/remote/task"));
+        assert!(business_write(&Method::DELETE, "/api/admin/servers/node"));
+        assert!(maintenance_route("/api/admin/database/migrate"));
+        assert!(!maintenance_route("/api/admin/database/restart"));
+    }
 }

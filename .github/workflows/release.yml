@@ -103,7 +103,10 @@ jobs:
       - name: Build frontend
         run: bun run build:frontend
       - name: Check shell scripts
-        run: sh -n install.sh agent/agent.sh agent/install-macos.sh agent/install-freebsd.sh scripts/*.sh start.sh dev.sh
+        run: |
+          for script in install.sh agent/agent.sh agent/install-macos.sh agent/install-freebsd.sh scripts/*.sh start.sh dev.sh; do
+            sh -n "$script" || exit "$?"
+          done
       - name: Check PowerShell scripts
         shell: pwsh
         run: |
@@ -129,6 +132,8 @@ jobs:
         run: CARGO_TARGET_DIR=target/agent cargo test --locked --manifest-path agent/Cargo.toml
       - name: Build Agent for smoke test
         run: CARGO_TARGET_DIR=target/agent cargo build --locked --manifest-path agent/Cargo.toml
+      - name: Test Agent update and connection recovery
+        run: MONITOR_AGENT_BINARY=target/agent/debug/nodeflare-agent node scripts/agent-runtime-test.mjs
       - name: Build backend
         run: CARGO_TARGET_DIR=target/backend cargo build --locked --manifest-path backend/Cargo.toml
       - name: Smoke test SQLite and PostgreSQL
@@ -208,6 +213,8 @@ jobs:
             MONITOR_ADMIN_USERNAME=sqlite-smoke \
             MONITOR_ADMIN_PASSWORD=SmokePassword123 \
             MONITOR_AGENT_BINARY="$GITHUB_WORKSPACE/target/agent/debug/nodeflare-agent" \
+            MONITOR_MIGRATION_URL="sqlite://$postgres_dir/round-trip.db" \
+            MONITOR_MIGRATION_KIND=sqlite \
             sh scripts/smoke-test.sh
 
   server:
