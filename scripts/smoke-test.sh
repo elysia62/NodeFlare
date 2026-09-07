@@ -32,6 +32,28 @@ step() {
   printf 'smoke: %s\n' "$1" >&2
 }
 
+assert_latency_history() {
+  latency_history_json=$(cat)
+  # Samples one second apart can land in adjacent minute buckets.
+  if printf '%s' "$latency_history_json" | jq -e --arg task_id "$1" '
+    def near($expected): type == "number" and . > ($expected - 0.001) and . < ($expected + 0.001);
+    (.tasks | any(.id == $task_id)) and
+    (.points | map(select(.task_id == $task_id)) | sort_by(.timestamp) |
+      if length == 1 then
+        (.[0].latency_ms | near(38.4)) and (.[0].packet_loss | near(50))
+      elif length == 2 then
+        (.[1].timestamp - .[0].timestamp == 60) and
+        (.[0].latency_ms | near(28.4)) and (.[0].packet_loss | near(25)) and
+        (.[1].latency_ms | near(48.4)) and (.[1].packet_loss | near(75))
+      else false end)
+  ' >/dev/null; then
+    return 0
+  fi
+  printf '%s\n' 'smoke: latency history assertion failed; expected one averaged bucket or two adjacent sample buckets' >&2
+  printf '%s\n' "$latency_history_json" >&2
+  return 1
+}
+
 admin_token=
 server_id=
 latency_task_id=
@@ -231,18 +253,22 @@ rotated_agent_token=$(MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="
 [ "$rotated_agent_token" != "$agent_token" ]
 agent_token=$rotated_agent_token
 
-step "persisted metrics"
+step "persisted metrics: admin IP metadata"
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/servers" | \
   jq -e --arg id "$server_id" '.servers | any(.id == $id and .last_ip == "8.8.8.8")' >/dev/null
 
+step "persisted metrics: public snapshot"
 post_report_bootstrap=$(request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/bootstrap")
 if ! printf '%s' "$post_report_bootstrap" | jq -e --arg id "$server_id" --arg task_id "$latency_task_id" '.servers | any(.id == $id and .cpu == 18.5 and .gpu_usage == 32.5 and .disk_await_ms == 1.4 and (.gpus | length) == 1 and (.disks | length) == 1 and .disk_used == 21474836480 and .traffic_limit == 107374182400 and .net_rx_total == 2684354560 and .net_tx_total == 1342177280 and .price == 9.9 and (has("last_ip") | not) and (.latency | any(.task_id == $task_id and .latency_ms == 48.4 and .packet_loss == 75)))' >/dev/null; then
   printf '%s' "$post_report_bootstrap" | jq --arg id "$server_id" '.servers[] | select(.id == $id)' >&2
   exit 1
 fi
+step "persisted metrics: GPU history"
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/history/$server_id?hours=1" | jq -e '.points | length >= 1 and any(.gpu_usage == 32.5)' >/dev/null
-request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/latency/$server_id?hours=1" | jq -e --arg task_id "$latency_task_id" '(.tasks | any(.id == $task_id)) and (.points | any(.task_id == $task_id and .latency_ms > 38.399 and .latency_ms < 38.401 and .packet_loss > 49.999 and .packet_loss < 50.001))' >/dev/null
+step "persisted metrics: latency history"
+request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/latency/$server_id?hours=1" | assert_latency_history "$latency_task_id"
 
+step "persisted metrics: latency task unassignment"
 request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
   --data '{"name":"Smoke TCP","task_type":"tcp","target":"example.com","port":443,"interval_seconds":60,"default_enabled":true,"server_ids":[]}' \
   "$MONITOR_BASE_URL/api/admin/latency-tasks/$latency_task_id" >/dev/null
