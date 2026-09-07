@@ -249,7 +249,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     const scheduler = createLiveFlushScheduler(flush);
     const disconnect = connectLive({ serverId: selectedId }, {
-      onServer: (server) => setServers((current) => current.map((entry) => entry.id === server.id ? server : entry)),
       onBatch: (updates) => {
         pending.push(...updates);
         scheduler.schedule();

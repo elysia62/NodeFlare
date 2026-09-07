@@ -616,7 +616,7 @@ pub async fn save_agent_batch(
     batch_id: &str,
     reports: &[AgentReport],
     remote_ip: &str,
-    persist: Option<bool>,
+    persist: bool,
 ) -> Result<PersistResult> {
     let mut reports = reports.to_vec();
     reports.sort_by_key(|report| report.timestamp);
@@ -635,7 +635,7 @@ pub async fn save_agent_batch(
         anyhow::bail!("report batch exceeds 720 samples");
     }
 
-    let needs_write = persist != Some(false)
+    let needs_write = persist
         || reports
             .iter()
             .any(|report| !report.latency_results.is_empty());
@@ -690,10 +690,7 @@ pub async fn save_agent_batch(
     let report_interval = identity.report_interval.clamp(15, 3600);
     let next_persist_at = persisted_before.saturating_add(report_interval);
     // Only a complete persistence batch may advance the durable watermark.
-    // Older agents omit this flag and retain their scheduled persistence behavior.
-    if persist == Some(false)
-        || (persist.is_none() && persisted_before > 0 && latest.timestamp < next_persist_at)
-    {
+    if !persist {
         let next_persist_after_ms =
             next_persist_at.saturating_sub(latest.timestamp).max(1) as u64 * 1000;
         if reports
@@ -1080,34 +1077,21 @@ fn history_merge_sql() -> String {
             THEN metric_history.{column} ELSE excluded.{column} END"
         ));
     }
-    for (column, fallback, minimum) in [
-        ("cpu_min", "cpu", true),
-        ("cpu_max", "cpu", false),
-        ("mem_used_max", "mem_used", false),
+    for (column, minimum) in [
+        ("cpu_min", true),
+        ("cpu_max", false),
+        ("mem_used_max", false),
     ] {
-        let old = format!("COALESCE(metric_history.{column},metric_history.{fallback})");
+        let old = format!("metric_history.{column}");
         let comparison = if minimum { "<" } else { ">" };
         updates.push(format!(
             "{column}=CASE WHEN {old}{comparison}excluded.{column} \
             THEN {old} ELSE excluded.{column} END"
         ));
     }
-    for (prefix, fallback) in [
-        (
-            "memory",
-            "CASE WHEN metric_history.mem_total>0 THEN \
-            CAST(metric_history.mem_used AS DOUBLE PRECISION)*100.0/metric_history.mem_total ELSE 0.0 END",
-        ),
-        (
-            "disk",
-            "CASE WHEN metric_history.disk_total>0 THEN \
-            CAST(metric_history.disk_used AS DOUBLE PRECISION)*100.0/metric_history.disk_total ELSE 0.0 END",
-        ),
-        ("net_in", "metric_history.net_in"),
-        ("net_out", "metric_history.net_out"),
-    ] {
-        let mean = format!("COALESCE(metric_history.{prefix}_avg,{fallback})");
-        let min = format!("COALESCE(metric_history.{prefix}_min,{fallback})");
+    for prefix in ["memory", "disk", "net_in", "net_out"] {
+        let mean = format!("metric_history.{prefix}_avg");
+        let min = format!("metric_history.{prefix}_min");
         updates.push(format!("{prefix}_avg=({mean}*metric_history.sample_count \
             +excluded.{prefix}_avg*excluded.sample_count)/(metric_history.sample_count+excluded.sample_count)"));
         updates.push(format!(
@@ -1119,9 +1103,8 @@ fn history_merge_sql() -> String {
         updates.push(format!("{column}=excluded.{column}"));
     }
     updates.push(
-        "first_timestamp=CASE WHEN COALESCE(NULLIF(metric_history.first_timestamp,0),\
-        metric_history.timestamp)<excluded.first_timestamp THEN \
-        COALESCE(NULLIF(metric_history.first_timestamp,0),metric_history.timestamp) \
+        "first_timestamp=CASE WHEN metric_history.first_timestamp<excluded.first_timestamp THEN \
+        metric_history.first_timestamp \
         ELSE excluded.first_timestamp END"
             .to_string(),
     );
@@ -1200,13 +1183,13 @@ pub async fn history(db: &Database, server_id: &str, hours: i64) -> Result<Vec<H
     let since = now() - hours * 3600;
     let rows = sqlx::query(db.sql(
         "SELECT bucket_timestamp, SUM(cpu * sample_count) / SUM(sample_count) AS cpu, \
-         MIN(COALESCE(cpu_min, cpu)) AS cpu_min, MAX(COALESCE(cpu_max, cpu)) AS cpu_max, \
+         MIN(cpu_min) AS cpu_min, MAX(cpu_max) AS cpu_max, \
          CAST(SUM(sample_count) AS BIGINT) AS sample_count, \
          SUM(load1 * sample_count) / SUM(sample_count) AS load1, \
          SUM(load5 * sample_count) / SUM(sample_count) AS load5, \
          SUM(load15 * sample_count) / SUM(sample_count) AS load15, \
          SUM(CAST(mem_used AS DOUBLE PRECISION) * sample_count) / SUM(sample_count) AS mem_used, \
-         MAX(COALESCE(mem_used_max, mem_used)) AS mem_used_max, \
+         MAX(mem_used_max) AS mem_used_max, \
          MAX(mem_total) AS mem_total, \
          SUM(CAST(swap_used AS DOUBLE PRECISION) * sample_count) / SUM(sample_count) AS swap_used, \
          MAX(swap_total) AS swap_total, \
@@ -1220,7 +1203,7 @@ pub async fn history(db: &Database, server_id: &str, hours: i64) -> Result<Vec<H
          MAX(disk_utilization) AS disk_utilization FROM ( \
            SELECT (timestamp / ?) * ? AS bucket_timestamp, metric_history.* \
            FROM metric_history WHERE server_id=? \
-             AND COALESCE(NULLIF(last_timestamp,0),timestamp)>=? \
+             AND last_timestamp>=? \
          ) samples GROUP BY bucket_timestamp ORDER BY bucket_timestamp",
     ))
     .bind(bucket)
@@ -1283,7 +1266,7 @@ async fn cleanup_database_with_budget(
     let statements = [
         "DELETE FROM metric_history WHERE (server_id, timestamp) IN ( \
            SELECT server_id, timestamp FROM metric_history WHERE \
-           COALESCE(NULLIF(last_timestamp,0),timestamp)<? \
+           last_timestamp<? \
            ORDER BY timestamp LIMIT ?)",
         "DELETE FROM latency_results WHERE (task_id, server_id, timestamp) IN ( \
            SELECT task_id, server_id, timestamp FROM latency_results WHERE timestamp<? \
@@ -1781,31 +1764,17 @@ pub async fn evaluate_resource_rules(
             && (rule.server_ids.is_empty() || rule.server_ids.iter().any(|id| id == server_id))
     }) {
         let (average_expression, minimum_expression) = match rule.metric.as_str() {
-            "cpu" => ("cpu", "COALESCE(cpu_min, cpu)"),
-            "memory" => (
-                "COALESCE(memory_avg, CASE WHEN mem_total>0 THEN CAST(mem_used AS DOUBLE PRECISION)*100.0/mem_total ELSE 0.0 END)",
-                "COALESCE(memory_min, CASE WHEN mem_total>0 THEN CAST(mem_used AS DOUBLE PRECISION)*100.0/mem_total ELSE 0.0 END)",
-            ),
-            "disk" => (
-                "COALESCE(disk_avg, CASE WHEN disk_total>0 THEN CAST(disk_used AS DOUBLE PRECISION)*100.0/disk_total ELSE 0.0 END)",
-                "COALESCE(disk_min, CASE WHEN disk_total>0 THEN CAST(disk_used AS DOUBLE PRECISION)*100.0/disk_total ELSE 0.0 END)",
-            ),
-            "net_in" => (
-                "COALESCE(net_in_avg, net_in)/1048576.0",
-                "COALESCE(net_in_min, net_in)/1048576.0",
-            ),
-            "net_out" => (
-                "COALESCE(net_out_avg, net_out)/1048576.0",
-                "COALESCE(net_out_min, net_out)/1048576.0",
-            ),
+            "cpu" => ("cpu", "cpu_min"),
+            "memory" => ("memory_avg", "memory_min"),
+            "disk" => ("disk_avg", "disk_min"),
+            "net_in" => ("net_in_avg/1048576.0", "net_in_min/1048576.0"),
+            "net_out" => ("net_out_avg/1048576.0", "net_out_min/1048576.0"),
             _ => continue,
         };
-        let filter = db.sql(
-            "server_id=? AND timestamp>=? AND COALESCE(NULLIF(last_timestamp,0),timestamp)>=?",
-        );
+        let filter = db.sql("server_id=? AND timestamp>=? AND last_timestamp>=?");
         let query = format!(
-            "SELECT MIN(COALESCE(NULLIF(first_timestamp,0),timestamp)) AS first_timestamp, \
-             MAX(COALESCE(NULLIF(last_timestamp,0),timestamp)) AS last_timestamp, \
+            "SELECT MIN(first_timestamp) AS first_timestamp, \
+             MAX(last_timestamp) AS last_timestamp, \
              SUM(({average_expression}) * sample_count) / NULLIF(SUM(sample_count), 0) AS average_value, \
              MIN({minimum_expression}) AS minimum_value, COUNT(*) AS sample_count \
              FROM metric_history WHERE {filter}"
@@ -2488,17 +2457,17 @@ mod tests {
             sample(start + 1, 90.0),
             sample(start + 2, 20.0),
         ];
-        let first = save_agent_batch(&db, &identity, "first", &reports[..2], "", Some(true))
+        let first = save_agent_batch(&db, &identity, "first", &reports[..2], "", true)
             .await
             .unwrap();
         assert_eq!(first.persisted_through, start + 1);
         // Reconnect with an overlapping batch: only the unacknowledged sample is added.
-        let second = save_agent_batch(&db, &identity, "overlap", &reports[1..], "", Some(true))
+        let second = save_agent_batch(&db, &identity, "overlap", &reports[1..], "", true)
             .await
             .unwrap();
         assert_eq!(second.persisted_through, start + 2);
         for id in ["overlap", "another-retry"] {
-            let retry = save_agent_batch(&db, &identity, id, &reports, "", Some(true))
+            let retry = save_agent_batch(&db, &identity, id, &reports, "", true)
                 .await
                 .unwrap();
             assert!(retry.reports.is_empty());
@@ -2528,26 +2497,20 @@ mod tests {
         let reports = (0..121)
             .map(|offset| sample(start + offset, 25.0))
             .collect::<Vec<_>>();
-        save_agent_batch(&db, &identity, "initial", &reports[..1], "", Some(true))
+        save_agent_batch(&db, &identity, "initial", &reports[..1], "", true)
             .await
             .unwrap();
-        let live = save_agent_batch(&db, &identity, "live", &reports[120..], "", Some(false))
+        let live = save_agent_batch(&db, &identity, "live", &reports[120..], "", false)
             .await
             .unwrap();
         assert!(!live.persisted);
         assert_eq!(live.persisted_through, start);
         // Even a payload-size-limited batch shorter than report_interval must commit.
         for (index, batch) in reports[1..].chunks(3).enumerate() {
-            let result = save_agent_batch(
-                &db,
-                &identity,
-                &format!("batch-{index}"),
-                batch,
-                "",
-                Some(true),
-            )
-            .await
-            .unwrap();
+            let result =
+                save_agent_batch(&db, &identity, &format!("batch-{index}"), batch, "", true)
+                    .await
+                    .unwrap();
             assert!(result.persisted);
             assert_eq!(result.persisted_through, batch.last().unwrap().timestamp);
         }
@@ -2564,16 +2527,9 @@ mod tests {
     async fn failed_persistence_rolls_back_history_and_watermark() {
         let (db, identity) = test_server().await;
         let start = now() - 60;
-        save_agent_batch(
-            &db,
-            &identity,
-            "initial",
-            &[sample(start, 10.0)],
-            "",
-            Some(true),
-        )
-        .await
-        .unwrap();
+        save_agent_batch(&db, &identity, "initial", &[sample(start, 10.0)], "", true)
+            .await
+            .unwrap();
         sqlx::query(
             "CREATE TRIGGER reject_latest BEFORE UPDATE ON server_latest_state \
             BEGIN SELECT RAISE(ABORT, 'test write failure'); END",
@@ -2589,7 +2545,7 @@ mod tests {
                 "next",
                 std::slice::from_ref(&next),
                 "",
-                Some(true)
+                true
             )
             .await
             .is_err()
@@ -2611,14 +2567,14 @@ mod tests {
             .execute(db.pool())
             .await
             .unwrap();
-        let result = save_agent_batch(&db, &identity, "next", &[next], "", Some(true))
+        let result = save_agent_batch(&db, &identity, "next", &[next], "", true)
             .await
             .unwrap();
         assert_eq!(result.persisted_through, start + 1);
     }
 
     #[tokio::test]
-    async fn history_query_weights_different_windows_and_reads_legacy_snapshots() {
+    async fn history_query_weights_different_windows() {
         let (db, identity) = test_server().await;
         let start = (now() - 1200).div_euclid(120) * 120;
         let reports = [
@@ -2627,7 +2583,7 @@ mod tests {
             sample(start + 2, 90.0),
             sample(start + 60, 10.0),
         ];
-        save_agent_batch(&db, &identity, "weighted", &reports, "", Some(true))
+        save_agent_batch(&db, &identity, "weighted", &reports, "", true)
             .await
             .unwrap();
         let points = history(&db, &identity.server_id, 24).await.unwrap();
@@ -2636,20 +2592,6 @@ mod tests {
         assert_eq!(points[0].cpu_min, 10.0);
         assert_eq!(points[0].cpu_max, 90.0);
         assert_eq!(points[0].sample_count, 4);
-        sqlx::query(
-            "INSERT INTO metric_history(server_id,timestamp,cpu,mem_used) VALUES (?,?,33.0,44)",
-        )
-        .bind(&identity.server_id)
-        .bind(start + 240)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        let points = history(&db, &identity.server_id, 24).await.unwrap();
-        let legacy = points.last().unwrap();
-        assert_eq!(legacy.cpu_min, 33.0);
-        assert_eq!(legacy.cpu_max, 33.0);
-        assert_eq!(legacy.mem_used_max, 44);
-        assert_eq!(legacy.sample_count, 1);
     }
 
     #[tokio::test]
@@ -2658,8 +2600,8 @@ mod tests {
         let current = now();
         let since = current - 3600;
         sqlx::query(
-            "INSERT INTO metric_history(server_id,timestamp,cpu,first_timestamp,last_timestamp) \
-             VALUES (?,?,?,?,?)",
+            "INSERT INTO metric_history(server_id,timestamp,cpu,cpu_min,cpu_max,mem_used_max,first_timestamp,last_timestamp) \
+             VALUES (?,?,?,42.0,42.0,0,?,?)",
         )
         .bind(&identity.server_id)
         .bind(since - 4)
@@ -2681,7 +2623,7 @@ mod tests {
         let reports = (0..=120)
             .map(|offset| sample(start + offset, if offset == 60 { 10.0 } else { 90.0 }))
             .collect::<Vec<_>>();
-        save_agent_batch(&db, &identity, "alert-data", &reports, "", Some(true))
+        save_agent_batch(&db, &identity, "alert-data", &reports, "", true)
             .await
             .unwrap();
         for metric in ["cpu", "memory", "disk", "net_in", "net_out"] {
@@ -2742,7 +2684,7 @@ mod tests {
                     &format!("retry-{index}"),
                     &reports,
                     "",
-                    Some(true),
+                    true,
                 )
                 .await
             }));
@@ -2873,7 +2815,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let result = save_agent_batch(&db, &identity, "large-batch", &reports, "127.0.0.1", None)
+        let result = save_agent_batch(&db, &identity, "large-batch", &reports, "127.0.0.1", true)
             .await
             .unwrap();
         let rows = sqlx::query_scalar::<_, i64>(
@@ -2905,7 +2847,7 @@ mod tests {
                 ..AgentReport::default()
             }],
             "127.0.0.1",
-            None,
+            false,
         )
         .await
         .unwrap();
@@ -2922,7 +2864,7 @@ mod tests {
                 ..AgentReport::default()
             }],
             "127.0.0.1",
-            None,
+            true,
         )
         .await
         .unwrap();
@@ -2973,7 +2915,7 @@ mod tests {
                 ..AgentReport::default()
             }],
             "127.0.0.1",
-            None,
+            true,
         )
         .await
         .unwrap();
@@ -3052,16 +2994,9 @@ mod tests {
     async fn cleanup_is_bounded_and_keeps_current_data_and_server_state() {
         let (db, identity) = test_server().await;
         let current = now();
-        save_agent_batch(
-            &db,
-            &identity,
-            "latest",
-            &[sample(current, 40.0)],
-            "",
-            Some(true),
-        )
-        .await
-        .unwrap();
+        save_agent_batch(&db, &identity, "latest", &[sample(current, 40.0)], "", true)
+            .await
+            .unwrap();
         let task_id = create_latency_task(
             &db,
             &LatencyTaskInput {
@@ -3079,9 +3014,10 @@ mod tests {
         let old = current - 3 * 86_400;
         sqlx::query(
             "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<2100) \
-            INSERT INTO metric_history(server_id,timestamp) SELECT ?,?+n FROM seq",
+            INSERT INTO metric_history(server_id,timestamp,last_timestamp) SELECT ?,?+n,?+n FROM seq",
         )
         .bind(&identity.server_id)
+        .bind(old)
         .bind(old)
         .execute(db.pool())
         .await

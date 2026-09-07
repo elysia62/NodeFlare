@@ -150,7 +150,7 @@ export function NodeCard({ server, config, liveLatencyResults, onOpen }: {
           </div>
           {showExpiryPanel ? <div className="data-panel" title={ui(locale, "剩余周期", "Billing cycle")}>
             {config.show_expiry ? <CompactLine icon={<CalendarDays size={11} />}>{formatExpire(server, locale)}</CompactLine> : null}
-            {config.show_price ? <CompactLine icon={<Coins size={11} />}>{server.price <= 0
+            {config.show_price ? <CompactLine icon={<Coins size={11} />}>{server.price === 0
               ? ui(locale, "免费", "Free")
               : formatCurrency(remainingValue, server.currency)}</CompactLine> : null}
           </div> : null}

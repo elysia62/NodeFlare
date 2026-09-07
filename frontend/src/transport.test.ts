@@ -68,7 +68,6 @@ function transportHarness() {
   const connections: boolean[] = [];
   const batches: BatchUpdate[][] = [];
   const dispose = connectLive({ serverId: "node/1" }, {
-    onServer: () => {},
     onBatch: (batch) => { batches.push(batch); },
     onConnectedChange: (connected) => { connections.push(connected); },
     onWakeRequested: async () => {},

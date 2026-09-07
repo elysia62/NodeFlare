@@ -42,7 +42,7 @@ case "$(uname -s)" in
     default_database_url=sqlite://nodeflare.db
     ;;
   *)
-    printf '[NodeFlare] 错误：当前系统不支持此安装脚本\n' >&2
+    printf '错误：当前系统不支持此安装脚本\n' >&2
     exit 1
     ;;
 esac
@@ -67,17 +67,31 @@ usage() {
     '  sudo sh install.sh --uninstall --purge' \
     '' \
     '首次安装会询问管理员用户名、密码、监听端口（默认 2206）和数据库连接。' \
-    '安装和更新均使用 GitHub latest Release，并保留已有配置和数据库。' \
+    '安装和更新均使用 GitHub latest Release。' \
     '--uninstall 保留配置和数据；只有同时指定 --purge 才彻底删除。'
 }
 
 log() {
-  printf '[NodeFlare] %s\n' "$1"
+  printf '%s\n' "$1"
 }
 
 fail() {
-  printf '[NodeFlare] 错误：%s\n' "$1" >&2
+  printf '错误：%s\n' "$1" >&2
   exit 1
+}
+
+print_install_result() {
+  if [ "$new_config" = false ]; then
+    printf '\n更新完成（v%s）\n' "$release_version"
+    return
+  fi
+  printf '\n安装完成（v%s）\n' "$release_version"
+  printf '%s\n' \
+    "配置和数据：$config_dir" \
+    "程序：$server_binary" \
+    "服务系统：$init_system"
+  printf '本机访问：http://127.0.0.1:%s/admin/login\n' "$server_port"
+  printf '%s\n' "下一步：登录管理后台创建节点，并按弹窗命令安装 Agent"
 }
 
 detect_glibc_version() {
@@ -399,7 +413,7 @@ download_release() {
   ')
   [ -n "$expected" ] || fail "Release 缺少 $asset 的 SHA-256 摘要"
   release_base="https://github.com/$repository/releases/download/$release_tag"
-  log "下载 NodeFlare $release_tag ($release_label)"
+  log "下载 $release_tag ($release_label)"
   download_file "$release_base/$asset" "$archive" 120
   verify_checksum
 
@@ -534,7 +548,7 @@ rollback_install() {
     if start_server; then
       log "已恢复并重新启动上一版本"
     else
-      printf '[NodeFlare] 警告：上一版本已恢复，但服务未能自动启动\n' >&2
+      printf '警告：上一版本已恢复，但服务未能自动启动\n' >&2
     fi
   fi
 }
@@ -552,7 +566,7 @@ start_server() {
   case "$init_system" in
     systemd)
       systemctl daemon-reload || return 1
-      systemctl enable nodeflare.service >/dev/null || return 1
+      systemctl enable --quiet nodeflare.service >/dev/null || return 1
       systemctl restart nodeflare.service || return 1
       started_pid=$(systemctl show -p MainPID --value nodeflare.service) || return 1
       [ "$started_pid" -gt 0 ] || return 1
@@ -595,13 +609,13 @@ restart_server() {
   [ -x "$server_binary" ] && [ -f "$config_file" ] && [ -f "$(service_definition)" ] \
     || fail "未检测到完整安装，请先选择安装 / 更新"
   stop_server
-  start_server || fail "NodeFlare 重启失败，请检查服务日志"
-  log "NodeFlare 已重启"
+  start_server || fail "服务重启失败，请检查日志"
+  log "服务已重启"
 }
 
 uninstall_server() {
   purge=$1
-  log "停止并移除 NodeFlare 面板服务"
+  log "停止并移除面板服务"
   stop_server
   case "$init_system" in
     systemd)
@@ -696,11 +710,13 @@ if [ ! -f "$config_file" ]; then
   prompt_credentials
   prompt_port
   prompt_database
-else
-  log "保留已有配置：$config_file"
 fi
 
-log "安装 NodeFlare $release_version"
+if [ "$new_config" = true ]; then
+  log "正在安装 v$release_version"
+else
+  log "正在更新至 v$release_version"
+fi
 snapshot_install
 stop_server
 install -d -m 0700 "$config_dir" "$theme_dir"
@@ -727,19 +743,8 @@ if ! start_server; then
   if [ "$init_system" = systemd ]; then
     journalctl -u nodeflare.service -n 30 --no-pager >&2 || true
   fi
-  fail "NodeFlare 服务启动失败，请检查配置中的 bind_addr 是否被占用及数据库连接"
+  fail "服务启动失败，请检查配置中的 bind_addr 是否被占用及数据库连接"
 fi
 rollback_ready=false
 
-log "安装完成"
-printf '%s\n' \
-  "版本：$release_version" \
-  "配置和数据：$config_dir" \
-  "程序：$server_binary" \
-  "服务系统：$init_system"
-if [ "$new_config" = true ]; then
-  printf '本机访问：http://127.0.0.1:%s/admin/login\n' "$server_port"
-else
-  printf '监听地址：沿用 %s 中的 bind_addr\n' "$config_file"
-fi
-printf '%s\n' "下一步：登录管理后台创建节点，并按弹窗命令安装 Agent"
+print_install_result

@@ -14,6 +14,7 @@ backup_service=""
 rollback_agent=false
 had_agent=false
 had_service=false
+update=false
 
 usage() {
   cat <<'EOF'
@@ -34,12 +35,27 @@ EOF
 }
 
 log() {
-  printf '[NodeFlare] %s\n' "$1"
+  printf '%s\n' "$1"
 }
 
 fail() {
-  printf '[NodeFlare] 错误：%s\n' "$1" >&2
+  printf '错误：%s\n' "$1" >&2
   exit 1
+}
+
+print_install_result() {
+  if [ "$update" = true ] || [ "$had_agent" = true ]; then
+    printf '\n更新完成（v%s）\n' "$installed_version"
+    return
+  fi
+  printf '\n安装完成（v%s）\n' "$installed_version"
+  printf '  服务：%s（%s）\n' "$SERVICE_NAME" "$init_system"
+  if [ "$init_system" = systemd ]; then
+    printf '  查看状态：systemctl status %s\n' "$SERVICE_NAME"
+    printf '  查看日志：journalctl -u %s -f\n' "$SERVICE_NAME"
+  else
+    printf '  查看状态：rc-service %s status\n' "$SERVICE_NAME"
+  fi
 }
 
 cleanup_agent_install() {
@@ -252,7 +268,7 @@ install_agent() {
     download_url="$mirror/$release_base/$artifact"
     log "正在通过下载加速前缀拉取 Agent $release_tag"
   else
-    log "正在下载 NodeFlare Agent $release_tag"
+    log "正在下载 Agent $release_tag"
   fi
   curl --fail --location --silent --show-error --max-time 120 \
     "$download_url" \
@@ -290,7 +306,7 @@ install_agent() {
     openrc) rc-service "$SERVICE_NAME" stop 2>/dev/null || true ;;
   esac
   mv "$temporary" "$AGENT_FILE"
-  log "正在配置并启动 $init_system 服务"
+  log "正在启动 $init_system 服务"
   if [ "$init_system" = "systemd" ]; then
     printf '%s\n' \
     '[Unit]' \
@@ -311,10 +327,10 @@ install_agent() {
     'WantedBy=multi-user.target' > "$SERVICE_FILE"
     chmod 600 "$SERVICE_FILE"
     systemctl daemon-reload
-    systemctl enable --now "$SERVICE_NAME"
+    systemctl enable --now --quiet "$SERVICE_NAME"
     systemctl is-active --quiet "$SERVICE_NAME" || {
       systemctl status "$SERVICE_NAME" --no-pager >&2 || true
-      fail "NodeFlare 服务启动失败，请查看上方状态信息"
+      fail "服务启动失败，请查看上方状态信息"
     }
   elif [ "$init_system" = "openrc" ]; then
     printf '%s\n' \
@@ -333,21 +349,13 @@ install_agent() {
     rc-service "$SERVICE_NAME" restart
     rc-service "$SERVICE_NAME" status >/dev/null || {
       rc-service "$SERVICE_NAME" status >&2 || true
-      fail "NodeFlare 服务启动失败，请查看上方状态信息"
+      fail "服务启动失败，请查看上方状态信息"
     }
   fi
   rollback_agent=false
   cleanup_agent_install
   trap - EXIT HUP INT TERM
-  printf '\nNodeFlare Agent 安装完成\n'
-  printf '  版本：%s\n' "$installed_version"
-  printf '  服务：%s（%s）\n' "$SERVICE_NAME" "$init_system"
-  if [ "$init_system" = "systemd" ]; then
-    printf '  查看状态：systemctl status %s\n' "$SERVICE_NAME"
-    printf '  查看日志：journalctl -u %s -f\n' "$SERVICE_NAME"
-  else
-    printf '  查看状态：rc-service %s status\n' "$SERVICE_NAME"
-  fi
+  print_install_result
 }
 
 load_installed_agent_config() {
@@ -377,6 +385,7 @@ load_installed_agent_config() {
 
 update_agent() {
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行更新"
+  update=true
   mirror=""
   while [ "$#" -gt 0 ]; do
     option="$1"
@@ -412,13 +421,13 @@ status_agent() {
     rc-service "$SERVICE_NAME" status
     return $?
   fi
-  echo "未检测到 NodeFlare Agent 服务" >&2
+  echo "未检测到 Agent 服务" >&2
   return 1
 }
 
 uninstall_agent() {
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行卸载"
-  log "正在停止并移除 NodeFlare Agent"
+  log "正在停止并移除 Agent 服务"
   init_system=$(detect_init_system)
   case "$init_system" in
     systemd) systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true ;;
@@ -434,7 +443,7 @@ uninstall_agent() {
   rm -rf "$STATE_DIR"
   rmdir "$STATE_ROOT" 2>/dev/null || true
   rmdir "$INSTALL_DIR" 2>/dev/null || true
-  echo "NodeFlare Agent 已卸载"
+  echo "Agent 已卸载"
 }
 
 case "${1:-}" in

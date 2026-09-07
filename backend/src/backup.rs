@@ -544,17 +544,7 @@ async fn insert_rows(
             } else {
                 "?".to_string()
             });
-            // Normalize the old free-price sentinel before newer constraints run.
-            if table == "servers"
-                && column.name == "price"
-                && value
-                    .as_f64()
-                    .is_some_and(|price| (-1.0..0.0).contains(&price))
-            {
-                add_argument(&mut arguments, column.kind, &Value::from(0.0))?;
-            } else {
-                add_argument(&mut arguments, column.kind, value)?;
-            }
+            add_argument(&mut arguments, column.kind, value)?;
         }
         placeholders.push(format!("({})", row_placeholders.join(",")));
     }
@@ -767,21 +757,9 @@ async fn restore_table<R: Read + Seek + Send>(
         bail!("{table} 备份表头无效");
     }
     let header: BackupTableHeader = serde_json::from_str(line.trim_end())?;
-    let legacy_history = table == "metric_history"
-        && columns.len()
-            == header.columns.len() + crate::db::queries::HISTORY_AGGREGATE_COLUMNS.len()
-        && columns.starts_with(&header.columns)
-        && columns[header.columns.len()..]
-            .iter()
-            .map(|column| column.name.as_str())
-            .eq(crate::db::queries::HISTORY_AGGREGATE_COLUMNS);
-    if header.table != table || (header.columns != columns && !legacy_history) {
+    if header.table != table || header.columns != columns {
         bail!("{table} 备份结构与当前数据库不兼容");
     }
-    // Older archives omit columns added by later migrations; SQL defaults
-    // preserve their original values and leave optional additions empty.
-    let columns = &header.columns;
-
     let mut restored = 0_usize;
     let mut batch = Vec::with_capacity(INSERT_BATCH_ROWS);
     let mut batch_bytes = 0_usize;
@@ -841,6 +819,27 @@ async fn restore<R: Read + Seek + Send>(
     for (table, columns) in BACKUP_TABLES.iter().zip(schema.iter()) {
         restored += restore_table(&mut archive, db, &mut transaction, table, columns).await?;
     }
+    // Current-format backups can contain snapshot rows with unset aggregates.
+    // Fill them once on import so live queries only read canonical aggregates.
+    sqlx::query(
+        "UPDATE metric_history SET \
+         first_timestamp=COALESCE(NULLIF(first_timestamp,0),timestamp), \
+         last_timestamp=COALESCE(NULLIF(last_timestamp,0),timestamp), \
+         cpu_min=COALESCE(cpu_min,cpu), cpu_max=COALESCE(cpu_max,cpu), \
+         mem_used_max=COALESCE(mem_used_max,mem_used), \
+         memory_avg=COALESCE(memory_avg,CASE WHEN mem_total>0 THEN CAST(mem_used AS DOUBLE PRECISION)*100.0/mem_total ELSE 0.0 END), \
+         memory_min=COALESCE(memory_min,CASE WHEN mem_total>0 THEN CAST(mem_used AS DOUBLE PRECISION)*100.0/mem_total ELSE 0.0 END), \
+         disk_avg=COALESCE(disk_avg,CASE WHEN disk_total>0 THEN CAST(disk_used AS DOUBLE PRECISION)*100.0/disk_total ELSE 0.0 END), \
+         disk_min=COALESCE(disk_min,CASE WHEN disk_total>0 THEN CAST(disk_used AS DOUBLE PRECISION)*100.0/disk_total ELSE 0.0 END), \
+         net_in_avg=COALESCE(net_in_avg,net_in), net_in_min=COALESCE(net_in_min,net_in), \
+         net_out_avg=COALESCE(net_out_avg,net_out), net_out_min=COALESCE(net_out_min,net_out) \
+         WHERE first_timestamp=0 OR last_timestamp=0 OR cpu_min IS NULL OR cpu_max IS NULL \
+           OR mem_used_max IS NULL OR memory_avg IS NULL OR memory_min IS NULL \
+           OR disk_avg IS NULL OR disk_min IS NULL OR net_in_avg IS NULL OR net_in_min IS NULL \
+           OR net_out_avg IS NULL OR net_out_min IS NULL",
+    )
+    .execute(&mut *transaction)
+    .await?;
     let required_settings = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM settings WHERE key IN \
          ('admin_username','admin_password_hash','password_client_salt','password_scheme')",
@@ -919,17 +918,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restores_legacy_snapshot_archives_and_round_trips_aggregates() {
+    async fn restores_current_format_snapshots_and_round_trips_aggregates() {
         let source = crate::db::connect("sqlite::memory:").await.unwrap();
         let target = crate::db::connect("sqlite::memory:").await.unwrap();
-        let original = sqlx::migrate::Migrator::with_migrations(
-            crate::db::SQLITE_MIGRATOR
-                .iter()
-                .filter(|migration| migration.version == 1)
-                .cloned()
-                .collect(),
-        );
-        original.run(source.pool()).await.unwrap();
+        source.migrate().await.unwrap();
         target.migrate().await.unwrap();
         sqlx::query(
             "INSERT INTO settings(key,value) VALUES \
@@ -939,18 +931,35 @@ mod tests {
         .execute(source.pool())
         .await
         .unwrap();
-        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,price,hidden) VALUES ('legacy','Legacy','token',1,1,-1,1)")
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,price,hidden) VALUES ('node','Node',?,1,1,0,1)")
+            .bind(crate::auth::token_hash("primary-token"))
             .execute(source.pool()).await.unwrap();
-        sqlx::query("INSERT INTO metric_history(server_id,timestamp,cpu,mem_used) VALUES ('legacy',?,75.0,500)")
-            .bind(crate::db::now()).execute(source.pool()).await.unwrap();
+        let timestamp = crate::db::now();
+        sqlx::query("INSERT INTO metric_history(server_id,timestamp,cpu,mem_used,mem_total,disk_used,disk_total,net_in,net_out) VALUES ('node',?,75.0,500,1000,250,1000,20.0,30.0)")
+            .bind(timestamp).execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO server_install_tokens(token_hash,server_id,created_at) VALUES (?,'node',1)")
+            .bind(crate::auth::token_hash("install-token"))
+            .execute(source.pool()).await.unwrap();
         assert_eq!(copy_database(&source, &target).await.unwrap(), 6);
-        let server = sqlx::query("SELECT price,hidden FROM servers WHERE id='legacy'")
+        let server = sqlx::query("SELECT price,hidden FROM servers WHERE id='node'")
             .fetch_one(target.pool())
             .await
             .unwrap();
         assert_eq!(server.try_get::<f64, _>("price").unwrap(), 0.0);
         assert_eq!(server.try_get::<i64, _>("hidden").unwrap(), 1);
-        let points = crate::db::queries::history(&target, "legacy", 1)
+        assert!(
+            crate::db::queries::agent_identity(&target, "primary-token")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            crate::db::queries::agent_identity(&target, "install-token")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let points = crate::db::queries::history(&target, "node", 1)
             .await
             .unwrap();
         assert_eq!(points.len(), 1);
@@ -958,6 +967,25 @@ mod tests {
         assert_eq!(points[0].cpu_max, 75.0);
         assert_eq!(points[0].mem_used_max, 500);
         assert_eq!(points[0].sample_count, 1);
+        let row = sqlx::query("SELECT * FROM metric_history")
+            .fetch_one(target.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.get::<i64, _>("first_timestamp"), timestamp);
+        assert_eq!(row.get::<i64, _>("last_timestamp"), timestamp);
+        for (prefix, value) in [
+            ("memory", 50.0),
+            ("disk", 25.0),
+            ("net_in", 20.0),
+            ("net_out", 30.0),
+        ] {
+            for suffix in ["avg", "min"] {
+                assert_eq!(
+                    row.get::<f64, _>(format!("{prefix}_{suffix}").as_str()),
+                    value
+                );
+            }
+        }
         sqlx::query("UPDATE metric_history SET sample_count=4,cpu=50.0,cpu_min=10.0,cpu_max=90.0, \
             memory_avg=50.0,memory_min=10.0,net_in_avg=20.0,net_in_min=1.0,first_timestamp=?,last_timestamp=?")
             .bind(crate::db::now() - 3).bind(crate::db::now()).execute(target.pool()).await.unwrap();
@@ -974,6 +1002,83 @@ mod tests {
         assert_eq!(row.try_get::<f64, _>("cpu_max").unwrap(), 90.0);
         assert_eq!(row.try_get::<f64, _>("memory_avg").unwrap(), 50.0);
         assert_eq!(row.try_get::<f64, _>("memory_min").unwrap(), 10.0);
+        target.migrate().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations")
+                .fetch_all(target.pool())
+                .await
+                .unwrap(),
+            vec![1]
+        );
+        assert!(
+            crate::db::queries::agent_identity(&source, "install-token")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_snapshot_only_headers_without_changing_the_target() {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        source.migrate().await.unwrap();
+        target.migrate().await.unwrap();
+        crate::db::set_setting(&target, "site_name", "Preserved")
+            .await
+            .unwrap();
+        for column in crate::db::queries::HISTORY_AGGREGATE_COLUMNS {
+            sqlx::query(AssertSqlSafe(format!(
+                "ALTER TABLE metric_history DROP COLUMN {column}"
+            )))
+            .execute(source.pool())
+            .await
+            .unwrap();
+        }
+        let error = copy_database(&source, &target).await.unwrap_err();
+        assert!(
+            error.to_string().contains("metric_history 备份结构"),
+            "{error:#}"
+        );
+        assert_eq!(
+            crate::db::get_setting(&target, "site_name")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Preserved")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_negative_backup_prices_without_changing_the_target() {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        source.migrate().await.unwrap();
+        target.migrate().await.unwrap();
+        crate::db::set_setting(&target, "site_name", "Preserved")
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA ignore_check_constraints=ON")
+            .execute(source.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,price) VALUES ('negative','Negative','hash',1,1,-1)")
+            .execute(source.pool()).await.unwrap();
+        assert!(copy_database(&source, &target).await.is_err());
+        assert_eq!(
+            crate::db::get_setting(&target, "site_name")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Preserved")
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM servers")
+                .fetch_one(target.pool())
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

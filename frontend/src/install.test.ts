@@ -97,6 +97,65 @@ describe("installer port selection", () => {
   });
 });
 
+describe("server installer update output", () => {
+  for (const healthy of [true, false]) {
+    test(healthy ? "updates quietly without prompting or rewriting configuration" : "keeps startup diagnostics and never announces success on failure", () => {
+      const directory = mkdtempSync(join(tmpdir(), "nodeflare-install-output-"));
+      const config = join(directory, "config.toml");
+      const original = 'bind_addr = "127.0.0.1:3100"\nadmin_password = ""\n';
+      try {
+        writeFileSync(config, original);
+        const start = installer.lastIndexOf("\ndownload_release\n");
+        if (start < 0) throw new Error("Missing installer entry point");
+        const result = spawnSync("sh", ["-c", `
+          set -eu
+          ${shellFunctions("log", "fail", "print_install_result")}
+          config_dir=$TEST_DIRECTORY
+          config_file=$config_dir/config.toml
+          theme_dir=$config_dir/themes
+          install_dir=$config_dir/install
+          share_dir=$install_dir/share
+          public_frontend_dir=$share_dir/frontend
+          admin_frontend_dir=$share_dir/admin
+          agent_installer_dir=$share_dir/agent
+          server_binary=$install_dir/nodeflare
+          init_system=systemd
+          download_release() { release_version=1.2.3; package_dir=$TEST_DIRECTORY/package; }
+          prompt_credentials() { fail 'Unexpected credential prompt'; }
+          prompt_port() { fail 'Unexpected port prompt'; }
+          prompt_database() { fail 'Unexpected database prompt'; }
+          write_config() { fail 'Unexpected config write'; }
+          snapshot_install() { :; }
+          stop_server() { :; }
+          install_service() { :; }
+          install() { :; }
+          cp() { :; }
+          rm() { :; }
+          chown() { :; }
+          chmod() { :; }
+          start_server() { ${healthy ? "return 0" : "return 1"}; }
+          journalctl() { printf 'startup diagnostic\\n'; }
+          ${installer.slice(start)}
+        `], { env: { ...process.env, TEST_DIRECTORY: directory }, encoding: "utf8" });
+        expect(readFileSync(config, "utf8")).toBe(original);
+        expect(result.stdout).not.toMatch(/NodeFlare|配置|沿用|复用|下一步|本机访问/);
+        if (healthy) {
+          expect(result.status).toBe(0);
+          expect(result.stdout).toBe("正在更新至 v1.2.3\n正在启动服务\n\n更新完成（v1.2.3）\n");
+          expect(result.stderr).toBe("");
+        } else {
+          expect(result.status).toBe(1);
+          expect(result.stdout).not.toContain("完成");
+          expect(result.stderr).toContain("startup diagnostic");
+          expect(result.stderr).toContain("服务启动失败");
+        }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 describe("installer menu", () => {
   function route(input: string, args: string[] = []) {
     const dispatch = installer.slice(installer.indexOf("\nmode=menu"), installer.indexOf("\nfor required_command"));

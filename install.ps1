@@ -20,11 +20,24 @@ $ConfigFile = Join-Path $DataDir "config.toml"
 $ThemeDir = Join-Path $DataDir "themes"
 
 function Write-Step([string]$Message) {
-  Write-Host "[NodeFlare] $Message"
+  Write-Host $Message
 }
 
 function Stop-Install([string]$Message) {
-  throw "[NodeFlare] 错误：$Message"
+  throw "错误：$Message"
+}
+
+function Show-InstallResult {
+  Write-Host ""
+  if (-not $NewConfig) {
+    Write-Host "更新完成（v$Version）"
+    return
+  }
+  Write-Host "安装完成（v$Version）"
+  Write-Host "  配置和数据：$DataDir"
+  Write-Host "  服务：Windows 计划任务 $TaskName"
+  Write-Host "  本机访问：http://127.0.0.1:$Port/admin/login"
+  Write-Host "  下一步：登录管理后台创建节点，并按弹窗命令安装 Agent"
 }
 
 function Assert-Administrator {
@@ -99,13 +112,13 @@ function Wait-Server {
     if ($Task.State -eq "Running") { break }
   }
   if ($Task.State -ne "Running") {
-    Stop-Install "NodeFlare 服务启动失败（状态：$($Task.State)）"
+    Stop-Install "服务启动失败（状态：$($Task.State)）"
   }
   for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
     Start-Sleep -Seconds 1
     $Task = Get-ScheduledTask -TaskName $TaskName
     if ($Task.State -ne "Running") {
-      Stop-Install "NodeFlare 启动后退出，请检查 bind_addr 端口占用及数据库连接"
+      Stop-Install "服务启动后退出，请检查 bind_addr 端口占用及数据库连接"
     }
   }
 }
@@ -139,7 +152,7 @@ if ($Mode -eq "Exit") { exit 0 }
 if ($Mode -eq "Status") {
   $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($null -eq $Task) {
-    Write-Error "未检测到 NodeFlare 服务"
+    Write-Error "未检测到面板服务"
     exit 1
   }
   $Task
@@ -156,7 +169,7 @@ if ($Mode -eq "Restart") {
   Stop-ScheduledTask -TaskName $TaskName
   Start-ScheduledTask -TaskName $TaskName
   Wait-Server
-  Write-Step "NodeFlare 已重启"
+  Write-Step "服务已重启"
   exit 0
 }
 
@@ -166,7 +179,7 @@ if ($Mode -eq "Uninstall") {
       Stop-Install "已取消卸载"
     }
   }
-  Write-Step "停止并移除 NodeFlare 面板服务"
+  Write-Step "停止并移除面板服务"
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $ServerFile -Force -ErrorAction SilentlyContinue
@@ -208,7 +221,7 @@ try {
   $DigestMatch = [regex]::Match([string]$ReleaseAsset.digest, '^sha256:([0-9a-fA-F]{64})$')
   if (-not $DigestMatch.Success) { Stop-Install "Release 缺少 $Asset 的 SHA-256 摘要" }
   $Expected = $DigestMatch.Groups[1].Value
-  Write-Step "下载 NodeFlare $($Release.tag_name)（Windows x64）"
+  Write-Step "下载 $($Release.tag_name)（Windows x64）"
   Invoke-WebRequest -UseBasicParsing -Uri $ReleaseAsset.browser_download_url -OutFile $Archive -TimeoutSec 120
   $Actual = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash
   if ($Actual -ne $Expected) {
@@ -264,7 +277,11 @@ try {
     } while ($DatabaseUrl -notmatch '^(sqlite|postgres|postgresql)://')
   }
 
-  Write-Step "安装 NodeFlare $Version"
+  if ($NewConfig) {
+    Write-Step "正在安装 v$Version"
+  } else {
+    Write-Step "正在更新至 v$Version"
+  }
   $HadPreviousInstall = Test-Path -LiteralPath $InstallDir -PathType Container
   if ($HadPreviousInstall) {
     Copy-Item -LiteralPath $InstallDir -Destination $PreviousInstall -Recurse -Force
@@ -296,18 +313,8 @@ try {
 
   Wait-Server
 
-  Write-Host ""
-  Write-Host "NodeFlare 安装完成"
-  Write-Host "  版本：$Version"
-  Write-Host "  配置和数据：$DataDir"
-  Write-Host "  服务：Windows 计划任务 $TaskName"
-  if ($NewConfig) {
-    Write-Host "  本机访问：http://127.0.0.1:$Port/admin/login"
-  } else {
-    Write-Host "  监听地址：沿用 $ConfigFile 中的 bind_addr"
-  }
-  Write-Host "  下一步：登录管理后台创建节点，并按弹窗命令安装 Agent"
   $InstallChanged = $false
+  Show-InstallResult
 } catch {
   if ($InstallChanged) {
     if ($HadPreviousInstall) { Write-Warning "安装未完成，正在恢复上一版本" }

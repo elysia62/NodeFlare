@@ -74,7 +74,7 @@ const PUBLIC_IP_V6_URL: &str = "https://ipv6.icanhazip.com/";
 const RUNTIME_STATS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CLOCK_CALIBRATION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOCK_CALIBRATION_MIN_CHANGE_MS: i64 = 20_000;
-const AGENT_PROTOCOL_VERSION: &str = "1";
+const AGENT_PROTOCOL_VERSION: &str = "2";
 const AGENT_CAPABILITIES: &str = "metrics-v1,config-v1,remote-exec-v1,task-ack-v1";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -1746,7 +1746,7 @@ fn report_batch_id(reports: &[Report]) -> String {
 
 type LiveSocket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
 
-fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>, bool)> {
+fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)> {
     let mut request = endpoint.into_client_request()?;
     request
         .headers_mut()
@@ -1770,11 +1770,17 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>,
         .get("date")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| clock_offset_from_http_date(value, started_ms, ended_ms));
-    let persistence_batches = response
+    if !response
         .headers()
-        .get("x-nodeflare-persistence-batches")
-        .is_some_and(|value| value == "1");
-    Ok((socket, clock_offset_ms, persistence_batches))
+        .get("x-nodeflare-agent-protocol")
+        .is_some_and(|value| value == AGENT_PROTOCOL_VERSION)
+    {
+        return Err(format!(
+            "backend protocol mismatch; update the backend to protocol {AGENT_PROTOCOL_VERSION}"
+        )
+        .into());
+    }
+    Ok((socket, clock_offset_ms))
 }
 
 fn set_live_read_timeout(socket: &mut LiveSocket, timeout: Option<Duration>) -> io::Result<()> {
@@ -2539,15 +2545,13 @@ fn wait_for_live_ack(
     }
 }
 
-fn live_update_payload(reports: &[Report], persist: Option<bool>) -> Result<String> {
-    let mut message = serde_json::json!({
+fn live_update_payload(reports: &[Report], persist: bool) -> Result<String> {
+    let message = serde_json::json!({
         "type": "update",
         "batchId": report_batch_id(reports),
         "samples": reports,
+        "persist": persist,
     });
-    if let Some(persist) = persist {
-        message["persist"] = serde_json::json!(persist);
-    }
     Ok(serde_json::to_string(&message)?)
 }
 
@@ -2575,29 +2579,6 @@ fn live_batch_after(queue: &VecDeque<Report>, timestamp: i64) -> Vec<Report> {
     candidates.into_iter().take(count).collect()
 }
 
-fn live_persistence_batch(queue: &VecDeque<Report>, timestamp: i64) -> Vec<Report> {
-    let candidates = queue
-        .iter()
-        .filter(|report| report.timestamp > timestamp)
-        .cloned()
-        .collect::<VecDeque<_>>();
-    let count = live_batch::batch_len(&candidates);
-    candidates.into_iter().take(count).collect()
-}
-
-fn legacy_persistence_batch(queue: &VecDeque<Report>, timestamp: i64) -> Vec<Report> {
-    let candidates = queue
-        .iter()
-        .rev()
-        .filter(|report| report.timestamp > timestamp)
-        .cloned()
-        .collect::<VecDeque<_>>();
-    let count = live_batch::batch_len(&candidates);
-    let mut batch = candidates.into_iter().take(count).collect::<Vec<_>>();
-    batch.reverse();
-    batch
-}
-
 fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
     let LiveSenderWorker {
         pending,
@@ -2608,7 +2589,6 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         stats,
     } = worker;
     let mut socket: Option<LiveSocket> = None;
-    let mut persistence_batches = false;
     let mut wss_interval = configured_interval
         .lock()
         .map_or(Duration::from_secs(1), |interval| *interval);
@@ -2625,7 +2605,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
     'sender: loop {
         if socket.is_none() {
             match connect_live(endpoint, token) {
-                Ok((mut connected, offset_ms, supports_persistence_batches)) => {
+                Ok((mut connected, offset_ms)) => {
                     observe_clock(&clock, offset_ms);
                     if set_live_read_timeout(&mut connected, Some(LIVE_HINT_READ_TIMEOUT)).is_err()
                     {
@@ -2633,7 +2613,6 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                         continue;
                     }
                     socket = Some(connected);
-                    persistence_batches = supports_persistence_batches;
                     remote_executor.reset_delivery();
                     accepted_through = persisted_through.load(Ordering::Acquire);
                     next_send_at = Instant::now();
@@ -2664,11 +2643,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
             let now = Instant::now();
             let persisted = persisted_through.load(Ordering::Acquire);
             if now >= next_probe_at {
-                let persistence_batch = if persistence_batches {
-                    live_persistence_batch(&queue, persisted)
-                } else {
-                    legacy_persistence_batch(&queue, persisted)
-                };
+                let persistence_batch = live_batch_after(&queue, persisted);
                 if !persistence_batch.is_empty() {
                     let last = persistence_batch.last().unwrap().timestamp;
                     let more_pending = queue.iter().any(|report| report.timestamp > last);
@@ -2762,7 +2737,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
             wss_interval = (*interval).clamp(Duration::from_secs(1), Duration::from_secs(60));
         }
 
-        let payload = match live_update_payload(&batch, persistence_batches.then_some(persist)) {
+        let payload = match live_update_payload(&batch, persist) {
             Ok(payload) => payload,
             Err(error) => {
                 eprintln!("live payload encode failed: {error}");
@@ -3820,7 +3795,7 @@ mod tests {
                     ..Report::default()
                 },
             ],
-            Some(false),
+            false,
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();

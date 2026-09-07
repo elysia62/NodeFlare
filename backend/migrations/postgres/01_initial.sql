@@ -15,7 +15,7 @@ CREATE TABLE servers (
   traffic_limit BIGINT NOT NULL DEFAULT 0 CHECK(traffic_limit >= 0),
   traffic_limit_type TEXT NOT NULL DEFAULT 'sum'
     CHECK(traffic_limit_type IN ('sum', 'max', 'min', 'up', 'down')),
-  price DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK(price BETWEEN -1 AND 1000000000),
+  price DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK(price BETWEEN 0 AND 1000000000),
   billing_cycle BIGINT NOT NULL DEFAULT 30 CHECK(billing_cycle BETWEEN 0 AND 3650),
   currency TEXT NOT NULL DEFAULT 'CNY' CHECK(currency ~ '^[A-Z]{3}$'),
   auto_renewal BIGINT NOT NULL DEFAULT 0 CHECK(auto_renewal IN (0, 1)),
@@ -40,6 +40,14 @@ CREATE TABLE servers (
 
 CREATE INDEX servers_sort ON servers(sort_order, created_at);
 CREATE INDEX servers_public_sort ON servers(hidden, sort_order, created_at);
+
+CREATE TABLE server_install_tokens (
+  token_hash TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  created_at BIGINT NOT NULL
+);
+
+CREATE INDEX server_install_tokens_server ON server_install_tokens(server_id, created_at DESC);
 
 CREATE TABLE metric_history (
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -69,6 +77,20 @@ CREATE TABLE metric_history (
   disk_write_iops DOUBLE PRECISION NOT NULL DEFAULT 0,
   disk_await_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
   disk_utilization DOUBLE PRECISION NOT NULL DEFAULT 0,
+  sample_count BIGINT NOT NULL DEFAULT 1 CHECK(sample_count > 0),
+  first_timestamp BIGINT NOT NULL DEFAULT 0,
+  last_timestamp BIGINT NOT NULL DEFAULT 0,
+  cpu_min DOUBLE PRECISION,
+  cpu_max DOUBLE PRECISION,
+  mem_used_max BIGINT,
+  memory_avg DOUBLE PRECISION,
+  memory_min DOUBLE PRECISION,
+  disk_avg DOUBLE PRECISION,
+  disk_min DOUBLE PRECISION,
+  net_in_avg DOUBLE PRECISION,
+  net_in_min DOUBLE PRECISION,
+  net_out_avg DOUBLE PRECISION,
+  net_out_min DOUBLE PRECISION,
   PRIMARY KEY(server_id, timestamp)
 );
 

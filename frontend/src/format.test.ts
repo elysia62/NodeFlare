@@ -39,8 +39,7 @@ describe("formatSpeedParts", () => {
 });
 
 describe("formatPrice", () => {
-  test("renders zero and legacy negative prices as free", () => {
-    expect(formatPrice({ price: -1, billing_cycle: 30, currency: "CNY" })).toBe("免费");
+  test("renders zero prices as free", () => {
     expect(formatPrice({ price: 0, billing_cycle: 30, currency: "CNY" })).toBe("免费");
     expect(formatPrice({ price: 0, billing_cycle: 30, currency: "USD" }, "en")).toBe("Free");
   });

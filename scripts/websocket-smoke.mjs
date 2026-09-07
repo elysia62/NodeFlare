@@ -12,7 +12,7 @@ const configOnly = process.env.MONITOR_CONFIG_ONLY === "1";
 const expectAgentRejected = process.env.MONITOR_EXPECT_AGENT_REJECTED === "1";
 const rotateAgentToken = process.env.MONITOR_ROTATE_AGENT_TOKEN === "1";
 const agentProtocolHeaders = {
-  "X-NodeFlare-Agent-Protocol": "1",
+  "X-NodeFlare-Agent-Protocol": "2",
   "X-NodeFlare-Agent-Capabilities":
     "metrics-v1,config-v1,remote-exec-v1,task-ack-v1",
 };
@@ -118,6 +118,7 @@ function socketHeaders(path, token, headers = {}, includeAgentProtocol = true) {
 
 function openSocket(path, token, headers = {}, includeAgentProtocol = true) {
   return new Promise((resolve, reject) => {
+    let serverProtocol;
     const socket = new WebSocket(websocketUrl(path), {
       headers: socketHeaders(path, token, headers, includeAgentProtocol),
     });
@@ -125,8 +126,16 @@ function openSocket(path, token, headers = {}, includeAgentProtocol = true) {
       socket.terminate();
       reject(new Error(`${path} WebSocket handshake timed out`));
     }, 5_000);
+    socket.once("upgrade", (response) => {
+      serverProtocol = response.headers["x-nodeflare-agent-protocol"];
+    });
     socket.once("open", () => {
       clearTimeout(timer);
+      if (path === "/api/agent/ws" && serverProtocol !== "2") {
+        socket.terminate();
+        reject(new Error(`Invalid backend Agent protocol: ${serverProtocol}`));
+        return;
+      }
       resolve(socket);
     });
     socket.once("unexpected-response", (_request, response) => {
@@ -280,6 +289,12 @@ function waitForSocketClose(socket, expected, timeoutMs = 5_000) {
 }
 
 await expectSocketStatus("/api/agent/ws", "invalid-agent-token", 426, {}, false);
+await expectSocketStatus(
+  "/api/agent/ws",
+  "invalid-agent-token",
+  426,
+  { "X-NodeFlare-Agent-Protocol": "1" },
+);
 await expectSocketStatus(
   "/api/agent/ws",
   "invalid-agent-token",
@@ -623,6 +638,18 @@ try {
     sample(5, { net_rx_total: 536870912, net_tx_total: 268435456 }),
   ];
   const latestTimestamp = timestamp + 5;
+  for (const persist of [undefined, null]) {
+    const rejectedAck = waitForJsonMessage(
+      agent,
+      "invalid persistence flag ACK",
+      (message) => message.type === "ack" && message.realtimeHint === false,
+    );
+    agent.send(JSON.stringify({ type: "update", batchId: "invalid-persist", samples, persist }));
+    const rejected = await rejectedAck;
+    if (rejected.persistenceError !== true || rejected.persisted !== false) {
+      throw new Error(`Accepted invalid persistence flag: ${JSON.stringify(rejected)}`);
+    }
+  }
   const ackPromise = waitForJsonMessage(
     agent,
     "Agent metric ACK",
@@ -641,7 +668,7 @@ try {
           ),
       ),
   );
-  agent.send(JSON.stringify({ type: "update", batchId: `smoke-${timestamp}`, samples }));
+  agent.send(JSON.stringify({ type: "update", batchId: `smoke-${timestamp}`, samples, persist: true }));
   const [ack, update] = await Promise.all([ackPromise, updatePromise]);
   if (
     ack.ts <= 0 ||

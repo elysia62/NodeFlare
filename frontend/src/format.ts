@@ -154,7 +154,7 @@ export function formatCurrency(value: number, currency = "CNY") {
 }
 
 export function formatPrice(server: Pick<Server, "price" | "billing_cycle" | "currency">, locale: UiLocale = "zh-CN") {
-  if (server.price <= 0) return ui(locale, "免费", "Free");
+  if (server.price === 0) return ui(locale, "免费", "Free");
   const cycle = server.billing_cycle <= 0 ? ui(locale, "一次性", "one-time")
     : server.billing_cycle >= 27 && server.billing_cycle <= 32 ? ui(locale, "月", "month")
     : server.billing_cycle >= 87 && server.billing_cycle <= 95 ? ui(locale, "季", "quarter")
@@ -170,7 +170,7 @@ function daysUntil(timestamp: number | null) {
 }
 
 export function formatExpire(server: Pick<Server, "expires_at" | "price">, locale: UiLocale = "zh-CN") {
-  if (server.price <= 0 && !server.expires_at) return ui(locale, "长期", "Lifetime");
+  if (server.price === 0 && !server.expires_at) return ui(locale, "长期", "Lifetime");
   const days = daysUntil(server.expires_at);
   if (days === null) return ui(locale, "未设置", "Not set");
   if (days < 0) return ui(locale, "已过期", "Expired");

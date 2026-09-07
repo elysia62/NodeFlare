@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TASK_RESULT_BYTES: usize = 1024 * 1024;
-const AGENT_PROTOCOL_VERSION: &str = "1";
+const AGENT_PROTOCOL_VERSION: &str = "2";
 const AGENT_PROTOCOL_HEADER: &str = "x-nodeflare-agent-protocol";
 const AGENT_CAPABILITIES_HEADER: &str = "x-nodeflare-agent-capabilities";
 const REQUIRED_AGENT_CAPABILITIES: [&str; 4] =
@@ -30,8 +30,7 @@ struct UpdateMessage {
     #[serde(rename = "batchId")]
     batch_id: String,
     samples: Vec<AgentReport>,
-    #[serde(default)]
-    persist: Option<bool>,
+    persist: bool,
 }
 
 #[derive(Deserialize)]
@@ -93,8 +92,8 @@ pub async fn handle(
         .max_frame_size(MAX_AGENT_MESSAGE_BYTES)
         .on_upgrade(move |socket| run(socket, state, identity, remote_ip, token));
     response.headers_mut().insert(
-        "x-nodeflare-persistence-batches",
-        axum::http::HeaderValue::from_static("1"),
+        AGENT_PROTOCOL_HEADER,
+        axum::http::HeaderValue::from_static(AGENT_PROTOCOL_VERSION),
     );
     response
 }
@@ -488,7 +487,32 @@ mod tests {
             HeaderValue::from_static("metrics-v1,config-v1,remote-exec-v1,task-ack-v1"),
         );
         assert!(agent_protocol_supported(&headers));
+        headers.remove(AGENT_CAPABILITIES_HEADER);
+        assert!(!agent_protocol_supported(&headers));
+        headers.insert(
+            AGENT_CAPABILITIES_HEADER,
+            HeaderValue::from_static("metrics-v1,config-v1,remote-exec-v1,task-ack-v1"),
+        );
+        headers.insert(AGENT_PROTOCOL_HEADER, HeaderValue::from_static("1"));
+        assert!(!agent_protocol_supported(&headers));
         headers.insert(AGENT_PROTOCOL_HEADER, HeaderValue::from_static("999"));
         assert!(!agent_protocol_supported(&headers));
+    }
+
+    #[test]
+    fn updates_require_an_explicit_persistence_flag() {
+        let mut message = serde_json::json!({"type": "update", "batchId": "batch", "samples": []});
+        assert!(serde_json::from_value::<UpdateMessage>(message.clone()).is_err());
+        message["persist"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<UpdateMessage>(message.clone()).is_err());
+        for persist in [true, false] {
+            message["persist"] = persist.into();
+            assert_eq!(
+                serde_json::from_value::<UpdateMessage>(message.clone())
+                    .unwrap()
+                    .persist,
+                persist
+            );
+        }
     }
 }

@@ -34,11 +34,22 @@ $PreviousTaskXml = $null
 $InstallChanged = $false
 
 function Write-Step([string]$Message) {
-  Write-Host "[NodeFlare] $Message"
+  Write-Host $Message
 }
 
 function Write-InstallError([string]$Message) {
-  throw "[NodeFlare] 错误：$Message"
+  throw "错误：$Message"
+}
+
+function Show-InstallResult {
+  Write-Host ""
+  if ($Update -or $HadPreviousAgent) {
+    Write-Host "更新完成（v$InstalledVersion）"
+    return
+  }
+  Write-Host "安装完成（v$InstalledVersion）"
+  Write-Host "  服务：$TaskName（Windows 计划任务）"
+  Write-Host "  查看状态：Get-ScheduledTask -TaskName '$TaskName'"
 }
 
 function Assert-Safe([string]$Name, [string]$Value) {
@@ -104,21 +115,21 @@ function Assert-Mirror([string]$Value) {
 }
 
 if ($Uninstall) {
-  Write-Step "正在停止并移除 NodeFlare Agent"
+  Write-Step "正在停止并移除 Agent 服务"
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $AgentFile -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $StateDir -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $DataDir -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
-  Write-Host "NodeFlare Agent 已卸载"
+  Write-Host "Agent 已卸载"
   exit 0
 }
 
 if ($Status) {
   $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($null -eq $Task) {
-    Write-Error "未检测到 NodeFlare Agent 服务"
+    Write-Error "未检测到 Agent 服务"
     exit 1
   }
   $Task
@@ -174,9 +185,9 @@ try {
   $DownloadUrl = "https://github.com/imengying/NodeFlare/releases/download/$($Release.tag_name)/$Artifact"
   if ($Mirror) {
     $DownloadUrl = "$Mirror/$DownloadUrl"
-    Write-Step "正在通过下载加速前缀拉取 NodeFlare Agent $($Release.tag_name)"
+    Write-Step "正在通过下载加速前缀拉取 Agent $($Release.tag_name)"
   } else {
-    Write-Step "正在下载 NodeFlare Agent $($Release.tag_name)"
+    Write-Step "正在下载 Agent $($Release.tag_name)"
   }
   Invoke-WebRequest -UseBasicParsing -Uri $DownloadUrl -OutFile $Temporary -TimeoutSec 120
   $ActualChecksum = (Get-FileHash -LiteralPath $Temporary -Algorithm SHA256).Hash
@@ -244,14 +255,10 @@ exit $LASTEXITCODE
     if ($Task.State -eq "Running") { break }
   }
   if ($Task.State -ne "Running") {
-    Write-InstallError "NodeFlare 服务启动失败（状态：$($Task.State)）"
+    Write-InstallError "服务启动失败（状态：$($Task.State)）"
   }
-  Write-Host ""
-  Write-Host "NodeFlare Agent 安装完成"
-  Write-Host "  版本：$InstalledVersion"
-  Write-Host "  服务：$TaskName（Windows 计划任务）"
-  Write-Host "  查看状态：Get-ScheduledTask -TaskName '$TaskName'"
   $InstallChanged = $false
+  Show-InstallResult
 } catch {
   if ($InstallChanged) {
     Write-Warning "安装未完成，正在恢复上一版本"

@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::models::{LoginSessionView, PublicConfig, SettingsInput, SettingsView};
 use anyhow::{Context, Result};
 use sqlx::any::{AnyPoolOptions, install_default_drivers};
-use sqlx::migrate::Migrator;
+use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
@@ -191,9 +191,20 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        match self.kind {
-            DatabaseKind::Sqlite => SQLITE_MIGRATOR.run(&self.pool).await?,
-            DatabaseKind::Postgres => POSTGRES_MIGRATOR.run(&self.pool).await?,
+        let result = match self.kind {
+            DatabaseKind::Sqlite => SQLITE_MIGRATOR.run(&self.pool).await,
+            DatabaseKind::Postgres => POSTGRES_MIGRATOR.run(&self.pool).await,
+        };
+        if let Err(error) = result {
+            if matches!(
+                error,
+                MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_)
+            ) {
+                return Err(anyhow::Error::new(error).context(
+                    "数据库迁移基线不匹配；请保留原数据库，使用原版本导出完整结构的 ZIP 备份，配置全新数据库后再恢复；不要删除或修改 _sqlx_migrations",
+                ));
+            }
+            return Err(error.into());
         }
         Ok(())
     }
@@ -1028,40 +1039,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_migration_preserves_existing_history() {
+    async fn initial_migration_contains_the_complete_schema() {
         let db = connect("sqlite::memory:").await.unwrap();
-        let original = Migrator::with_migrations(
-            SQLITE_MIGRATOR
-                .iter()
-                .filter(|migration| migration.version == 1)
-                .cloned()
-                .collect(),
-        );
-        original.run(db.pool()).await.unwrap();
-        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('old','Old','hash',1,1)")
-            .execute(db.pool()).await.unwrap();
-        sqlx::query("INSERT INTO metric_history(server_id,timestamp,cpu,mem_used) VALUES ('old',?,73.0,100)")
-            .bind(now()).execute(db.pool()).await.unwrap();
+        for migrator in [&SQLITE_MIGRATOR, &POSTGRES_MIGRATOR] {
+            assert_eq!(
+                migrator
+                    .iter()
+                    .map(|migration| migration.version)
+                    .collect::<Vec<_>>(),
+                vec![1]
+            );
+        }
         db.migrate().await.unwrap();
-        let point = queries::history(&db, "old", 1).await.unwrap().remove(0);
-        assert_eq!(point.cpu, 73.0);
-        assert_eq!(point.cpu_min, 73.0);
-        assert_eq!(point.cpu_max, 73.0);
-        assert_eq!(point.sample_count, 1);
+        db.migrate().await.unwrap();
+        let columns = sqlx::query("PRAGMA table_info(metric_history)")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(columns.len(), 41);
+        assert!(
+            columns
+                .iter()
+                .skip(27)
+                .map(|row| row.get::<String, _>("name"))
+                .eq(queries::HISTORY_AGGREGATE_COLUMNS)
+        );
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','hash',1,1)")
+            .execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO server_install_tokens(token_hash,server_id,created_at) VALUES ('install','node',1)")
+            .execute(db.pool()).await.unwrap();
+        queries::delete_server(&db, "node").await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM server_install_tokens")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
-    async fn price_migration_preserves_visibility_and_rejects_negative_writes() {
+    async fn mismatched_migrations_are_rejected_without_rewriting_data() {
+        for statement in [
+            "UPDATE _sqlx_migrations SET checksum=X'' WHERE version=1",
+            "INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES (2,'retired',1,X'',0)",
+        ] {
+            let db = connect("sqlite::memory:").await.unwrap();
+            db.migrate().await.unwrap();
+            set_setting(&db, "site_name", "Preserved").await.unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(db.pool())
+                .await
+                .unwrap();
+            let error = db.migrate().await.unwrap_err();
+            assert!(error.to_string().contains("全新数据库"), "{error:#}");
+            assert_eq!(
+                get_setting(&db, "site_name").await.unwrap().as_deref(),
+                Some("Preserved")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_schema_keeps_visibility_independent_and_rejects_negative_prices() {
         let db = connect("sqlite::memory:").await.unwrap();
-        let original = Migrator::with_migrations(
-            SQLITE_MIGRATOR
-                .iter()
-                .filter(|migration| migration.version < 4)
-                .cloned()
-                .collect(),
-        );
-        original.run(db.pool()).await.unwrap();
-        for (index, price) in [-1.0, -0.5, 0.0, 12.5].iter().enumerate() {
+        db.migrate().await.unwrap();
+        for (index, price) in [0.0, 0.0, 12.5, 12.5].iter().enumerate() {
             sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,price,hidden) VALUES (?,'Node',?,1,1,?,?)")
                 .bind(index.to_string()).bind(index.to_string()).bind(price).bind((index % 2) as i64)
                 .execute(db.pool()).await.unwrap();
@@ -1075,7 +1118,7 @@ mod tests {
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(
                 row.try_get::<f64, _>("price").unwrap(),
-                if index == 3 { 12.5 } else { 0.0 }
+                if index >= 2 { 12.5 } else { 0.0 }
             );
             assert_eq!(row.try_get::<i64, _>("hidden").unwrap(), (index % 2) as i64);
         }

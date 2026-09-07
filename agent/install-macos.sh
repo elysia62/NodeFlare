@@ -15,12 +15,23 @@ had_agent=false
 had_service=false
 
 log() {
-  printf '[NodeFlare] %s\n' "$1"
+  printf '%s\n' "$1"
 }
 
 fail() {
-  printf '[NodeFlare] 错误：%s\n' "$1" >&2
+  printf '错误：%s\n' "$1" >&2
   exit 1
+}
+
+print_install_result() {
+  if [ "$update" = true ] || [ "$had_agent" = true ]; then
+    printf '\n更新完成（v%s）\n' "$installed_version"
+    return
+  fi
+  printf '\n安装完成（v%s）\n' "$installed_version"
+  printf '  服务：%s（LaunchDaemon）\n' "$LABEL"
+  printf '  查看状态：sudo launchctl print system/%s\n' "$LABEL"
+  printf '  查看日志：/var/log/nodeflare-agent.log\n'
 }
 
 cleanup_agent_install() {
@@ -57,7 +68,7 @@ NodeFlare Agent macOS 安装脚本
 
 仅支持 Apple Silicon（arm64）。Agent Token 请勿泄露。
 -m 为可选的 GitHub 下载加速前缀（如 https://ghproxy.net）。
---update 沿用已安装 Agent 的服务地址、Token 和历史保存间隔。
+--update 手动更新 Agent。
 EOF
 }
 
@@ -120,13 +131,13 @@ parse_agent_args() {
 if [ "${1:-}" = "--uninstall" ]; then
   [ "$#" -eq 1 ] || fail "--uninstall 不接受其它参数"
   [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限执行卸载"
-  log "正在停止并移除 NodeFlare Agent"
+  log "正在停止并移除 Agent 服务"
   launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
   rm -f "$PLIST_FILE" "$AGENT_FILE"
   rm -rf "$STATE_DIR"
   rmdir "$STATE_ROOT" 2>/dev/null || true
   rmdir "$INSTALL_DIR" 2>/dev/null || true
-  echo "NodeFlare Agent 已卸载"
+  echo "Agent 已卸载"
   exit 0
 fi
 
@@ -211,7 +222,7 @@ if [ -n "$mirror" ]; then
   download_url="$mirror/$release_base/$artifact"
   log "正在通过下载加速前缀拉取 Agent $release_tag"
 else
-  log "正在下载 NodeFlare Agent $release_tag"
+  log "正在下载 Agent $release_tag"
 fi
 curl --fail --location --silent --show-error --max-time 120 \
   "$download_url" \
@@ -234,7 +245,7 @@ if [ -f "$PLIST_FILE" ]; then
   had_service=true
 fi
 rollback_agent=true
-log "正在配置并启动 macOS LaunchDaemon 服务"
+log "正在启动 macOS LaunchDaemon 服务"
 launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
 mv "$temporary" "$AGENT_FILE"
 cat > "$PLIST_FILE" <<EOF
@@ -259,12 +270,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     break
   fi
 done
-[ "$started" = true ] || fail "NodeFlare 服务启动失败，请查看 /var/log/nodeflare-agent.log"
+[ "$started" = true ] || fail "服务启动失败，请查看 /var/log/nodeflare-agent.log"
 rollback_agent=false
 cleanup_agent_install
 trap - EXIT HUP INT TERM
-printf '\nNodeFlare Agent 安装完成\n'
-printf '  版本：%s\n' "$installed_version"
-printf '  服务：%s（LaunchDaemon）\n' "$LABEL"
-printf '  查看状态：sudo launchctl print system/%s\n' "$LABEL"
-printf '  查看日志：/var/log/nodeflare-agent.log\n'
+print_install_result

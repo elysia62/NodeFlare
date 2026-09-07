@@ -1,5 +1,4 @@
 import type { BatchUpdate } from "./live";
-import type { Server } from "./types";
 
 const RECONNECT_BASE_DELAY = 1_000;
 const RECONNECT_MAX_DELAY = 30_000;
@@ -18,7 +17,6 @@ export function reconnectDelay(attempt: number, randomValue = Math.random()) {
 }
 
 export interface LiveTransportHandlers {
-  onServer: (server: Server) => void;
   onBatch: (updates: BatchUpdate[]) => void;
   onConnectedChange: (connected: boolean) => void;
   onWakeRequested: () => Promise<void>;
@@ -156,10 +154,6 @@ export function connectLive(
       }
       try {
         const message = JSON.parse(event.data);
-        if (message.type === "server" && message.server?.id) {
-          handlers.onServer(message.server as Server);
-          return;
-        }
         if (message.type === "batchUpdate" && Array.isArray(message.updates)) {
           handlers.onBatch(message.updates as BatchUpdate[]);
         }

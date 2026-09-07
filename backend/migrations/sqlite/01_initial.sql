@@ -17,7 +17,7 @@ CREATE TABLE servers (
   traffic_limit INTEGER NOT NULL DEFAULT 0 CHECK(traffic_limit >= 0),
   traffic_limit_type TEXT NOT NULL DEFAULT 'sum'
     CHECK(traffic_limit_type IN ('sum', 'max', 'min', 'up', 'down')),
-  price REAL NOT NULL DEFAULT 0 CHECK(price BETWEEN -1 AND 1000000000),
+  price REAL NOT NULL DEFAULT 0 CHECK(price BETWEEN 0 AND 1000000000),
   billing_cycle INTEGER NOT NULL DEFAULT 30 CHECK(billing_cycle BETWEEN 0 AND 3650),
   currency TEXT NOT NULL DEFAULT 'CNY'
     CHECK(length(currency) = 3 AND currency NOT GLOB '*[^A-Z]*'),
@@ -43,6 +43,14 @@ CREATE TABLE servers (
 
 CREATE INDEX servers_sort ON servers(sort_order, created_at);
 CREATE INDEX servers_public_sort ON servers(hidden, sort_order, created_at);
+
+CREATE TABLE server_install_tokens (
+  token_hash TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE INDEX server_install_tokens_server ON server_install_tokens(server_id, created_at DESC);
 
 CREATE TABLE metric_history (
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -72,6 +80,20 @@ CREATE TABLE metric_history (
   disk_write_iops REAL NOT NULL DEFAULT 0,
   disk_await_ms REAL NOT NULL DEFAULT 0,
   disk_utilization REAL NOT NULL DEFAULT 0,
+  sample_count INTEGER NOT NULL DEFAULT 1 CHECK(sample_count > 0),
+  first_timestamp INTEGER NOT NULL DEFAULT 0,
+  last_timestamp INTEGER NOT NULL DEFAULT 0,
+  cpu_min REAL,
+  cpu_max REAL,
+  mem_used_max INTEGER,
+  memory_avg REAL,
+  memory_min REAL,
+  disk_avg REAL,
+  disk_min REAL,
+  net_in_avg REAL,
+  net_in_min REAL,
+  net_out_avg REAL,
+  net_out_min REAL,
   PRIMARY KEY(server_id, timestamp)
 ) WITHOUT ROWID;
 
