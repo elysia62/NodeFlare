@@ -50,9 +50,15 @@ function Escape-Toml([string]$Value) {
 }
 
 function Show-Menu {
+  $CurrentVersion = $null
+  if (Test-Path -LiteralPath $ServerFile -PathType Leaf) {
+    try { $VersionOutput = (& $ServerFile --version 2>$null | Out-String).Trim() } catch { $VersionOutput = "" }
+    if ($VersionOutput -match '(\d+\.\d+\.\d+)\s*$') { $CurrentVersion = $Matches[1] }
+  }
+  $InstallAction = if ($CurrentVersion) { "更新（当前 v$CurrentVersion）" } else { "安装" }
   Write-Host ""
   Write-Host "NodeFlare 面板管理"
-  Write-Host "  1. 安装 / 更新"
+  Write-Host "  1. $InstallAction"
   Write-Host "  2. 查看服务状态"
   Write-Host "  3. 重启服务"
   Write-Host "  4. 卸载（保留配置和数据）"
@@ -155,6 +161,11 @@ if ($Mode -eq "Restart") {
 }
 
 if ($Mode -eq "Uninstall") {
+  if ($Purge -and -not [Console]::IsInputRedirected) {
+    if ((Read-Host "即将删除全部配置和数据，确认继续？[y/N]").Trim() -ne "y") {
+      Stop-Install "已取消卸载"
+    }
+  }
   Write-Step "停止并移除 NodeFlare 面板服务"
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -234,11 +245,18 @@ try {
     do {
       $Username = (Read-Host "管理员用户名 [admin]").Trim()
       if (-not $Username) { $Username = "admin" }
+      if ($Username -notmatch '^[A-Za-z0-9_.-]{1,64}$') { Write-Host "用户名只能包含字母、数字、点、下划线和连字符（1-64 个字符）。" }
     } while ($Username -notmatch '^[A-Za-z0-9_.-]{1,64}$')
-    do {
+    while ($true) {
       $Password = Read-Password "管理员密码（8-128 个字符）"
+      if ($Password.Length -lt 8 -or $Password.Length -gt 128) {
+        Write-Host "密码长度必须在 8-128 个字符之间。"
+        continue
+      }
       $Confirmed = Read-Password "再次输入密码"
-    } while ($Password.Length -lt 8 -or $Password.Length -gt 128 -or $Password -ne $Confirmed)
+      if ($Password -ceq $Confirmed) { break }
+      Write-Host "两次输入的密码不一致。"
+    }
     $Port = Read-Port
     do {
       $DatabaseUrl = (Read-Host "数据库 URL [sqlite://nodeflare.db]").Trim()
@@ -273,6 +291,7 @@ try {
   $Settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
   $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
   Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal -Force | Out-Null
+  Write-Step "正在启动服务"
   Start-ScheduledTask -TaskName $TaskName
 
   Wait-Server
@@ -287,10 +306,12 @@ try {
   } else {
     Write-Host "  监听地址：沿用 $ConfigFile 中的 bind_addr"
   }
+  Write-Host "  下一步：登录管理后台创建节点，并按弹窗命令安装 Agent"
   $InstallChanged = $false
 } catch {
   if ($InstallChanged) {
-    Write-Warning "安装未完成，正在恢复上一版本"
+    if ($HadPreviousInstall) { Write-Warning "安装未完成，正在恢复上一版本" }
+    else { Write-Warning "安装未完成，正在回滚本次更改" }
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue

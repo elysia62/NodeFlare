@@ -152,10 +152,21 @@ prompt_line() {
 
 show_menu() {
   (: < /dev/tty) 2>/dev/null || fail "交互菜单需要终端；直接安装或更新请使用 --install"
+  installed_version=""
+  if [ -x "$server_binary" ]; then
+    binary_version=$("$server_binary" --version 2>/dev/null || true)
+    installed_version=${binary_version##* }
+    printf '%s\n' "$installed_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || installed_version=""
+  fi
+  if [ -n "$installed_version" ]; then
+    install_action="更新（当前 v$installed_version）"
+  else
+    install_action="安装"
+  fi
   printf '%s\n' \
     '' \
     'NodeFlare 面板管理' \
-    '  1. 安装 / 更新' \
+    "  1. $install_action" \
     '  2. 查看服务状态' \
     '  3. 重启服务' \
     '  4. 卸载（保留配置和数据）' \
@@ -210,6 +221,15 @@ prompt_secret() {
   fi
   restore_tty
   printf '\n' > /dev/tty
+}
+
+confirm_purge() {
+  (: < /dev/tty) 2>/dev/null || return 0
+  prompt_line "即将删除全部配置和数据，确认继续？[y/N]: "
+  case "$prompt_value" in
+    y|Y) ;;
+    *) fail "已取消卸载" ;;
+  esac
 }
 
 prompt_credentials() {
@@ -489,7 +509,11 @@ snapshot_install() {
 
 rollback_install() {
   rollback_ready=false
-  log "安装未完成，正在恢复上一版本"
+  if [ "$previous_install" = true ]; then
+    log "安装未完成，正在恢复上一版本"
+  else
+    log "安装未完成，正在回滚本次更改"
+  fi
   stop_server
   rm -rf "$install_dir"
   if [ "$previous_install" = true ]; then
@@ -633,6 +657,9 @@ fi
 [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限运行"
 init_system=$(detect_init_system)
 if [ "$mode" = uninstall ]; then
+  if [ "$purge" = true ]; then
+    confirm_purge
+  fi
   uninstall_server "$purge"
   exit 0
 fi
@@ -695,6 +722,7 @@ else
   chmod 0600 "$config_file"
 fi
 
+log "正在启动服务"
 if ! start_server; then
   if [ "$init_system" = systemd ]; then
     journalctl -u nodeflare.service -n 30 --no-pager >&2 || true
@@ -714,3 +742,4 @@ if [ "$new_config" = true ]; then
 else
   printf '监听地址：沿用 %s 中的 bind_addr\n' "$config_file"
 fi
+printf '%s\n' "下一步：登录管理后台创建节点，并按弹窗命令安装 Agent"

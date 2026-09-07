@@ -51,17 +51,70 @@ NodeFlare Agent macOS 安装脚本
 
 用法：
   install-macos.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>]
+  install-macos.sh --update [-m <下载加速前缀>]
   install-macos.sh --status
   install-macos.sh --uninstall
 
 仅支持 Apple Silicon（arm64）。Agent Token 请勿泄露。
--m 为可选的 GitHub 下载加速前缀（形如 https://ghproxy.net），
-仅作用于 Release 下载，摘要校验不受影响。
+-m 为可选的 GitHub 下载加速前缀（如 https://ghproxy.net）。
+--update 沿用已安装 Agent 的服务地址、Token 和历史保存间隔。
 EOF
 }
 
 safe_value() {
   case "$1" in *[!A-Za-z0-9_./:@-]*|'') return 1 ;; esac
+}
+
+plist_value() {
+  /usr/libexec/PlistBuddy -c "Print :$1" "$PLIST_FILE"
+}
+
+load_installed_agent_config() {
+  [ -f "$PLIST_FILE" ] || fail "未找到已安装 Agent 的服务配置，请先安装"
+  [ "$(plist_value ProgramArguments:0)" = "$AGENT_FILE" ] &&
+    [ "$(plist_value ProgramArguments:1)" = "-e" ] &&
+    [ "$(plist_value ProgramArguments:3)" = "-i" ] || fail "无法识别已安装 Agent 的启动参数"
+  endpoint=$(plist_value ProgramArguments:2) || fail "无法读取已安装 Agent 的服务地址"
+  interval=$(plist_value ProgramArguments:4) || fail "无法读取已安装 Agent 的历史保存间隔"
+  token=$(plist_value EnvironmentVariables:NODEFLARE_AGENT_TOKEN) || fail "无法读取已安装 Agent 的 Token"
+  [ -n "$endpoint" ] && [ -n "$token" ] && [ -n "$interval" ] || fail "已安装 Agent 的服务配置不完整"
+}
+
+parse_agent_args() {
+  token=""
+  endpoint=""
+  interval=60
+  interval_set=false
+  mirror=""
+  mirror_set=false
+  update=false
+  if [ "${1:-}" = "--update" ]; then
+    update=true
+    shift
+  fi
+  while [ "$#" -gt 0 ]; do
+    option="$1"
+    if [ "$update" = true ] && [ "$option" != "-m" ]; then
+      fail "--update 仅接受可选的 -m 下载加速前缀"
+    fi
+    case "$option" in
+      -t|-e|-i|-m)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || fail "参数 $option 缺少值"
+        value="$2"
+        shift 2
+        ;;
+      *) fail "未知参数：$option" ;;
+    esac
+    case "$option" in
+      -t) [ -z "$token" ] || fail "参数 $option 重复"; token="$value" ;;
+      -e) [ -z "$endpoint" ] || fail "参数 $option 重复"; endpoint="$value" ;;
+      -i) [ "$interval_set" = false ] || fail "参数 $option 重复"; interval="$value"; interval_set=true ;;
+      -m) [ "$mirror_set" = false ] || fail "参数 $option 重复"; mirror="$value"; mirror_set=true ;;
+    esac
+  done
+  if [ "$update" = true ]; then
+    load_installed_agent_config
+  fi
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
@@ -92,28 +145,7 @@ fi
 command -v curl >/dev/null || fail "缺少 curl"
 command -v shasum >/dev/null || fail "缺少 shasum，无法校验下载文件"
 log "正在检查运行环境"
-token=""
-endpoint=""
-interval=60
-interval_set=false
-mirror=""
-while [ "$#" -gt 0 ]; do
-  option="$1"
-  case "$option" in
-    -t|-e|-i|-m)
-      [ "$#" -ge 2 ] || fail "参数 $option 缺少值"
-      value="$2"
-      shift 2
-      ;;
-    *) fail "未知参数：$option" ;;
-  esac
-  case "$option" in
-    -t) [ -z "$token" ] || fail "参数 $option 重复"; token="$value" ;;
-    -e) [ -z "$endpoint" ] || fail "参数 $option 重复"; endpoint="$value" ;;
-    -i) [ "$interval_set" = false ] || fail "参数 $option 重复"; interval="$value"; interval_set=true ;;
-    -m) [ -z "$mirror" ] || fail "参数 $option 重复"; mirror="$value" ;;
-  esac
-done
+parse_agent_args "$@"
 [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
 endpoint=${endpoint%/}
 [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
@@ -235,3 +267,4 @@ printf '\nNodeFlare Agent 安装完成\n'
 printf '  版本：%s\n' "$installed_version"
 printf '  服务：%s（LaunchDaemon）\n' "$LABEL"
 printf '  查看状态：sudo launchctl print system/%s\n' "$LABEL"
+printf '  查看日志：/var/log/nodeflare-agent.log\n'

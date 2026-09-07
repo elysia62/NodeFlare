@@ -2,6 +2,8 @@
 
 自部署的服务器监控面板：服务端提供状态页与管理后台，Agent 部署在被监控服务器上采集并上报数据，两者通过 WebSocket 通信。
 
+项目地址：<https://github.com/imengying/NodeFlare>
+
 ## 功能
 
 - **实时监控**：CPU、内存、负载、磁盘、网络流量、TCP/UDP 连接数
@@ -16,7 +18,7 @@
 
 ## 安装服务端
 
-服务端与 Agent 支持 Linux x64/ARM64、Windows x64、macOS ARM64、FreeBSD 13+ x64/ARM64。安装脚本从 latest Release 下载预编译包、校验 SHA-256 并注册系统服务（Linux 为 systemd / OpenRC，macOS 为 launchd）。
+支持 Linux x64/ARM64、Windows x64、macOS ARM64、FreeBSD 13+ x64/ARM64。安装脚本从 latest Release 下载预编译包并注册系统服务。
 
 Linux / macOS：
 
@@ -38,27 +40,19 @@ Unblock-File "$env:TEMP\nodeflare-install.ps1"
 & "$env:TEMP\nodeflare-install.ps1"
 ```
 
-运行脚本后选择“安装 / 更新”。首次安装依次输入管理员用户名、密码、监听端口（默认 2206）和数据库地址（默认 SQLite），连接串格式见[配置](#配置)。更新时保留已有配置和端口；菜单还可查看状态、重启或卸载服务。
+首次安装依次输入管理员用户名、密码、监听端口（默认 2206）和数据库地址（默认 SQLite），连接串格式见[配置](#配置)。菜单还可查看状态、重启或卸载服务。
 
-服务端默认监听 `127.0.0.1:2206`，本机访问 `http://127.0.0.1:2206/admin/login`。需经 HTTPS 反向代理对外暴露，例如 Caddy（使用自选端口时同步修改）：
+服务端默认监听 `127.0.0.1:2206`，本机访问 `http://127.0.0.1:2206/admin/login`。对外暴露需经 HTTPS 反向代理，例如 Caddy（域名替换为你的实际地址）：
 
 ```caddy
-monitor.example.com {
+nodeflare.example.com {
     reverse_proxy 127.0.0.1:2206
 }
 ```
 
-只有 `trusted_proxies` 中列出的代理写入的 `X-Forwarded-For` 会被信任（默认含本机回环），代理不在本机时将其 IP 或 CIDR 加入 `config.toml`。
+只有 `trusted_proxies` 中列出的代理写入的 `X-Forwarded-For` 会被信任，代理不在本机时将其 IP 或 CIDR 加入 `config.toml`。
 
-重新运行脚本并选择“安装 / 更新”即可更新；直接更新可用 `install.sh --install`（Windows 为 `install.ps1 -Install`）。Linux 常用 systemd 命令：
-
-```bash
-systemctl status nodeflare
-systemctl restart nodeflare
-journalctl -u nodeflare -f
-```
-
-卸载默认保留配置和数据，追加 `--purge` 一并删除（Windows 为 `install.ps1 -Uninstall`，加 `-Purge`）：
+更新：重新运行安装脚本即可，已安装的配置和数据会保留；也可直接执行 `install.sh --install`（Windows 为 `install.ps1 -Install`）。卸载默认保留配置和数据，追加 `--purge` 一并删除：
 
 ```bash
 # Linux / macOS
@@ -67,28 +61,73 @@ curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh
 fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
 ```
 
-## 安装 Agent
-
-在管理后台“服务器”页面创建节点，执行生成的安装命令。Agent 主动向服务端发起出站 WebSocket 连接，被监控服务器无需开放入站端口，服务地址仅接受 HTTPS（本机调试除外）。以 Linux 为例：
+Linux 常用 systemd 命令：
 
 ```bash
-curl -fsSL https://monitor.example.com/agent/agent.sh \
-  | sudo sh -s -- -e 'https://monitor.example.com' -t 'Agent Token'
+systemctl status nodeflare
+systemctl restart nodeflare
+journalctl -u nodeflare -f
 ```
+
+## 安装 Agent
+
+在管理后台“服务器”页面创建节点，执行“下载 Agent”弹窗中的安装命令；每次打开弹窗会生成新的安装 Token，旧 Token 仍可使用。Agent 通过出站 WebSocket 连接服务端，无需开放入站端口。将示例中的面板地址替换为你的实际地址。
+
+Linux：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh \
+  | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token'
+```
+
+其他平台脚本：
+
+```bash
+# macOS ARM64
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-macos.sh \
+  | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token'
+# FreeBSD
+fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-freebsd.sh \
+  | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token'
+```
+
+Windows PowerShell（管理员）：
+
+```powershell
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install.ps1 -OutFile "$env:TEMP\nodeflare-agent-install.ps1"
+Unblock-File "$env:TEMP\nodeflare-agent-install.ps1"
+& "$env:TEMP\nodeflare-agent-install.ps1" -e "https://nodeflare.example.com" -t "Agent Token"
+```
+
+更新（自动沿用已安装的服务地址、Token 和保存间隔），网络受限时可加下载加速前缀 `-m https://ghproxy.net`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh | sudo sh -s -- --update
+# macOS ARM64
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-macos.sh | sudo sh -s -- --update
+# FreeBSD
+fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-freebsd.sh | sudo sh -s -- --update
+```
+
+Windows 管理员 PowerShell（先重新下载最新脚本）：
+
+```powershell
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install.ps1 -OutFile "$env:TEMP\nodeflare-agent-install.ps1"
+Unblock-File "$env:TEMP\nodeflare-agent-install.ps1"
+& "$env:TEMP\nodeflare-agent-install.ps1" -Update
+```
+
+Windows 下载加速参数为 `-Mirror https://ghproxy.net`。更新会校验 Release 摘要和程序版本，启动失败会回滚；无需重新输入 Token。
+
+实时上/下行速率由 Agent 按“收发字节增量 / 实际采样秒数”计算，前台每秒合并展示最新样本，无新样本时保持原值。节点实时采样间隔默认为 1 秒；设置更长间隔时不会凭空生成每秒数据。历史保存间隔独立，默认 60 秒。
+
+节点价格最低为 `0`，表示免费；旧版负价格在升级或恢复备份时归零。是否隐藏节点仅由“隐藏节点”开关决定。
 
 Agent 服务名为 `nodeflare-agent`，卸载：
 
 ```bash
-curl -fsSL https://monitor.example.com/agent/agent.sh | sudo sh -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh | sudo sh -s -- --uninstall
 ```
-
-手动更新到最新正式版本（自动沿用已安装 Agent 的服务地址、Token 和历史保存间隔）：
-
-```bash
-curl -fsSL https://monitor.example.com/agent/agent.sh | sudo sh -s -- --update
-```
-
-网络受限时可追加下载加速前缀：`--update -m https://ghproxy.net`。
 
 ## 配置
 
@@ -130,14 +169,10 @@ database_url = "postgres://nodeflare:password@127.0.0.1:5432/nodeflare?sslmode=d
 
 - 备份含设置、节点、监控历史、通知、主题（含文件）、远程任务与安全配置；会话等临时数据不导出，恢复后需重新登录。
 - 导出、恢复、迁移前需验证当前 TOTP，未启用时为管理员密码。
-- 恢复建议使用相同版本的 NodeFlare；`pg_dump` 与 SQLite `.backup` 可作为补充。
 - 迁移会覆盖目标库已有数据并自动更新 `database_url`，完成后重启生效。
-
-历史指标按节点设置的保存间隔聚合（默认 60 秒）：CPU、负载、内存和 GPU 保存采样均值，CPU 另存最小/最大值，网速和磁盘 I/O 保留窗口峰值，流量计数保留末值。断网补报按窗口分别写入，重复重传不会重复计数；前台实时状态仍使用最新采样。
-
-Agent 保留未确认的本地采样，只有后端事务提交后才清理相应缓存。建议先更新后端再更新 Agent；双方均更新后启用完整的分批补报与聚合，单边更新时保持旧协议兼容。历史表会自动迁移，旧快照按单个采样读取，也可恢复升级前的 ZIP 备份。
-
-历史保留天数保持原设置（默认 30 天），指标和延迟记录仍共用该期限。过期清理每分钟运行，每条语句最多处理 1000 条记录，轮流处理各表，每轮最多 50 批并在两秒预算耗尽后停止启动新批次；已开始的语句会执行完成。SQLite 每五分钟尝试小批量增量回收，数据库占用包含主文件、WAL 和 SHM。完整空间回收仍由后台手动触发。
+- Agent 安装 Token 不进入数据库备份，恢复后需重新生成安装命令。
+- 历史指标默认保留 30 天，过期数据自动清理；完整空间回收在后台手动触发。
+- 升级建议先更新服务端再更新 Agent；恢复备份建议使用相同版本。
 
 ## 从源码开发
 

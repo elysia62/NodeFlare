@@ -125,6 +125,8 @@ export const api = {
     ),
   rotateServerToken: (id: string) =>
     request<{ agent_token: string }>(`/api/admin/servers/${encodeURIComponent(id)}/token`, { method: "POST" }, true),
+  createAgentInstallToken: (id: string) =>
+    request<{ agent_token: string }>(`/api/admin/servers/${encodeURIComponent(id)}/agent-token`, { method: "POST" }, true),
   updateServer: (id: string, input: ServerInput) =>
     request<void>(
       `/api/admin/servers/${encodeURIComponent(id)}`,

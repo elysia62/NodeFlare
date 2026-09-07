@@ -140,6 +140,18 @@ pub async fn server_token_rotate(
     Ok(Json(serde_json::json!({"agent_token": token})).into_response())
 }
 
+pub async fn server_agent_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiResponse> {
+    validate_id(&id)?;
+    let token = crate::db::queries::agent_install_token(&state.db, &id)
+        .await
+        .map_err(ApiResponse::internal)?
+        .ok_or_else(|| ApiResponse::not_found("节点不存在"))?;
+    Ok(Json(serde_json::json!({"agent_token": token})).into_response())
+}
+
 pub async fn settings_get(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
     let settings = crate::db::load_settings(&state.db)
         .await
@@ -867,7 +879,7 @@ fn validate_server(input: &ServerInput) -> Result<(), &'static str> {
         return Err("流量配置无效");
     }
     if !input.price.is_finite()
-        || !(-1.0..=1_000_000_000.0).contains(&input.price)
+        || !(0.0..=1_000_000_000.0).contains(&input.price)
         || !(0..=3650).contains(&input.billing_cycle)
     {
         return Err("价格或计费周期无效");
@@ -892,6 +904,36 @@ fn validate_server(input: &ServerInput) -> Result<(), &'static str> {
         return Err("网卡或 Agent 下载地址无效");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod server_validation_tests {
+    use super::*;
+
+    #[test]
+    fn price_must_be_nonnegative_and_is_independent_of_visibility() {
+        let mut input: ServerInput = serde_json::from_value(serde_json::json!({
+            "name": "Price test", "region": "", "group_name": "", "tags": "",
+            "hidden": false, "expires_at": null, "traffic_limit": 0,
+            "traffic_limit_type": "sum", "price": 0, "billing_cycle": 30,
+            "currency": "CNY", "auto_renewal": false, "network_interface": "",
+            "reset_day": 1, "report_interval": 60, "collect_interval": 1,
+            "rx_correction": 0, "tx_correction": 0, "agent_mirror": "",
+            "offline_notify_disabled": false, "auto_update": true
+        }))
+        .unwrap();
+        for hidden in [true, false] {
+            input.hidden = hidden;
+            for price in [0.0, 0.01, 1_000_000_000.0] {
+                input.price = price;
+                assert!(validate_server(&input).is_ok());
+            }
+            for price in [-1.0, -0.01, 1_000_000_001.0, f64::NAN, f64::INFINITY] {
+                input.price = price;
+                assert!(validate_server(&input).is_err());
+            }
+        }
+    }
 }
 
 async fn validate_latency_task(

@@ -514,13 +514,42 @@ pub async fn reorder_servers(db: &Database, ids: &[String]) -> Result<()> {
 
 pub async fn rotate_server_token(db: &Database, id: &str) -> Result<Option<String>> {
     let token = auth::random_token(32);
+    let token_hash = auth::token_hash(&token);
+    let mut transaction = db.pool().begin().await?;
     let result = sqlx::query(db.sql("UPDATE servers SET token_hash=?, updated_at=? WHERE id=?"))
-        .bind(auth::token_hash(&token))
+        .bind(&token_hash)
         .bind(now())
         .bind(id)
-        .execute(db.pool())
+        .execute(&mut *transaction)
         .await?;
+    if result.rows_affected() > 0 {
+        sqlx::query(db.sql("DELETE FROM server_install_tokens WHERE server_id=?"))
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
     Ok((result.rows_affected() > 0).then_some(token))
+}
+
+pub async fn agent_install_token(db: &Database, id: &str) -> Result<Option<String>> {
+    let token = auth::random_token(32);
+    let exists = sqlx::query_scalar::<_, i64>(db.sql("SELECT COUNT(*) FROM servers WHERE id=?"))
+        .bind(id)
+        .fetch_one(db.pool())
+        .await?;
+    if exists == 0 {
+        return Ok(None);
+    }
+    sqlx::query(db.sql(
+        "INSERT INTO server_install_tokens(token_hash, server_id, created_at) VALUES (?, ?, ?)",
+    ))
+    .bind(auth::token_hash(&token))
+    .bind(id)
+    .bind(now())
+    .execute(db.pool())
+    .await?;
+    Ok(Some(token))
 }
 
 pub async fn server_name(db: &Database, id: &str) -> Result<Option<String>> {
@@ -533,11 +562,15 @@ pub async fn server_name(db: &Database, id: &str) -> Result<Option<String>> {
 }
 
 pub async fn agent_identity(db: &Database, token: &str) -> Result<Option<AgentIdentity>> {
+    let token_hash = auth::token_hash(token);
     let row = sqlx::query(db.sql(
         "SELECT id, hidden, report_interval, collect_interval, reset_day, rx_correction, \
-         tx_correction FROM servers WHERE token_hash=?",
+         tx_correction FROM servers WHERE token_hash=? OR EXISTS (\
+         SELECT 1 FROM server_install_tokens WHERE server_id=servers.id AND token_hash=?\
+         )",
     ))
-    .bind(auth::token_hash(token))
+    .bind(&token_hash)
+    .bind(&token_hash)
     .fetch_optional(db.pool())
     .await?;
     row.map(|row| {
@@ -2386,6 +2419,45 @@ mod tests {
         let (_, token) = create_server(&db, &server_input(0)).await.unwrap();
         let identity = agent_identity(&db, &token).await.unwrap().unwrap();
         (db, identity)
+    }
+
+    #[tokio::test]
+    async fn agent_install_tokens_do_not_replace_the_primary_token() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let (id, primary_token) = create_server(&db, &server_input(0)).await.unwrap();
+        let first_install_token = agent_install_token(&db, &id).await.unwrap().unwrap();
+        let second_install_token = agent_install_token(&db, &id).await.unwrap().unwrap();
+        assert!(agent_identity(&db, &primary_token).await.unwrap().is_some());
+        assert!(
+            agent_identity(&db, &first_install_token)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            agent_identity(&db, &second_install_token)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_ne!(first_install_token, second_install_token);
+
+        let rotated_token = rotate_server_token(&db, &id).await.unwrap().unwrap();
+        assert!(agent_identity(&db, &primary_token).await.unwrap().is_none());
+        assert!(
+            agent_identity(&db, &first_install_token)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            agent_identity(&db, &second_install_token)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(agent_identity(&db, &rotated_token).await.unwrap().is_some());
     }
 
     fn sample(timestamp: i64, cpu: f64) -> AgentReport {

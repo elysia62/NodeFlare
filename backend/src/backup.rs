@@ -41,6 +41,7 @@ const BACKUP_TABLES: &[&str] = &[
 ];
 
 const CLEAR_TABLES: &[&str] = &[
+    "server_install_tokens",
     "theme_previews",
     "dashboard_proofs",
     "sessions",
@@ -63,6 +64,7 @@ const CLEAR_TABLES: &[&str] = &[
 ];
 
 const POSTGRES_RESTORE_LOCK: &str = "LOCK TABLE settings, servers, metric_history, \
+    server_install_tokens, \
     server_latest_state, admin_2fa, remote_tasks, exchange_rates, sessions, dashboard_proofs, \
     server_traffic_state, latency_tasks, latency_task_servers, latency_results, alert_rules, \
     alert_rule_servers, alert_states, notification_telegram, themes, theme_previews \
@@ -322,6 +324,7 @@ async fn export(db: &Database, theme_dir: Option<&Path>) -> Result<DatabaseArchi
             "sessions".to_string(),
             "dashboard_proofs".to_string(),
             "theme_previews".to_string(),
+            "server_install_tokens".to_string(),
         ],
     };
 
@@ -541,7 +544,17 @@ async fn insert_rows(
             } else {
                 "?".to_string()
             });
-            add_argument(&mut arguments, column.kind, value)?;
+            // Normalize the old free-price sentinel before newer constraints run.
+            if table == "servers"
+                && column.name == "price"
+                && value
+                    .as_f64()
+                    .is_some_and(|price| (-1.0..0.0).contains(&price))
+            {
+                add_argument(&mut arguments, column.kind, &Value::from(0.0))?;
+            } else {
+                add_argument(&mut arguments, column.kind, value)?;
+            }
         }
         placeholders.push(format!("({})", row_placeholders.join(",")));
     }
@@ -765,8 +778,8 @@ async fn restore_table<R: Read + Seek + Send>(
     if header.table != table || (header.columns != columns && !legacy_history) {
         bail!("{table} 备份结构与当前数据库不兼容");
     }
-    // Original snapshot archives omit the new aggregate columns; their SQL
-    // defaults preserve each old row as a single sample.
+    // Older archives omit columns added by later migrations; SQL defaults
+    // preserve their original values and leave optional additions empty.
     let columns = &header.columns;
 
     let mut restored = 0_usize;
@@ -926,11 +939,17 @@ mod tests {
         .execute(source.pool())
         .await
         .unwrap();
-        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('legacy','Legacy','token',1,1)")
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,price,hidden) VALUES ('legacy','Legacy','token',1,1,-1,1)")
             .execute(source.pool()).await.unwrap();
         sqlx::query("INSERT INTO metric_history(server_id,timestamp,cpu,mem_used) VALUES ('legacy',?,75.0,500)")
             .bind(crate::db::now()).execute(source.pool()).await.unwrap();
         assert_eq!(copy_database(&source, &target).await.unwrap(), 6);
+        let server = sqlx::query("SELECT price,hidden FROM servers WHERE id='legacy'")
+            .fetch_one(target.pool())
+            .await
+            .unwrap();
+        assert_eq!(server.try_get::<f64, _>("price").unwrap(), 0.0);
+        assert_eq!(server.try_get::<i64, _>("hidden").unwrap(), 1);
         let points = crate::db::queries::history(&target, "legacy", 1)
             .await
             .unwrap();

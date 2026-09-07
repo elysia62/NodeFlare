@@ -22,14 +22,16 @@ import type { Config, LiveLatencyResult, Server } from "../types";
 import { ui } from "../locale";
 import { carrierSelection, themeToggle } from "../theme";
 import { useNodeLatency, type CarrierLatencyRow, type LatencyBar } from "../hooks/useNodeLatency";
-import { Flag } from "./Flag";
+import { ProgressBar, usageTone, type UsageTone } from "./ProgressBar";
 import { OSIcon } from "./OSIcon";
-import { ProgressBar } from "./ProgressBar";
+import { Flag } from "./Flag";
 
-function Metric({ label, value, used, sub, muted = false, valueTone = "" }: { label: string; value: string; used: number; sub: string; muted?: boolean; valueTone?: string }) {
+const USAGE_TEXT_TONE: Record<UsageTone, string> = { good: "", warning: "warning-text", danger: "danger-text" };
+
+function Metric({ label, value, used, sub, muted = false }: { label: string; value: string; used: number; sub: string; muted?: boolean }) {
   return (
     <div className={`metric ${muted ? "muted" : ""}`}>
-      <div><span>{label}</span><strong className={valueTone}>{value}</strong></div>
+      <div><span>{label}</span><strong className={USAGE_TEXT_TONE[usageTone(used)]}>{value}</strong></div>
       <ProgressBar value={used} />
       <small title={sub}>{sub}</small>
     </div>
@@ -134,7 +136,7 @@ export function NodeCard({ server, config, liveLatencyResults, onOpen }: {
           <Metric label="CPU" value={`${number(server.cpu).toFixed(1)}%`} used={number(server.cpu)} sub={`${number(server.load1).toFixed(2)}, ${number(server.load5).toFixed(2)}, ${number(server.load15).toFixed(2)}`} muted={!online} />
           <Metric label={ui(locale, "内存", "Memory")} value={`${memory.toFixed(1)}%`} used={memory} sub={`${formatBytes(server.mem_used)} / ${formatBytes(server.mem_total)}`} muted={!online} />
           <Metric label={ui(locale, "硬盘", "Disk")} value={`${disk.toFixed(1)}%`} used={disk} sub={`${formatBytes(server.disk_used)} / ${formatBytes(server.disk_total)}`} muted={!online} />
-          <Metric label={ui(locale, "流量", "Traffic")} value={server.traffic_limit > 0 ? `${traffic.toFixed(1)}%` : "∞"} used={traffic} sub={`${formatBytes(usedTraffic)} / ${server.traffic_limit > 0 ? formatBytes(server.traffic_limit) : "∞"}`} muted={!online} valueTone={server.traffic_limit <= 0 ? "" : traffic >= 95 ? "danger-text" : traffic >= 60 ? "warning-text" : "success-text"} />
+          <Metric label={ui(locale, "流量", "Traffic")} value={server.traffic_limit > 0 ? `${traffic.toFixed(1)}%` : "∞"} used={traffic} sub={`${formatBytes(usedTraffic)} / ${server.traffic_limit > 0 ? formatBytes(server.traffic_limit) : "∞"}`} muted={!online} />
         </div>
 
         <div className={`data-grid ${showExpiryPanel ? "" : "two-columns"}`}>
@@ -148,9 +150,9 @@ export function NodeCard({ server, config, liveLatencyResults, onOpen }: {
           </div>
           {showExpiryPanel ? <div className="data-panel" title={ui(locale, "剩余周期", "Billing cycle")}>
             {config.show_expiry ? <CompactLine icon={<CalendarDays size={11} />}>{formatExpire(server, locale)}</CompactLine> : null}
-            {config.show_price ? <CompactLine icon={<Coins size={11} />}>{server.price === -1
+            {config.show_price ? <CompactLine icon={<Coins size={11} />}>{server.price <= 0
               ? ui(locale, "免费", "Free")
-              : server.price > 0 ? formatCurrency(remainingValue, server.currency) : ui(locale, "未设置", "Not set")}</CompactLine> : null}
+              : formatCurrency(remainingValue, server.currency)}</CompactLine> : null}
           </div> : null}
         </div>
 

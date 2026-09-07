@@ -52,17 +52,26 @@ NodeFlare Agent FreeBSD 安装脚本
 
 用法：
   install-freebsd.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>]
+  install-freebsd.sh --update [-m <下载加速前缀>]
   install-freebsd.sh --status
   install-freebsd.sh --uninstall
 
 支持 FreeBSD amd64 和 arm64。Agent Token 请勿泄露。
--m 为可选的 GitHub 下载加速前缀（形如 https://ghproxy.net），
-仅作用于 Release 下载，摘要校验不受影响。
+-m 为可选的 GitHub 下载加速前缀（如 https://ghproxy.net）。
+--update 沿用已安装 Agent 的服务地址、Token 和历史保存间隔。
 EOF
 }
 
 safe_value() {
   case "$1" in *[!A-Za-z0-9_./:@-]*|'') return 1 ;; esac
+}
+
+load_installed_agent_config() {
+  [ -f "$SERVICE_FILE" ] || fail "未找到已安装 Agent 的服务配置，请先安装"
+  endpoint=$(sed -n 's/^command_args=".* -e \([^ ]*\) -i [0-9]*"$/\1/p' "$SERVICE_FILE")
+  interval=$(sed -n 's/^command_args=".* -e [^ ]* -i \([0-9]*\)"$/\1/p' "$SERVICE_FILE")
+  token=$(sed -n 's/^export NODEFLARE_AGENT_TOKEN="\([^"]*\)"$/\1/p' "$SERVICE_FILE")
+  [ -n "$endpoint" ] && [ -n "$token" ] && [ -n "$interval" ] || fail "已安装 Agent 的服务配置不完整"
 }
 
 download_stdout() {
@@ -85,6 +94,43 @@ download_file() {
       "$url" -o "$destination"
   else
     fetch -q -T 120 -o "$destination" "$url"
+  fi
+}
+
+parse_agent_args() {
+  token=""
+  endpoint=""
+  interval=60
+  interval_set=false
+  mirror=""
+  mirror_set=false
+  update=false
+  if [ "${1:-}" = "--update" ]; then
+    update=true
+    shift
+  fi
+  while [ "$#" -gt 0 ]; do
+    option="$1"
+    if [ "$update" = true ] && [ "$option" != "-m" ]; then
+      fail "--update 仅接受可选的 -m 下载加速前缀"
+    fi
+    case "$option" in
+      -t|-e|-i|-m)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || fail "参数 $option 缺少值"
+        value="$2"
+        shift 2
+        ;;
+      *) fail "未知参数：$option" ;;
+    esac
+    case "$option" in
+      -t) [ -z "$token" ] || fail "参数 $option 重复"; token="$value" ;;
+      -e) [ -z "$endpoint" ] || fail "参数 $option 重复"; endpoint="$value" ;;
+      -i) [ "$interval_set" = false ] || fail "参数 $option 重复"; interval="$value"; interval_set=true ;;
+      -m) [ "$mirror_set" = false ] || fail "参数 $option 重复"; mirror="$value"; mirror_set=true ;;
+    esac
+  done
+  if [ "$update" = true ]; then
+    load_installed_agent_config
   fi
 }
 
@@ -125,28 +171,7 @@ command -v service >/dev/null 2>&1 || fail "缺少 service"
 command -v sysrc >/dev/null 2>&1 || fail "缺少 sysrc"
 
 log "正在检查运行环境"
-token=""
-endpoint=""
-interval=60
-interval_set=false
-mirror=""
-while [ "$#" -gt 0 ]; do
-  option="$1"
-  case "$option" in
-    -t|-e|-i|-m)
-      [ "$#" -ge 2 ] || fail "参数 $option 缺少值"
-      value="$2"
-      shift 2
-      ;;
-    *) fail "未知参数：$option" ;;
-  esac
-  case "$option" in
-    -t) [ -z "$token" ] || fail "参数 $option 重复"; token="$value" ;;
-    -e) [ -z "$endpoint" ] || fail "参数 $option 重复"; endpoint="$value" ;;
-    -i) [ "$interval_set" = false ] || fail "参数 $option 重复"; interval="$value"; interval_set=true ;;
-    -m) [ -z "$mirror" ] || fail "参数 $option 重复"; mirror="$value" ;;
-  esac
-done
+parse_agent_args "$@"
 [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
 endpoint=${endpoint%/}
 [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
@@ -272,3 +297,4 @@ printf '\nNodeFlare Agent 安装完成\n'
 printf '  版本：%s\n' "$installed_version"
 printf '  服务：%s（FreeBSD rc.d）\n' "$SERVICE_NAME"
 printf '  查看状态：service %s status\n' "$SERVICE_NAME"
+printf '  查看日志：grep nodeflare_agent /var/log/messages\n'

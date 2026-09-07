@@ -13,6 +13,7 @@ import { useFavicon, useStoredAppearance, useSystemDark } from "./hooks/useBrows
 import { resolveBackground, themeToggle } from "./theme";
 import {
   BOOTSTRAP_POLL_INTERVAL_MS,
+  createLiveFlushScheduler,
   createRefreshQueue,
   shouldSyncBootstrap,
 } from "./refresh";
@@ -238,22 +239,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!configReady || access !== "ok" || demoMode) return;
     let active = true;
-    let frame: number | null = null;
     let pending: BatchUpdate[] = [];
+    // Coalesce independently timed reports onto a shared one-second UI tick.
+    const flush = () => {
+      if (!pending.length) return;
+      const batch = pending;
+      pending = [];
+      setLiveMetrics((current) => applyBatch(current, batch, serversRef.current));
+    };
+    const scheduler = createLiveFlushScheduler(flush);
     const disconnect = connectLive({ serverId: selectedId }, {
       onServer: (server) => setServers((current) => current.map((entry) => entry.id === server.id ? server : entry)),
       onBatch: (updates) => {
         pending.push(...updates);
-        if (frame !== null) return;
-        frame = window.requestAnimationFrame(() => {
-          frame = null;
-          const batch = pending;
-          pending = [];
-          setLiveMetrics((current) => applyBatch(current, batch, serversRef.current));
-        });
+        scheduler.schedule();
       },
       onConnectedChange: (connected) => {
         liveConnectedRef.current = connected;
+        if (!connected) {
+          scheduler.cancel();
+          pending = [];
+        }
         if (active && !connected && !document.hidden && navigator.onLine !== false) {
           void reload(true);
         }
@@ -270,7 +276,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
     return () => {
       active = false;
-      if (frame !== null) window.cancelAnimationFrame(frame);
+      scheduler.cancel();
       disconnect();
     };
   }, [access, configReady, reload, selectedId]);

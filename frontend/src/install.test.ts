@@ -102,7 +102,8 @@ describe("installer menu", () => {
     const dispatch = installer.slice(installer.indexOf("\nmode=menu"), installer.indexOf("\nfor required_command"));
     return spawnSync("sh", ["-c", `
       set -eu
-      ${shellFunctions("show_menu", "fail", "usage").replaceAll("/dev/tty", "/dev/null")}
+      ${shellFunctions("show_menu", "confirm_purge", "fail", "usage").replaceAll("/dev/tty", "/dev/null")}
+      server_binary=/nonexistent/nodeflare
       prompt_line() { IFS= read -r prompt_value; }
       id() { printf '0'; }
       detect_init_system() { printf systemd; }
@@ -127,12 +128,18 @@ describe("installer menu", () => {
       [["--install"], "install"], [["--status"], "status"], [["--restart"], "restart"],
       [["--uninstall"], "uninstall:false"], [["--uninstall", "--purge"], "uninstall:true"],
     ] as const) {
-      const result = route("", [...args]);
+      const result = route("y\n", [...args]);
       expect(result.status).toBe(0);
       expect(result.stdout).toBe(expected);
     }
     expect(route("", ["--purge"]).status).toBe(1);
     expect(route("", ["--status", "--install"]).status).toBe(1);
+  });
+
+  test("purge cancellation never calls uninstall", () => {
+    const result = route("n\n", ["--uninstall", "--purge"]);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
   });
 });
 

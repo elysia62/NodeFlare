@@ -1051,6 +1051,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn price_migration_preserves_visibility_and_rejects_negative_writes() {
+        let db = connect("sqlite::memory:").await.unwrap();
+        let original = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|migration| migration.version < 4)
+                .cloned()
+                .collect(),
+        );
+        original.run(db.pool()).await.unwrap();
+        for (index, price) in [-1.0, -0.5, 0.0, 12.5].iter().enumerate() {
+            sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,price,hidden) VALUES (?,'Node',?,1,1,?,?)")
+                .bind(index.to_string()).bind(index.to_string()).bind(price).bind((index % 2) as i64)
+                .execute(db.pool()).await.unwrap();
+        }
+        db.migrate().await.unwrap();
+        let rows = sqlx::query("SELECT price,hidden FROM servers ORDER BY id")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 4);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.try_get::<f64, _>("price").unwrap(),
+                if index == 3 { 12.5 } else { 0.0 }
+            );
+            assert_eq!(row.try_get::<i64, _>("hidden").unwrap(), (index % 2) as i64);
+        }
+        assert!(
+            sqlx::query("UPDATE servers SET price=-0.01 WHERE id='0'")
+                .execute(db.pool())
+                .await
+                .is_err()
+        );
+        assert!(sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,price) VALUES ('new','New','new',1,1,-1)").execute(db.pool()).await.is_err());
+        sqlx::query("UPDATE servers SET price=0 WHERE id='3'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn login_sessions_can_be_listed_and_revoked() {
         let db = connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();

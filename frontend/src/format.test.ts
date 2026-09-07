@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatByteSize, formatPrice, formatSpeedParts, parseByteSize } from "./format";
+import { formatByteSize, formatExpire, formatPrice, formatSpeedParts, parseByteSize } from "./format";
 
 describe("parseByteSize", () => {
   test("accepts manual units and defaults to GB", () => {
@@ -39,10 +39,22 @@ describe("formatSpeedParts", () => {
 });
 
 describe("formatPrice", () => {
-  test("renders free, hidden and one-time cycles", () => {
+  test("renders zero and legacy negative prices as free", () => {
     expect(formatPrice({ price: -1, billing_cycle: 30, currency: "CNY" })).toBe("免费");
-    expect(formatPrice({ price: 0, billing_cycle: 30, currency: "CNY" })).toBe("");
+    expect(formatPrice({ price: 0, billing_cycle: 30, currency: "CNY" })).toBe("免费");
+    expect(formatPrice({ price: 0, billing_cycle: 30, currency: "USD" }, "en")).toBe("Free");
+  });
+
+  test("preserves paid and one-time cycles", () => {
     expect(formatPrice({ price: 5, billing_cycle: 0, currency: "CNY" })).toBe("¥5 / 一次性");
     expect(formatPrice({ price: 5, billing_cycle: 365, currency: "CNY" })).toBe("¥5 / 年");
+  });
+});
+
+describe("formatExpire", () => {
+  test("respects the expiration date even when a node is free", () => {
+    expect(formatExpire({ price: 0, expires_at: null })).toBe("长期");
+    expect(formatExpire({ price: 0, expires_at: 1 })).toBe("已过期");
+    expect(formatExpire({ price: 5, expires_at: null })).toBe("未设置");
   });
 });

@@ -248,6 +248,10 @@ async fn main() -> Result<()> {
             post(routes::admin::server_token_rotate),
         )
         .route(
+            "/api/admin/servers/{id}/agent-token",
+            post(routes::admin::server_agent_token),
+        )
+        .route(
             "/api/admin/servers/{id}",
             patch(routes::admin::server_patch).delete(routes::admin::server_delete),
         )

@@ -1,9 +1,17 @@
+<#
+.EXAMPLE
+  .\install.ps1 -Update
+  Update using the saved endpoint, token and history interval.
+.EXAMPLE
+  .\install.ps1 -Update -Mirror https://ghproxy.net
+#>
 [CmdletBinding(DefaultParameterSetName = "Install")]
 param(
   [Parameter(ParameterSetName = "Install", Mandatory = $true)][Alias("t")][string]$Token,
   [Parameter(ParameterSetName = "Install", Mandatory = $true)][Alias("e")][string]$Endpoint,
   [Parameter(ParameterSetName = "Install")][Alias("i")][ValidateRange(15, 3600)][int]$Interval = 60,
-  [Parameter(ParameterSetName = "Install")][Alias("m")][string]$Mirror = "",
+  [Parameter(ParameterSetName = "Install")][Parameter(ParameterSetName = "Update")][Alias("m")][string]$Mirror = "",
+  [Parameter(ParameterSetName = "Update", Mandatory = $true)][switch]$Update,
   [Parameter(ParameterSetName = "Uninstall", Mandatory = $true)][switch]$Uninstall,
   [Parameter(ParameterSetName = "Status", Mandatory = $true)][switch]$Status
 )
@@ -37,6 +45,24 @@ function Assert-Safe([string]$Name, [string]$Value) {
   if ([string]::IsNullOrWhiteSpace($Value) -or $Value -notmatch '^[A-Za-z0-9_./:@-]+$') {
     Write-InstallError "$Name 格式无效"
   }
+}
+
+function Read-AgentConfig {
+  if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
+    Write-InstallError "未找到已安装 Agent 的配置，请先安装"
+  }
+  try {
+    $Saved = Get-Content -LiteralPath $ConfigFile -Raw | ConvertFrom-Json
+  } catch {
+    Write-InstallError "无法读取已安装 Agent 的配置"
+  }
+  $SavedInterval = 0
+  if ($Saved.endpoint -isnot [string] -or $Saved.token -isnot [string] -or
+      -not [int]::TryParse([string]$Saved.interval, [ref]$SavedInterval) -or
+      $SavedInterval -lt 15 -or $SavedInterval -gt 3600) {
+    Write-InstallError "已安装 Agent 的配置不完整或历史保存间隔无效"
+  }
+  return $Saved
 }
 
 function Assert-Endpoint([string]$Value) {
@@ -107,6 +133,12 @@ if ($NativeArchitecture -ne "AMD64") {
   Write-InstallError "仅支持 Windows x64"
 }
 Write-Step "正在检查运行环境"
+if ($Update) {
+  $SavedConfig = Read-AgentConfig
+  $Endpoint = $SavedConfig.endpoint
+  $Token = $SavedConfig.token
+  $Interval = [int]$SavedConfig.interval
+}
 Assert-Safe "Token" $Token
 Assert-Endpoint $Endpoint
 $Mirror = $Mirror.Trim().TrimEnd('/')

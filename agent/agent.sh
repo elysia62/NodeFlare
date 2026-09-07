@@ -29,8 +29,7 @@ NodeFlare Agent 安装脚本
   -e  NodeFlare 服务地址（必填）
   -t  后台生成的 Agent Token（必填，请勿泄露）
   -i  初始历史保存间隔，15-3600 秒（默认 60）
-  -m  GitHub 下载加速前缀（可选，仅作用于 Release 下载；
-      形如 https://ghproxy.net，脚本会自动拼接完整地址，摘要校验不受影响）
+  -m  GitHub 下载加速前缀（可选，如 https://ghproxy.net）
 EOF
 }
 
@@ -345,6 +344,7 @@ install_agent() {
   printf '  服务：%s（%s）\n' "$SERVICE_NAME" "$init_system"
   if [ "$init_system" = "systemd" ]; then
     printf '  查看状态：systemctl status %s\n' "$SERVICE_NAME"
+    printf '  查看日志：journalctl -u %s -f\n' "$SERVICE_NAME"
   else
     printf '  查看状态：rc-service %s status\n' "$SERVICE_NAME"
   fi
