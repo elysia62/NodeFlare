@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
@@ -121,6 +121,41 @@ try {
   assert(samples > 0, "Update check must follow acknowledged samples");
   assert(redirected, "Same-origin WebSocket redirects must remain supported");
   await stopAgent(updating);
+
+  console.log("agent runtime: remote command survives disconnect and returns its result");
+  const taskId = randomUUID();
+  let remoteConnections = 0;
+  let received = false;
+  let remoteResult;
+  websocketServer.on("connection", (socket) => {
+    remoteConnections++;
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.type === "task_received" && message.task_id === taskId) {
+        received = true;
+        socket.terminate();
+      } else if (message.type === "task_result" && message.task_id === taskId) {
+        remoteResult = message;
+        socket.send(JSON.stringify({ type: "task_result_ack", task_id: taskId }));
+      }
+    });
+    if (remoteConnections === 1) {
+      socket.send(JSON.stringify({
+        type: "remote_task", task_id: taskId,
+        command: process.platform === "win32"
+          ? "Start-Sleep -Seconds 2; Write-Output remote-finished"
+          : "sleep 2; printf remote-finished",
+      }));
+    }
+  });
+  const remote = startAgent(upgradeServer.address().port, "runtime-remote", "remote");
+  await waitUntil(() => remoteResult, 15_000, "Remote command result was lost after disconnect");
+  assert(received, "The Agent must acknowledge receipt before disconnecting");
+  assert(remoteConnections >= 2, "The Agent must reconnect without receiving the command again");
+  assert.equal(remoteResult.status, "success");
+  assert.equal(remoteResult.exit_code, 0);
+  assert.equal(remoteResult.result.trim(), "remote-finished");
+  await stopAgent(remote);
 
   console.log("agent runtime: stalled handshake times out and reconnects");
   let connections = 0;

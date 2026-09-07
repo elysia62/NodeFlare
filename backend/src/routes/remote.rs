@@ -57,12 +57,12 @@ pub async fn create_task(
             format!("验证码尝试过多，请在 {seconds} 秒后重试"),
         ));
     }
-    let command = input.command.trim();
+    let command = input.command.as_str();
     let server_ids = remote_server_ids(&input);
     if server_ids.is_empty()
         || server_ids.len() > MAX_REMOTE_TARGETS
         || server_ids.iter().any(|id| id.len() > 80)
-        || command.is_empty()
+        || command.trim().is_empty()
         || command.len() > 16_384
     {
         return Err(ApiResponse::bad_request("请选择 1 至 128 个节点并填写命令"));
@@ -93,13 +93,35 @@ pub async fn create_task(
         return Err(ApiResponse::not_found(format!("节点不存在: {missing}")));
     }
 
+    {
+        let agents = state.agents.read().await;
+        if !server_ids.iter().any(|id| {
+            agents
+                .get(id)
+                .is_some_and(|agent| !agent.sender.is_closed())
+        }) {
+            return Err(ApiResponse::bad_request("所选节点均未连接，命令未下发"));
+        }
+    }
+
     let mut tasks = Vec::with_capacity(server_ids.len());
     for server_id in server_ids {
         let task =
             crate::db::queries::create_remote_task(&state.db, &server_id, command, &user.username)
                 .await
                 .map_err(ApiResponse::internal)?;
-        state.send_remote_task(&task).await;
+        if let Err(reason) = state.send_remote_task(&task).await {
+            crate::db::queries::update_remote_task_result(
+                &state.db,
+                &server_id,
+                &task.id,
+                "failed",
+                reason,
+                Some(-1),
+            )
+            .await
+            .map_err(ApiResponse::internal)?;
+        }
         tasks.push(CreatedRemoteTask {
             server_id,
             task_id: task.id,

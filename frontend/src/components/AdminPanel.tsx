@@ -40,7 +40,7 @@ import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError } from "../api";
 import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } from "../adminRoutes";
 import { formatBytes, formatByteSize, parseByteSize } from "../format";
 import { derivePassword } from "../password";
-import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS } from "../refresh";
+import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS, REMOTE_TASK_POLL_TIMEOUT_MS } from "../refresh";
 import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingField, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
 import { Checkbox } from "./Checkbox";
 import { TurnstileWidget } from "./TurnstileWidget";
@@ -308,6 +308,7 @@ export function AdminPanel({
   const [remoteQuery, setRemoteQuery] = useState("");
   const [remoteCommand, setRemoteCommand] = useState("");
   const [remoteTasks, setRemoteTasks] = useState<RemoteTask[]>([]);
+  const [remotePollingUntil, setRemotePollingUntil] = useState(0);
   const [twoFactorStatus, setTwoFactorStatus] = useState<TotpStatus | null>(null);
   const [twoFactorSetup, setTwoFactorSetup] = useState<TotpSetup | null>(null);
   const [newPasswordConfirmation, setNewPasswordConfirmation] = useState("");
@@ -837,6 +838,9 @@ export function AdminPanel({
       setTwoFactorSecretCopied(false);
       setLoginSessions([]); setLoginSessionsLoaded(false); setRevokingSessionId("");
       setRemoteSelectedIds([]); setRemoteCommand(""); setRemoteTasks([]); setRemoteQuery("");
+      remoteTasksRequestRef.current += 1;
+      remoteTasksRef.current = [];
+      setRemotePollingUntil(0);
     }
   }
 
@@ -985,7 +989,7 @@ export function AdminPanel({
     try {
       const code = await verificationDialog.ask("确认执行远程命令", true);
       if (code === null) return;
-      const command = remoteCommand.trim();
+      const command = remoteCommand;
       const data = await api.createRemoteTask({
         server_ids: remoteSelectedIds,
         command,
@@ -1007,21 +1011,29 @@ export function AdminPanel({
       remoteTasksRequestRef.current += 1;
       remoteTasksRef.current = tasks;
       setRemoteTasks(tasks);
+      setRemotePollingUntil(Date.now() + REMOTE_TASK_POLL_TIMEOUT_MS);
       setRemoteCommand("");
-      setNotice(`已向 ${tasks.length} 台服务器下发命令`);
+      setNotice("已提交命令，请查看各节点的执行结果");
       await refreshRemoteTasks(true, true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "下发命令失败");
+      setError(err instanceof Error && err.name === "TimeoutError"
+        ? "下发请求超时，命令可能已提交，请先检查节点，避免重复执行"
+        : err instanceof Error ? err.message : "下发命令失败");
     } finally {
       setBusy(false);
     }
   };
 
   useEffect(() => {
-    if (!authenticated || tab !== "remote" || !remoteTasksActive) return;
+    if (!authenticated || tab !== "remote" || !remoteTasksActive || !remotePollingUntil) return;
+    if (Date.now() >= remotePollingUntil) {
+      setRemotePollingUntil(0);
+      return;
+    }
     let stopped = false;
     let running = false;
     let timer: number | undefined;
+    const timeout = window.setTimeout(() => setRemotePollingUntil(0), remotePollingUntil - Date.now());
 
     const canPoll = () => !document.hidden && navigator.onLine !== false;
     const clearTimer = () => {
@@ -1039,6 +1051,10 @@ export function AdminPanel({
     const run = async () => {
       clearTimer();
       if (stopped || running || !canPoll()) return;
+      if (Date.now() >= remotePollingUntil) {
+        setRemotePollingUntil(0);
+        return;
+      }
       running = true;
       try {
         await refreshRemoteTasks(true);
@@ -1064,11 +1080,12 @@ export function AdminPanel({
     return () => {
       stopped = true;
       clearTimer();
+      window.clearTimeout(timeout);
       document.removeEventListener("visibilitychange", handleVisibility);
       window.removeEventListener("online", resume);
       window.removeEventListener("offline", pause);
     };
-  }, [authenticated, refreshRemoteTasks, remoteTasksActive, tab]);
+  }, [authenticated, refreshRemoteTasks, remoteTasksActive, remotePollingUntil, tab]);
 
   if (!authChecked) {
     return <div className={`admin-page ${dark ? "admin-dark" : ""}`} aria-busy="true" />;
@@ -1243,7 +1260,7 @@ export function AdminPanel({
                     <label className="remote-command-field">
                       <span>执行命令</span>
                       <textarea autoFocus required rows={5} maxLength={16_384} spellCheck={false} value={remoteCommand} onChange={(event) => setRemoteCommand(event.target.value)} />
-                      <small>多行内容会作为同一次 shell 命令执行。</small>
+                      <small>多行内容按一个脚本执行，完成后返回输出，单条命令最长执行 10 分钟。离开页面不会终止已下发的命令。</small>
                     </label>
 
                     <div className="server-picker remote-server-picker">
@@ -1259,14 +1276,15 @@ export function AdminPanel({
                   </form>
 
                   {remoteTasks.length > 0 ? <div className="remote-results">
-                    <div className="section-head"><div><h3>执行结果</h3>{remoteTasksActive ? <span className="remote-auto-refresh"><RotateCw size={12} />执行中，每 2 秒自动刷新</span> : <span>本次命令已完成</span>}</div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void refreshRemoteTasks(false, true)}><RotateCw size={14} />刷新结果</button></div>
+                    <div className="section-head"><div><h3>执行结果</h3>{remoteTasksActive ? <span className="remote-auto-refresh">{remotePollingUntil ? <RotateCw size={12} /> : null}{remotePollingUntil ? "等待结果，每 2 秒自动刷新" : "自动刷新已暂停"}</span> : <span>本次命令已结束</span>}</div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => { setRemotePollingUntil(Date.now() + REMOTE_TASK_POLL_TIMEOUT_MS); void refreshRemoteTasks(false, true); }}><RotateCw size={14} />刷新结果</button></div>
+                    {remoteTasksActive && !remotePollingUntil ? <p className="settings-hint" role="status">已等待 1 分钟，命令可能仍在执行。点击“刷新结果”可继续查询，暂停刷新不会停止命令。</p> : null}
                     <div className="remote-command-summary"><span>本次命令</span><code>{remoteTasks[0]?.command}</code></div>
                     <div className="task-list">
                       {remoteTasks.map((task) => {
                         const server = remoteServerById.get(task.server_id);
                         return <div key={task.id} className="task-item remote-result-item">
                           <div className="task-header"><strong className="remote-result-server">{server?.name ?? task.server_id}</strong><span className={`task-status ${task.status}`}>{remoteTaskStatusLabels[task.status]}</span><span className="task-time">{new Date(task.requested_at * 1000).toLocaleString()}</span></div>
-                          {task.status === "success" || task.status === "failed" ? <pre className={`task-result ${task.status}`}>{task.result || "（命令没有输出）"}</pre> : <p className="task-progress">{task.status === "pending" ? "等待 Agent 上线接收命令…" : "Agent 已接收，正在等待执行结果…"}</p>}
+                          {task.status === "success" || task.status === "failed" ? <pre className={`task-result ${task.status}`}>{task.result || "（命令没有输出）"}</pre> : <p className="task-progress">{task.status === "pending" ? "等待 Agent 确认接收；断线后不会自动重发命令。" : "Agent 已接收，正在等待执行结果…"}</p>}
                         </div>;
                       })}
                     </div>

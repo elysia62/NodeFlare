@@ -1293,7 +1293,7 @@ async fn cleanup_database_with_budget(
             let affected = if index == 0 {
                 sqlx::query(db.sql(
                     "UPDATE remote_tasks SET status='failed', completed_at=?, \
-                     result=CASE WHEN result='' THEN '任务等待超过 24 小时，已自动取消' ELSE result END \
+                     result=CASE WHEN result='' THEN '超过 24 小时未收到执行结果，无法确认命令状态' ELSE result END \
                      WHERE status IN ('pending','sent') AND id IN ( \
                        SELECT id FROM remote_tasks WHERE status IN ('pending','sent') AND requested_at<? \
                        ORDER BY requested_at LIMIT ?)",
@@ -1935,36 +1935,6 @@ pub async fn remote_task(db: &Database, id: &str) -> Result<Option<RemoteTaskInf
     row.as_ref()
         .map(remote_task_from_row)
         .transpose()
-        .map_err(Into::into)
-}
-
-pub async fn pending_remote_tasks(db: &Database, server_id: &str) -> Result<Vec<RemoteTaskInfo>> {
-    let current = now();
-    let cutoff = current - REMOTE_TASK_ACTIVE_TTL_SECONDS;
-    let mut transaction = db.pool().begin().await?;
-    sqlx::query(db.sql(
-        "UPDATE remote_tasks SET status='failed', completed_at=?, \
-         result=CASE WHEN result='' THEN '任务等待超过 24 小时，已自动取消' ELSE result END \
-         WHERE server_id=? AND status IN ('pending','sent') AND requested_at<?",
-    ))
-    .bind(current)
-    .bind(server_id)
-    .bind(cutoff)
-    .execute(&mut *transaction)
-    .await?;
-    let rows = sqlx::query(db.sql(
-        "SELECT id, server_id, command, status, requested_by, requested_at, started_at, \
-         completed_at, result, exit_code FROM remote_tasks \
-         WHERE server_id=? AND status IN ('pending','sent') \
-         ORDER BY requested_at LIMIT 50",
-    ))
-    .bind(server_id)
-    .fetch_all(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
-    rows.iter()
-        .map(remote_task_from_row)
-        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 

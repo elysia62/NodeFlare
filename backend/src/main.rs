@@ -129,10 +129,15 @@ impl AppState {
         seconds as u64 * 1000
     }
 
-    pub async fn send_remote_task(&self, task: &models::RemoteTaskInfo) {
-        if let Some(connection) = self.agents.read().await.get(&task.server_id) {
-            websocket::agent::queue_remote_task(connection, task);
-        }
+    pub async fn send_remote_task(
+        &self,
+        task: &models::RemoteTaskInfo,
+    ) -> std::result::Result<(), &'static str> {
+        let agents = self.agents.read().await;
+        let connection = agents
+            .get(&task.server_id)
+            .ok_or("节点未连接，命令未下发")?;
+        websocket::agent::queue_remote_task(connection, task)
     }
 }
 

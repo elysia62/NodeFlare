@@ -1,4 +1,6 @@
 import WebSocket from "ws";
+import assert from "node:assert/strict";
+import { once } from "node:events";
 
 const baseUrl = process.env.MONITOR_BASE_URL;
 const adminToken = process.env.MONITOR_ADMIN_TOKEN;
@@ -116,12 +118,13 @@ function socketHeaders(path, token, headers = {}, includeAgentProtocol = true) {
   };
 }
 
-function openSocket(path, token, headers = {}, includeAgentProtocol = true) {
+function openSocket(path, token, headers = {}, includeAgentProtocol = true, observeMessage) {
   return new Promise((resolve, reject) => {
     let serverProtocol;
     const socket = new WebSocket(websocketUrl(path), {
       headers: socketHeaders(path, token, headers, includeAgentProtocol),
     });
+    if (observeMessage) socket.on("message", observeMessage);
     const timer = setTimeout(() => {
       socket.terminate();
       reject(new Error(`${path} WebSocket handshake timed out`));
@@ -319,6 +322,8 @@ if (expectAgentRejected) {
 const dashboard = configOnly ? null : await openSocket("/api/ws", adminToken);
 let agent;
 let enabledTotpSecret = "";
+let offlineServer;
+let remoteAdminToken;
 try {
   if (dashboard) {
     const pong = waitForMessage(dashboard, "pong");
@@ -413,7 +418,35 @@ try {
   await setTotpEnabled(setup.secret, true);
   enabledTotpSecret = setup.secret;
 
-  const command = "printf nodeflare-smoke";
+  const offlineResponse = await fetch(new URL("/api/admin/servers", baseUrl), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: "Offline remote smoke", region: "", group_name: "", tags: "", hidden: true,
+      expires_at: null, traffic_limit: 0, traffic_limit_type: "max", price: 0,
+      billing_cycle: 30, currency: "USD", auto_renewal: false, network_interface: "",
+      reset_day: 1, report_interval: 60, collect_interval: 1, rx_correction: 0,
+      tx_correction: 0, agent_mirror: "", offline_notify_disabled: true, auto_update: false,
+    }),
+  });
+  assert.equal(offlineResponse.status, 201, await offlineResponse.clone().text());
+  offlineServer = await offlineResponse.json();
+  const offlineOnly = await fetch(new URL("/api/admin/remote/task", baseUrl), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ command: "printf offline", server_ids: [offlineServer.id], totp_code: await currentTotp(setup.secret) }),
+  });
+  assert.equal(offlineOnly.status, 400, "All-offline execution must fail immediately");
+
+  const remoteLogin = await fetch(new URL("/api/admin/login", baseUrl), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: adminUsername, password_derived: passwordDerived, totp_code: await currentTotp(setup.secret) }),
+  });
+  assert(remoteLogin.ok, await remoteLogin.clone().text());
+  remoteAdminToken = (await remoteLogin.json()).token;
+
+  const command = "\n  printf nodeflare-smoke\n ";
   const assignedTaskPromise = waitForJsonMessage(
     agent,
     "remote task",
@@ -422,12 +455,12 @@ try {
   const createTaskResponse = await fetch(new URL("/api/admin/remote/task", baseUrl), {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${adminToken}`,
+      Authorization: `Bearer ${remoteAdminToken}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
       command,
-      server_ids: [serverId],
+      server_ids: [serverId, offlineServer.id],
       totp_code: await currentTotp(setup.secret),
     }),
   });
@@ -437,7 +470,12 @@ try {
     );
   }
   const createdTask = await createTaskResponse.json();
-  const taskId = createdTask.tasks?.[0]?.task_id;
+  const taskId = createdTask.tasks?.find((task) => task.server_id === serverId)?.task_id;
+  const offlineTaskId = createdTask.tasks?.find((task) => task.server_id === offlineServer.id)?.task_id;
+  assert(offlineTaskId, "Mixed execution must report the offline node");
+  const offlineTask = await waitForRemoteTask(offlineTaskId, "failed");
+  assert(offlineTask.result.includes("未下发"));
+  assert.equal(offlineTask.exit_code, -1);
   const assignedTask = await assignedTaskPromise;
   if (!taskId || assignedTask.task_id !== taskId) {
     throw new Error(`Invalid remote task assignment: ${JSON.stringify(assignedTask)}`);
@@ -445,6 +483,51 @@ try {
 
   agent.send(JSON.stringify({ type: "task_received", task_id: taskId }));
   await waitForRemoteTask(taskId, "sent");
+
+  const logoutResponse = await fetch(new URL("/api/admin/logout", baseUrl), {
+    method: "POST", headers: { Authorization: `Bearer ${remoteAdminToken}` },
+  });
+  assert(logoutResponse.ok, "Remote command owner must be able to log out");
+  remoteAdminToken = "";
+  await waitForRemoteTask(taskId, "sent");
+
+  const unconfirmedCommand = "printf unconfirmed";
+  const unconfirmedAssigned = waitForJsonMessage(agent, "unconfirmed task", (message) => message.type === "remote_task" && message.command === unconfirmedCommand);
+  const unconfirmedResponse = await fetch(new URL("/api/admin/remote/task", baseUrl), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ command: unconfirmedCommand, server_ids: [serverId], totp_code: await currentTotp(setup.secret) }),
+  });
+  assert(unconfirmedResponse.ok, await unconfirmedResponse.clone().text());
+  const unconfirmedId = (await unconfirmedResponse.json()).tasks[0].task_id;
+  await unconfirmedAssigned;
+
+  await closeSocket(agent);
+  const replayedTasks = [];
+  const recordReplay = (raw) => {
+    const message = JSON.parse(raw.toString());
+    if (message.type === "remote_task") replayedTasks.push(message);
+  };
+  agent = await openSocket("/api/agent/ws", agentToken, { "X-Forwarded-For": "8.8.8.8" }, true, recordReplay);
+  await waitForJsonMessage(agent, "reconnected Agent config", (message) => message.type === "config");
+  const pong = once(agent, "pong", { signal: AbortSignal.timeout(5_000) });
+  agent.ping();
+  await pong;
+  assert.deepEqual(replayedTasks, [], "Reconnect must not replay pending or received commands");
+  assert.equal((await waitForRemoteTask(taskId, "sent")).command, command);
+  await waitForRemoteTask(unconfirmedId, "pending");
+
+  const formerlyOffline = await openSocket("/api/agent/ws", offlineServer.agent_token, {}, true, recordReplay);
+  try {
+    await waitForJsonMessage(formerlyOffline, "formerly offline Agent config", (message) => message.type === "config");
+    const offlinePong = once(formerlyOffline, "pong", { signal: AbortSignal.timeout(5_000) });
+    formerlyOffline.ping();
+    await offlinePong;
+    assert.deepEqual(replayedTasks, [], "Bringing an offline node online must not run rejected commands");
+  } finally {
+    await closeSocket(formerlyOffline);
+  }
+
   const result = {
     type: "task_result",
     task_id: taskId,
@@ -735,6 +818,16 @@ try {
   }
   }
 } finally {
+  if (remoteAdminToken) {
+    await fetch(new URL("/api/admin/logout", baseUrl), {
+      method: "POST", headers: { Authorization: `Bearer ${remoteAdminToken}` },
+    });
+  }
+  if (offlineServer) {
+    await fetch(new URL(`/api/admin/servers/${offlineServer.id}`, baseUrl), {
+      method: "DELETE", headers: { Authorization: `Bearer ${adminToken}` },
+    });
+  }
   if (enabledTotpSecret) {
     try {
       await setTotpEnabled(enabledTotpSecret, false);

@@ -154,13 +154,8 @@ async fn run(
                 .to_string(),
         ));
     }
-    if let Ok(tasks) =
-        crate::db::queries::pending_remote_tasks(&state.db, &identity.server_id).await
-    {
-        for task in tasks {
-            send_task(&outbound_tx, &task);
-        }
-    }
+    // Commands are dispatched only to the current connection. Reconnecting must
+    // not replay an old command; the Agent retries its persisted results itself.
     drop(activity);
 
     let writer = tokio::spawn(async move {
@@ -358,17 +353,6 @@ async fn handle_text(
     }
 }
 
-fn send_task(outbound: &mpsc::Sender<AgentCommand>, task: &RemoteTaskInfo) {
-    let _ = outbound.try_send(AgentCommand::Text(
-        serde_json::json!({
-            "type": "remote_task",
-            "task_id": task.id,
-            "command": task.command,
-        })
-        .to_string(),
-    ));
-}
-
 fn send_ack(
     outbound: &mpsc::Sender<AgentCommand>,
     result: &PersistResult,
@@ -476,14 +460,75 @@ fn agent_protocol_supported(headers: &HeaderMap) -> bool {
         .all(|capability| capabilities.contains(capability))
 }
 
-pub fn queue_remote_task(connection: &AgentConnection, task: &RemoteTaskInfo) {
-    send_task(&connection.sender, task);
+pub fn queue_remote_task(
+    connection: &AgentConnection,
+    task: &RemoteTaskInfo,
+) -> Result<(), &'static str> {
+    connection
+        .sender
+        .try_send(AgentCommand::Text(
+            serde_json::json!({
+                "type": "remote_task",
+                "task_id": task.id,
+                "command": task.command,
+            })
+            .to_string(),
+        ))
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => "节点发送队列已满，命令未下发，请稍后重试",
+            mpsc::error::TrySendError::Closed(_) => "节点连接已断开，命令未下发",
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn remote_dispatch_reports_backpressure_and_disconnects() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let connection = AgentConnection {
+            connection_id: "test".to_string(),
+            sender,
+            report_interval: 60,
+            collect_interval: 1,
+            live_until: Arc::new(AtomicI64::new(0)),
+        };
+        let task = RemoteTaskInfo {
+            id: uuid::Uuid::new_v4().to_string(),
+            server_id: "test-server".to_string(),
+            command: "\n  printf test\n ".to_string(),
+            status: "pending".to_string(),
+            requested_by: "admin".to_string(),
+            requested_at: 0,
+            started_at: None,
+            completed_at: None,
+            result: String::new(),
+            exit_code: None,
+        };
+
+        queue_remote_task(&connection, &task).unwrap();
+        assert!(
+            queue_remote_task(&connection, &task)
+                .unwrap_err()
+                .contains("队列已满")
+        );
+        let AgentCommand::Text(payload) = receiver.try_recv().unwrap() else {
+            panic!("expected a remote command");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["command"], task.command);
+        assert_eq!(payload["task_id"], task.id);
+        assert!(receiver.try_recv().is_err());
+
+        drop(receiver);
+        assert!(
+            queue_remote_task(&connection, &task)
+                .unwrap_err()
+                .contains("连接已断开")
+        );
+    }
 
     #[test]
     fn requires_the_current_agent_protocol_and_capabilities() {

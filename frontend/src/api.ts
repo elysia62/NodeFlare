@@ -185,6 +185,10 @@ export const api = {
   createRemoteTask: (input: RemoteTaskInput) => request<{ tasks: RemoteTaskCreated[] }>("/api/admin/remote/task", {
     method: "POST",
     body: JSON.stringify(input),
+    signal: AbortSignal.timeout(15_000),
   }, true),
-  remoteTask: (id: string) => request<RemoteTask>(`/api/admin/remote/task/${encodeURIComponent(id)}`, {}, true),
+  remoteTask: (id: string) => request<RemoteTask>(`/api/admin/remote/task/${encodeURIComponent(id)}`, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+  }, true),
 };
