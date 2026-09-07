@@ -906,36 +906,6 @@ fn validate_server(input: &ServerInput) -> Result<(), &'static str> {
     Ok(())
 }
 
-#[cfg(test)]
-mod server_validation_tests {
-    use super::*;
-
-    #[test]
-    fn price_must_be_nonnegative_and_is_independent_of_visibility() {
-        let mut input: ServerInput = serde_json::from_value(serde_json::json!({
-            "name": "Price test", "region": "", "group_name": "", "tags": "",
-            "hidden": false, "expires_at": null, "traffic_limit": 0,
-            "traffic_limit_type": "sum", "price": 0, "billing_cycle": 30,
-            "currency": "CNY", "auto_renewal": false, "network_interface": "",
-            "reset_day": 1, "report_interval": 60, "collect_interval": 1,
-            "rx_correction": 0, "tx_correction": 0, "agent_mirror": "",
-            "offline_notify_disabled": false, "auto_update": true
-        }))
-        .unwrap();
-        for hidden in [true, false] {
-            input.hidden = hidden;
-            for price in [0.0, 0.01, 1_000_000_000.0] {
-                input.price = price;
-                assert!(validate_server(&input).is_ok());
-            }
-            for price in [-1.0, -0.01, 1_000_000_001.0, f64::NAN, f64::INFINITY] {
-                input.price = price;
-                assert!(validate_server(&input).is_err());
-            }
-        }
-    }
-}
-
 async fn validate_latency_task(
     state: &AppState,
     input: &LatencyTaskInput,
@@ -1164,4 +1134,34 @@ fn valid_ping_target(value: &str) -> bool {
                     .last()
                     .is_some_and(|character| character.is_ascii_alphanumeric())
         })
+}
+
+#[cfg(test)]
+mod server_validation_tests {
+    use super::*;
+
+    #[test]
+    fn price_must_be_nonnegative_and_is_independent_of_visibility() {
+        let mut input: ServerInput = serde_json::from_value(serde_json::json!({
+            "name": "Price test", "region": "", "group_name": "", "tags": "",
+            "hidden": false, "expires_at": null, "traffic_limit": 0,
+            "traffic_limit_type": "sum", "price": 0, "billing_cycle": 30,
+            "currency": "CNY", "auto_renewal": false, "network_interface": "",
+            "reset_day": 1, "report_interval": 60, "collect_interval": 1,
+            "rx_correction": 0, "tx_correction": 0, "agent_mirror": "",
+            "offline_notify_disabled": false, "auto_update": true
+        }))
+        .unwrap();
+        for hidden in [true, false] {
+            input.hidden = hidden;
+            for price in [0.0, 0.01, 1_000_000_000.0] {
+                input.price = price;
+                assert!(validate_server(&input).is_ok());
+            }
+            for price in [-1.0, -0.01, 1_000_000_001.0, f64::NAN, f64::INFINITY] {
+                input.price = price;
+                assert!(validate_server(&input).is_err());
+            }
+        }
+    }
 }
