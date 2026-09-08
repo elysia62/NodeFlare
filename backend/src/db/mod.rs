@@ -201,7 +201,7 @@ impl Database {
                 MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_)
             ) {
                 return Err(anyhow::Error::new(error).context(
-                    "数据库迁移基线不匹配；请保留原数据库，使用原版本导出完整结构的 ZIP 备份，配置全新数据库后再恢复；不要删除或修改 _sqlx_migrations",
+                    "数据库结构与当前版本不匹配；请使用匹配版本的程序，或配置全新数据库",
                 ));
             }
             return Err(error.into());

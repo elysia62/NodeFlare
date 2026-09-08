@@ -717,25 +717,13 @@ pub async fn save_agent_batch(
     let persisted_through = latest.timestamp;
     let latest_json = serde_json::to_string(latest)?;
     sqlx::query(db.sql(
-        "INSERT INTO server_latest_state(server_id, latest_timestamp, cpu, mem_used, mem_total, \
-         disk_used, disk_total, net_in, net_out, uptime, latest_json, last_batch_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO server_latest_state(server_id, latest_timestamp, latest_json, last_batch_id) \
+         VALUES (?, ?, ?, ?) \
          ON CONFLICT(server_id) DO UPDATE SET latest_timestamp=excluded.latest_timestamp, \
-         cpu=excluded.cpu, mem_used=excluded.mem_used, mem_total=excluded.mem_total, \
-         disk_used=excluded.disk_used, disk_total=excluded.disk_total, net_in=excluded.net_in, \
-         net_out=excluded.net_out, uptime=excluded.uptime, latest_json=excluded.latest_json, \
-         last_batch_id=excluded.last_batch_id",
+         latest_json=excluded.latest_json, last_batch_id=excluded.last_batch_id",
     ))
     .bind(&identity.server_id)
     .bind(latest.timestamp)
-    .bind(latest.cpu)
-    .bind(latest.mem_used)
-    .bind(latest.mem_total)
-    .bind(latest.disk_used)
-    .bind(latest.disk_total)
-    .bind(latest.net_in)
-    .bind(latest.net_out)
-    .bind(latest.uptime)
     .bind(latest_json)
     .bind(batch_id)
     .execute(&mut *transaction)
@@ -3155,7 +3143,7 @@ mod tests {
             "SELECT name FROM sqlite_master WHERE type='index' AND name IN (\
              'metric_history_time',\
              'latency_results_time',\
-             'remote_tasks_server_status_time',\
+             'remote_tasks_server',\
              'servers_public_sort')",
         )
         .fetch_all(db.pool())

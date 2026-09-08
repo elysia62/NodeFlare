@@ -99,19 +99,9 @@ CREATE INDEX metric_history_time ON metric_history(timestamp);
 CREATE TABLE server_latest_state (
   server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
   latest_timestamp BIGINT NOT NULL,
-  cpu DOUBLE PRECISION NOT NULL DEFAULT 0,
-  mem_used BIGINT NOT NULL DEFAULT 0,
-  mem_total BIGINT NOT NULL DEFAULT 0,
-  disk_used BIGINT NOT NULL DEFAULT 0,
-  disk_total BIGINT NOT NULL DEFAULT 0,
-  net_in DOUBLE PRECISION NOT NULL DEFAULT 0,
-  net_out DOUBLE PRECISION NOT NULL DEFAULT 0,
-  uptime BIGINT NOT NULL DEFAULT 0,
   latest_json TEXT NOT NULL DEFAULT '{}',
   last_batch_id TEXT NOT NULL DEFAULT ''
 );
-
-CREATE INDEX server_latest_state_time ON server_latest_state(latest_timestamp);
 
 CREATE TABLE admin_2fa (
   username TEXT PRIMARY KEY,
@@ -133,8 +123,7 @@ CREATE TABLE remote_tasks (
   exit_code BIGINT
 );
 
-CREATE INDEX remote_tasks_server_status_time
-ON remote_tasks(server_id, status, requested_at);
+CREATE INDEX remote_tasks_server ON remote_tasks(server_id);
 
 CREATE INDEX remote_tasks_status_completed
 ON remote_tasks(status, completed_at);

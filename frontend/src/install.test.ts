@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const installer = readFileSync(new URL("../../install.sh", import.meta.url), "utf8");
@@ -294,21 +294,30 @@ describe("agent installer service safety", () => {
   test("a failed stop of an existing service prevents replacement", () => {
     const stop = agentInstaller.slice(agentInstaller.indexOf("  rollback_agent=true\n"), agentInstaller.indexOf('  mv "$temporary" "$AGENT_FILE"'));
     expect(stop).toContain("systemctl stop");
-    for (const init of ["systemd", "openrc"]) {
-      const result = spawnSync("sh", ["-c", `
-        set -eu
-        ${agentShellFunctions("fail")}
-        init_system=$TEST_INIT
-        had_service=true
-        SERVICE_NAME=nodeflare-agent
-        systemctl() { return 1; }
-        rc-service() { return 1; }
-        ${stop}
-        printf 'replaced'
-      `], { env: { ...process.env, TEST_INIT: init }, encoding: "utf8" });
-      expect(result.status).toBe(1);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toContain("未替换程序");
+    const directory = mkdtempSync(join(tmpdir(), "nodeflare-agent-stop-"));
+    const log = join(directory, "stop.log");
+    try {
+      // Dash rejects hyphenated function names, so mock the external commands.
+      for (const command of ["systemctl", "rc-service"]) {
+        writeFileSync(join(directory, command), '#!/bin/sh\nprintf \'%s\\n\' "$*" > "$TEST_STOP_LOG"\nexit 1\n', { mode: 0o755 });
+      }
+      for (const init of ["systemd", "openrc"]) {
+        const result = spawnSync("sh", ["-c", `
+          set -eu
+          ${agentShellFunctions("fail")}
+          init_system=$TEST_INIT
+          had_service=true
+          SERVICE_NAME=nodeflare-agent
+          ${stop}
+          printf 'replaced'
+        `], { env: { ...process.env, PATH: `${directory}${delimiter}${process.env.PATH ?? ""}`, TEST_INIT: init, TEST_STOP_LOG: log }, encoding: "utf8" });
+        expect(result.status).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain("未替换程序");
+        expect(readFileSync(log, "utf8")).toBe(init === "systemd" ? "stop nodeflare-agent\n" : "nodeflare-agent stop\n");
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 

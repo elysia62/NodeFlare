@@ -3,7 +3,6 @@
   --foreground: #11191f;
   --card-solid: #f8fafb;
   --card: rgb(248 250 251 / 0.78);
-  --card-hover: rgb(255 255 255 / 0.92);
   --node-card-bg: rgb(241 245 249 / 0.74);
   --node-card-hover: rgb(248 250 252 / 0.8);
   --node-card-border: rgb(226 232 240 / 0.68);
@@ -24,7 +23,6 @@
   --info: #2563b9;
   --chart-grid: rgb(83 104 116 / 0.15);
   --shadow: 0 10px 32px rgb(31 48 58 / 0.09), inset 0 1px 0 rgb(255 255 255 / 0.58);
-  --node-offline-bg: rgb(255 255 255 / 0.2);
   /* Card geometry lives here so the grid and the latency panels cannot drift
      apart and make rows jump as data arrives. */
   --node-card-min-height: 320px;
@@ -43,7 +41,6 @@
   --foreground: #f3f6f5;
   --card-solid: #161d1e;
   --card: rgb(22 29 30 / 0.86);
-  --card-hover: rgb(28 36 37 / 0.94);
   --node-card-bg: rgb(22 29 30 / 0.86);
   --node-card-hover: rgb(26 34 35 / 0.93);
   --node-card-border: rgb(255 255 255 / 0.16);
@@ -63,7 +60,6 @@
   --info: #69a7e8;
   --chart-grid: rgb(218 234 230 / 0.14);
   --shadow: 0 12px 36px rgb(0 0 0 / 0.28), inset 0 1px 0 rgb(255 255 255 / 0.035);
-  --node-offline-bg: rgb(0 0 0 / 0.2);
 }
 
 * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--foreground) 18%, transparent) transparent; }
