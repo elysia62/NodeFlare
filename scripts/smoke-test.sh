@@ -327,10 +327,15 @@ fi
 
 step "alerts and visibility"
 alert_rule_json=$(request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
-  --data "$(jq -nc --arg server_id "$server_id" '{name:"Smoke CPU",metric:"cpu",threshold:80,duration_minutes:5,aggregation:"average",enabled:true,server_ids:[$server_id]}')" \
+  --data "$(jq -nc --arg server_id "$server_id" '{name:"Smoke CPU",metric:"cpu",threshold:80,duration_minutes:5,aggregation:"average",all_servers:false,enabled:true,server_ids:[$server_id]}')" \
   "$MONITOR_BASE_URL/api/admin/alert-rules")
 alert_rule_id=$(printf '%s' "$alert_rule_json" | jq -er '.id')
-request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/alert-rules" | jq -e --arg id "$alert_rule_id" --arg server_id "$server_id" '.rules | any(.id == $id and .metric == "cpu" and .enabled == true and (.server_ids | index($server_id)))' >/dev/null
+request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/alert-rules" | jq -e --arg id "$alert_rule_id" --arg server_id "$server_id" '.rules | any(.id == $id and .metric == "cpu" and .enabled == true and .all_servers == false and (.server_ids | index($server_id)))' >/dev/null
+invalid_scope_status=$(monitor_curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
+  --data "$(jq -nc --arg server_id "$server_id" '{name:"Invalid scope",metric:"cpu",threshold:80,duration_minutes:5,aggregation:"average",all_servers:true,enabled:true,server_ids:[$server_id]}')" \
+  "$MONITOR_BASE_URL/api/admin/alert-rules/$alert_rule_id")
+[ "$invalid_scope_status" = "400" ]
 request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
   --data "$(printf '%s' "$server_input" | jq '.hidden=true')" \
   "$MONITOR_BASE_URL/api/admin/servers/$server_id" >/dev/null
@@ -361,7 +366,7 @@ if [ -n "${MONITOR_MIGRATION_URL:-}" ]; then
     -H "Authorization: Bearer $admin_token" -X DELETE "$MONITOR_BASE_URL/api/admin/servers/$server_id")
   [ "$frozen_delete_status" = "503" ]
   frozen_agent_status=$(monitor_curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-    -H "Authorization: Bearer $agent_token" -H 'X-NodeFlare-Agent-Protocol: 2' \
+    -H "Authorization: Bearer $agent_token" \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
     -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$MONITOR_BASE_URL/api/agent/ws")
   [ "$frozen_agent_status" = "503" ]

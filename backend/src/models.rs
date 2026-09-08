@@ -370,6 +370,7 @@ pub struct AlertRuleInput {
     pub threshold: f64,
     pub duration_minutes: i64,
     pub aggregation: String,
+    pub all_servers: bool,
     pub enabled: bool,
     pub server_ids: Vec<String>,
 }
@@ -382,6 +383,7 @@ pub struct AlertRuleView {
     pub threshold: f64,
     pub duration_minutes: i64,
     pub aggregation: String,
+    pub all_servers: bool,
     pub enabled: bool,
     pub server_ids: Vec<String>,
 }

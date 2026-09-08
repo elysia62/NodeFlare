@@ -935,6 +935,7 @@ async fn validate_alert_rule(state: &AppState, input: &AlertRuleInput) -> Result
         || input.threshold > maximum
         || !(1..=1440).contains(&input.duration_minutes)
         || !matches!(input.aggregation.as_str(), "average" | "continuous")
+        || (input.all_servers && !input.server_ids.is_empty())
     {
         return Err(ApiResponse::bad_request("告警规则格式无效"));
     }

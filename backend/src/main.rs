@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, watch};
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, watch};
 use tower_http::trace::TraceLayer;
 
 const LIVE_REPORT_DIVISOR: i64 = 15;
@@ -43,6 +43,7 @@ pub struct AppState {
     pub database_maintenance: Mutex<()>,
     pub theme_operations: Mutex<()>,
     pub database_activity: activity::DatabaseActivity,
+    pub notification_wake: Notify,
     pub restart_tx: watch::Sender<bool>,
     pub login_attempts: security::AttemptLimiter,
     pub sensitive_attempts: security::AttemptLimiter,
@@ -215,6 +216,7 @@ async fn main() -> Result<()> {
         database_maintenance: Mutex::new(()),
         theme_operations: Mutex::new(()),
         database_activity: activity::DatabaseActivity::default(),
+        notification_wake: Notify::new(),
         restart_tx,
         login_attempts: security::AttemptLimiter::new(
             5,
@@ -374,6 +376,7 @@ async fn main() -> Result<()> {
         .with_state(Arc::clone(&state));
 
     spawn_maintenance(Arc::clone(&state));
+    spawn_notifications(Arc::clone(&state));
     tracing::info!(address = %bind_addr, "NodeFlare listening");
     axum::serve(
         listener,
@@ -386,6 +389,36 @@ async fn main() -> Result<()> {
         std::process::exit(75);
     }
     Ok(())
+}
+
+fn spawn_notifications(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {},
+                () = state.notification_wake.notified() => {},
+            }
+            // Release the activity guard between messages so maintenance can proceed.
+            let Ok(_activity) = state.database_activity.write() else {
+                continue;
+            };
+            match db::load_settings(&state.db).await {
+                Ok(settings) if !settings.notification_enabled => continue,
+                Err(error) => {
+                    tracing::error!(%error, "notification settings load failed");
+                    continue;
+                }
+                Ok(_) => {}
+            }
+            match notify::deliver_next(&state.db, &state.http).await {
+                Ok(true) => state.notification_wake.notify_one(),
+                Ok(false) => {}
+                Err(error) => tracing::error!(%error, "notification delivery failed"),
+            }
+        }
+    });
 }
 
 fn spawn_maintenance(state: Arc<AppState>) {
@@ -413,17 +446,12 @@ fn spawn_maintenance(state: Arc<AppState>) {
                 }
             };
             let last_reports = state.last_agent_reports.read().await.clone();
-            if let Err(error) = notify::run_periodic(
-                &state.db,
-                &state.http,
-                &settings,
-                &last_reports,
-                state.started_at,
-            )
-            .await
+            if let Err(error) =
+                notify::run_periodic(&state.db, &settings, &last_reports, state.started_at).await
             {
                 tracing::error!(%error, "notification maintenance failed");
             }
+            state.notification_wake.notify_one();
             maintenance_runs = maintenance_runs.wrapping_add(1);
             {
                 if let Err(error) =

@@ -645,7 +645,14 @@ uninstall_server() {
   rmdir "$install_dir" 2>/dev/null || true
 
   if [ "$purge" = true ]; then
-    rm -rf "$config_dir"
+    for entry in "$config_dir"/* "$config_dir"/.[!.]* "$config_dir"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      if [ "$platform" = linux ] && [ "$entry" = "$config_dir/agent" ]; then
+        continue
+      fi
+      rm -rf "$entry"
+    done
+    rmdir "$config_dir" 2>/dev/null || true
     log "已删除配置和全部服务端持久数据"
   else
     log "已保留配置和服务端持久数据：$config_dir"

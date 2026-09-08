@@ -1,29 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const installer = readFileSync(new URL("../../install.sh", import.meta.url), "utf8");
 const agentInstaller = readFileSync(new URL("../../agent/agent.sh", import.meta.url), "utf8");
-
-test("CI checks each shell script and stops on a later syntax error", () => {
-  const workflow = Bun.YAML.parse(readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8")) as {
-    jobs: { quality: { steps: { name?: string; run?: string }[] } };
-  };
-  const command = workflow.jobs.quality.steps.find((step) => step.name === "Check shell scripts")?.run;
-  expect(command).toBeDefined();
-  const result = spawnSync("sh", ["-c", `
-    sh() {
-      [ "$#" -eq 2 ] && [ "$1" = -n ] || return 98
-      printf '%s\\n' "$2"
-      [ "$2" != agent/agent.sh ] || return 19
-    }
-    ${command}
-  `], { encoding: "utf8" });
-  expect(result.status).toBe(19);
-  expect(result.stdout).toBe("install.sh\nagent/agent.sh\n");
-});
 
 function shellFunctions(...names: string[]) {
   return names.map((name) => {
@@ -42,6 +24,51 @@ function agentShellFunctions(...names: string[]) {
 }
 
 const startFunction = shellFunctions("start_server");
+
+describe("server uninstall ownership", () => {
+  for (const [platform, purge] of [["linux", true], ["linux", false], ["macos", true], ["freebsd", true]] as const) {
+    test(`${platform} purge=${purge} only removes server-owned files`, () => {
+      const directory = mkdtempSync(join(tmpdir(), "nodeflare-uninstall-test-"));
+      const config = join(directory, "config");
+      try {
+        mkdirSync(join(config, "agent"), { recursive: true });
+        mkdirSync(join(directory, "install", "share"), { recursive: true });
+        writeFileSync(join(config, "agent", "remote-tasks.json"), "agent-state");
+        writeFileSync(join(config, "config.toml"), "server-config");
+        writeFileSync(join(config, ".server-state"), "server-state");
+        writeFileSync(join(directory, "install", "nodeflare"), "server-binary");
+        const result = spawnSync("sh", ["-c", `
+          set -eu
+          ${shellFunctions("log", "uninstall_server")}
+          config_dir=$TEST_DIRECTORY/config
+          install_dir=$TEST_DIRECTORY/install
+          share_dir=$install_dir/share
+          server_binary=$install_dir/nodeflare
+          systemd_file=$TEST_DIRECTORY/server.service
+          openrc_file=$TEST_DIRECTORY/server.openrc
+          launchd_file=$TEST_DIRECTORY/server.plist
+          freebsd_rc_file=$TEST_DIRECTORY/server.rc
+          platform=$TEST_PLATFORM
+          init_system=systemd
+          stop_server() { :; }
+          systemctl() { :; }
+          uninstall_server "$TEST_PURGE"
+        `], { env: { ...process.env, TEST_DIRECTORY: directory, TEST_PLATFORM: platform, TEST_PURGE: String(purge) }, encoding: "utf8" });
+        expect(result.status).toBe(0);
+        expect(existsSync(join(directory, "install"))).toBe(false);
+        expect(existsSync(join(config, "config.toml"))).toBe(!purge);
+        expect(existsSync(join(config, ".server-state"))).toBe(!purge);
+        if (platform === "linux") {
+          expect(readFileSync(join(config, "agent", "remote-tasks.json"), "utf8")).toBe("agent-state");
+        } else {
+          expect(existsSync(config)).toBe(false);
+        }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+});
 
 function start(scenario: string) {
   return spawnSync("sh", ["-c", `

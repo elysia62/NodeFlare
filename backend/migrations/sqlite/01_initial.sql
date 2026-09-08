@@ -224,6 +224,7 @@ CREATE TABLE alert_rules (
   threshold REAL NOT NULL CHECK(threshold > 0),
   duration_minutes INTEGER NOT NULL CHECK(duration_minutes BETWEEN 1 AND 1440),
   aggregation TEXT NOT NULL CHECK(aggregation IN ('average', 'continuous')),
+  all_servers INTEGER NOT NULL DEFAULT 0 CHECK(all_servers IN (0, 1)),
   enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -241,12 +242,31 @@ CREATE INDEX alert_rule_servers_server ON alert_rule_servers(server_id, rule_id)
 
 CREATE TABLE alert_states (
   state_key TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  rule_id TEXT REFERENCES alert_rules(id) ON DELETE CASCADE,
   active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0, 1)),
   updated_at INTEGER NOT NULL,
   details_json TEXT NOT NULL DEFAULT '{}'
 ) WITHOUT ROWID;
 
 CREATE INDEX alert_states_active_time ON alert_states(active, updated_at);
+CREATE INDEX alert_states_server ON alert_states(server_id);
+CREATE INDEX alert_states_rule ON alert_states(rule_id);
+
+CREATE TABLE notification_outbox (
+  id TEXT PRIMARY KEY,
+  state_key TEXT NOT NULL REFERENCES alert_states(state_key) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK(sequence > 0),
+  title TEXT NOT NULL,
+  server_name TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  next_attempt_at INTEGER NOT NULL,
+  UNIQUE(state_key, sequence)
+) WITHOUT ROWID;
+
+CREATE INDEX notification_outbox_due ON notification_outbox(next_attempt_at, created_at);
 
 CREATE TABLE notification_telegram (
   id INTEGER PRIMARY KEY CHECK(id = 1),

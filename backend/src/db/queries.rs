@@ -1264,6 +1264,7 @@ async fn cleanup_database_with_budget(
            ORDER BY completed_at LIMIT ?)",
         "DELETE FROM alert_states WHERE active=0 AND state_key IN ( \
            SELECT state_key FROM alert_states WHERE active=0 AND updated_at<? \
+           AND NOT EXISTS (SELECT 1 FROM notification_outbox WHERE notification_outbox.state_key=alert_states.state_key) \
            ORDER BY updated_at LIMIT ?)",
     ];
     let started = std::time::Instant::now();
@@ -1614,7 +1615,7 @@ fn latency_history_bucket_seconds(hours: i64, task_count: i64) -> i64 {
 
 pub async fn list_alert_rules(db: &Database) -> Result<Vec<AlertRuleView>> {
     let rows = sqlx::query(
-        "SELECT id, name, metric, threshold, duration_minutes, aggregation, enabled \
+        "SELECT id, name, metric, threshold, duration_minutes, aggregation, all_servers, enabled \
          FROM alert_rules ORDER BY created_at",
     )
     .fetch_all(db.pool())
@@ -1640,6 +1641,7 @@ pub async fn list_alert_rules(db: &Database) -> Result<Vec<AlertRuleView>> {
                 threshold: row.try_get("threshold")?,
                 duration_minutes: row.try_get("duration_minutes")?,
                 aggregation: row.try_get("aggregation")?,
+                all_servers: row.try_get::<i64, _>("all_servers")? != 0,
                 enabled: row.try_get::<i64, _>("enabled")? != 0,
             })
         })
@@ -1653,7 +1655,7 @@ pub async fn create_alert_rule(db: &Database, input: &AlertRuleInput) -> Result<
     let mut transaction = db.pool().begin().await?;
     sqlx::query(db.sql(
         "INSERT INTO alert_rules(id, name, metric, threshold, duration_minutes, aggregation, \
-         enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         all_servers, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ))
     .bind(&id)
     .bind(input.name.trim())
@@ -1661,6 +1663,7 @@ pub async fn create_alert_rule(db: &Database, input: &AlertRuleInput) -> Result<
     .bind(input.threshold)
     .bind(input.duration_minutes)
     .bind(&input.aggregation)
+    .bind(i64::from(input.all_servers))
     .bind(i64::from(input.enabled))
     .bind(timestamp)
     .bind(timestamp)
@@ -1675,13 +1678,14 @@ pub async fn update_alert_rule(db: &Database, id: &str, input: &AlertRuleInput) 
     let mut transaction = db.pool().begin().await?;
     let result = sqlx::query(db.sql(
         "UPDATE alert_rules SET name=?, metric=?, threshold=?, duration_minutes=?, aggregation=?, \
-         enabled=?, updated_at=? WHERE id=?",
+         all_servers=?, enabled=?, updated_at=? WHERE id=?",
     ))
     .bind(input.name.trim())
     .bind(&input.metric)
     .bind(input.threshold)
     .bind(input.duration_minutes)
     .bind(&input.aggregation)
+    .bind(i64::from(input.all_servers))
     .bind(i64::from(input.enabled))
     .bind(now())
     .bind(id)
@@ -1721,10 +1725,6 @@ pub async fn delete_alert_rule(db: &Database, id: &str) -> Result<bool> {
         .bind(id)
         .execute(db.pool())
         .await?;
-    sqlx::query(db.sql("DELETE FROM alert_states WHERE state_key LIKE ?"))
-        .bind(format!("resource:{id}:%"))
-        .execute(db.pool())
-        .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -1748,8 +1748,7 @@ pub async fn evaluate_resource_rules(
             .unwrap_or(60);
     let mut evaluations = Vec::new();
     for rule in rules.into_iter().filter(|rule| {
-        rule.enabled
-            && (rule.server_ids.is_empty() || rule.server_ids.iter().any(|id| id == server_id))
+        rule.enabled && (rule.all_servers || rule.server_ids.iter().any(|id| id == server_id))
     }) {
         let (average_expression, minimum_expression) = match rule.metric.as_str() {
             "cpu" => ("cpu", "cpu_min"),
@@ -1797,31 +1796,140 @@ pub async fn evaluate_resource_rules(
     Ok(evaluations)
 }
 
-pub async fn update_alert_state(
-    db: &Database,
-    key: &str,
-    active: bool,
-    details: &serde_json::Value,
-) -> Result<bool> {
-    let previous =
-        sqlx::query_scalar::<_, i64>(db.sql("SELECT active FROM alert_states WHERE state_key=?"))
-            .bind(key)
-            .fetch_optional(db.pool())
-            .await?
-            .unwrap_or(0)
-            != 0;
+pub struct AlertObservation<'a> {
+    pub key: &'a str,
+    pub server_id: &'a str,
+    pub rule_id: Option<&'a str>,
+    pub active: bool,
+    pub details: serde_json::Value,
+    pub notification: Option<AlertNotification<'a>>,
+}
+
+pub struct AlertNotification<'a> {
+    pub title: &'a str,
+    pub server_name: &'a str,
+    pub message: &'a str,
+}
+
+pub async fn record_alert(db: &Database, observation: AlertObservation<'_>) -> Result<()> {
+    let mut transaction = if db.is_postgres() {
+        db.pool().begin().await?
+    } else {
+        db.pool().begin_with("BEGIN IMMEDIATE").await?
+    };
+    let timestamp = now();
     sqlx::query(db.sql(
-        "INSERT INTO alert_states(state_key, active, updated_at, details_json) VALUES (?, ?, ?, ?) \
-         ON CONFLICT(state_key) DO UPDATE SET active=excluded.active, updated_at=excluded.updated_at, \
-         details_json=excluded.details_json",
+        "INSERT INTO alert_states(state_key, server_id, rule_id, active, updated_at) \
+         VALUES (?, ?, ?, 0, ?) ON CONFLICT(state_key) DO NOTHING",
     ))
-    .bind(key)
-    .bind(i64::from(active))
-    .bind(now())
-    .bind(details.to_string())
-    .execute(db.pool())
+    .bind(observation.key)
+    .bind(observation.server_id)
+    .bind(observation.rule_id)
+    .bind(timestamp)
+    .execute(&mut *transaction)
     .await?;
-    Ok(previous != active)
+    // Serialize observations so the state change and its delivery event commit together.
+    let select = if db.is_postgres() {
+        "SELECT active FROM alert_states WHERE state_key=? FOR UPDATE"
+    } else {
+        "SELECT active FROM alert_states WHERE state_key=?"
+    };
+    let previous = sqlx::query_scalar::<_, i64>(db.sql(select))
+        .bind(observation.key)
+        .fetch_one(&mut *transaction)
+        .await?
+        != 0;
+    if previous != observation.active
+        && let Some(notification) = observation.notification
+    {
+        let row = sqlx::query(db.sql(
+            "SELECT COUNT(*) AS pending, COALESCE(MAX(sequence), 0) + 1 AS sequence \
+             FROM notification_outbox WHERE state_key=?",
+        ))
+        .bind(observation.key)
+        .fetch_one(&mut *transaction)
+        .await?;
+        // A prolonged outage must not create an unbounded queue for a flapping alert.
+        anyhow::ensure!(
+            row.try_get::<i64, _>("pending")? < 64,
+            "alert notification queue is full"
+        );
+        sqlx::query(db.sql(
+            "INSERT INTO notification_outbox(id, state_key, sequence, title, server_name, message, \
+             created_at, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ))
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(observation.key)
+        .bind(row.try_get::<i64, _>("sequence")?)
+        .bind(notification.title)
+        .bind(notification.server_name)
+        .bind(notification.message)
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query(
+        db.sql("UPDATE alert_states SET active=?, updated_at=?, details_json=? WHERE state_key=?"),
+    )
+    .bind(i64::from(observation.active))
+    .bind(timestamp)
+    .bind(observation.details.to_string())
+    .bind(observation.key)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub struct PendingAlertNotification {
+    pub id: String,
+    pub title: String,
+    pub server_name: String,
+    pub message: String,
+    pub attempts: i64,
+}
+
+pub async fn next_notification(db: &Database) -> Result<Option<PendingAlertNotification>> {
+    let row = sqlx::query(db.sql(
+        "SELECT id, title, server_name, message, attempts FROM notification_outbox AS pending \
+         WHERE next_attempt_at<=? AND NOT EXISTS ( \
+           SELECT 1 FROM notification_outbox AS earlier \
+           WHERE earlier.state_key=pending.state_key AND earlier.sequence<pending.sequence) \
+         ORDER BY created_at, id LIMIT 1",
+    ))
+    .bind(now())
+    .fetch_optional(db.pool())
+    .await?;
+    row.map(|row| {
+        Ok(PendingAlertNotification {
+            id: row.try_get("id")?,
+            title: row.try_get("title")?,
+            server_name: row.try_get("server_name")?,
+            message: row.try_get("message")?,
+            attempts: row.try_get("attempts")?,
+        })
+    })
+    .transpose()
+}
+
+pub async fn complete_notification(db: &Database, id: &str) -> Result<()> {
+    sqlx::query(db.sql("DELETE FROM notification_outbox WHERE id=?"))
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+pub async fn retry_notification(db: &Database, id: &str, attempts: i64) -> Result<()> {
+    let delay = (5_i64 << attempts.clamp(0, 10)).min(3600);
+    sqlx::query(db.sql("UPDATE notification_outbox SET attempts=?, next_attempt_at=? WHERE id=?"))
+        .bind(attempts.saturating_add(1))
+        .bind(now().saturating_add(delay))
+        .bind(id)
+        .execute(db.pool())
+        .await?;
+    Ok(())
 }
 
 pub async fn get_totp_secret(db: &Database, username: &str) -> Result<Option<(String, bool)>> {
@@ -2348,6 +2456,164 @@ mod tests {
         (db, identity)
     }
 
+    fn alert_input(server_ids: Vec<String>, all_servers: bool) -> AlertRuleInput {
+        AlertRuleInput {
+            name: "CPU".to_string(),
+            metric: "cpu".to_string(),
+            threshold: 80.0,
+            duration_minutes: 1,
+            aggregation: "average".to_string(),
+            all_servers,
+            enabled: true,
+            server_ids,
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_selected_servers_never_expands_alert_scope() {
+        let (db, identity) = test_server().await;
+        let a = identity.server_id;
+        let (b, _) = create_server(&db, &server_input(0)).await.unwrap();
+        let (c, _) = create_server(&db, &server_input(0)).await.unwrap();
+        let single = create_alert_rule(&db, &alert_input(vec![a.clone()], false))
+            .await
+            .unwrap();
+        let multiple = create_alert_rule(&db, &alert_input(vec![a.clone(), b.clone()], false))
+            .await
+            .unwrap();
+        let global = create_alert_rule(&db, &alert_input(vec![], true))
+            .await
+            .unwrap();
+        delete_server(&db, &a).await.unwrap();
+        let rules = list_alert_rules(&db).await.unwrap();
+        let single_rule = rules.iter().find(|rule| rule.id == single).unwrap();
+        assert!(!single_rule.all_servers);
+        assert!(single_rule.server_ids.is_empty());
+        assert_eq!(
+            rules
+                .iter()
+                .find(|rule| rule.id == multiple)
+                .unwrap()
+                .server_ids,
+            std::slice::from_ref(&b)
+        );
+        for (server_id, expected) in [(&b, vec![multiple, global.clone()]), (&c, vec![global])] {
+            let actual: HashSet<_> = evaluate_resource_rules(&db, server_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|evaluation| evaluation.rule.id)
+                .collect();
+            assert_eq!(actual, expected.into_iter().collect());
+        }
+    }
+
+    fn observation<'a>(
+        key: &'a str,
+        server_id: &'a str,
+        rule_id: Option<&'a str>,
+        active: bool,
+    ) -> AlertObservation<'a> {
+        AlertObservation {
+            key,
+            server_id,
+            rule_id,
+            active,
+            details: serde_json::json!({"active": active}),
+            notification: Some(AlertNotification {
+                title: "CPU",
+                server_name: "Node",
+                message: "Threshold changed",
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn alert_observations_are_atomic_and_the_queue_is_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", directory.path().join("alerts.db").display());
+        let db = crate::db::connect(&url).await.unwrap();
+        db.migrate().await.unwrap();
+        let (id, _) = create_server(&db, &server_input(0)).await.unwrap();
+        let (first, repeated) = tokio::join!(
+            record_alert(&db, observation("offline", &id, None, true)),
+            record_alert(&db, observation("offline", &id, None, true)),
+        );
+        first.unwrap();
+        repeated.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notification_outbox")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            1
+        );
+        for index in 1..64 {
+            record_alert(&db, observation("offline", &id, None, index % 2 == 0))
+                .await
+                .unwrap();
+        }
+        assert!(
+            record_alert(&db, observation("offline", &id, None, true))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT active FROM alert_states")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        db.pool().close().await;
+        let reopened = crate::db::connect(&url).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notification_outbox")
+                .fetch_one(reopened.pool())
+                .await
+                .unwrap(),
+            64
+        );
+        assert!(next_notification(&reopened).await.unwrap().is_some());
+        delete_server(&reopened, &id).await.unwrap();
+        assert!(next_notification(&reopened).await.unwrap().is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM alert_states")
+                .fetch_one(reopened.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        reopened.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_a_rule_cascades_only_its_states_and_notifications() {
+        let (db, identity) = test_server().await;
+        let id = &identity.server_id;
+        let rule = create_alert_rule(&db, &alert_input(vec![id.clone()], false))
+            .await
+            .unwrap();
+        record_alert(&db, observation("resource", id, Some(&rule), true))
+            .await
+            .unwrap();
+        record_alert(&db, observation("offline", id, None, true))
+            .await
+            .unwrap();
+        delete_alert_rule(&db, &rule).await.unwrap();
+        for table in ["alert_states", "notification_outbox"] {
+            assert_eq!(
+                sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+                    "SELECT state_key FROM {table}"
+                )))
+                .fetch_all(db.pool())
+                .await
+                .unwrap(),
+                ["offline"]
+            );
+        }
+    }
+
     #[tokio::test]
     async fn agent_install_tokens_do_not_replace_the_primary_token() {
         let db = crate::db::connect("sqlite::memory:").await.unwrap();
@@ -2594,6 +2860,7 @@ mod tests {
                         threshold: 50.0,
                         duration_minutes: 2,
                         aggregation: aggregation.to_string(),
+                        all_servers: false,
                         enabled: true,
                         server_ids: vec![identity.server_id.clone()],
                     },
@@ -2907,10 +3174,12 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO alert_states(state_key, active, updated_at, details_json) VALUES \
-             ('inactive-old', 0, ?, '{}'), ('active-old', 1, ?, '{}')",
+            "INSERT INTO alert_states(state_key, server_id, active, updated_at, details_json) VALUES \
+             ('inactive-old', ?, 0, ?, '{}'), ('active-old', ?, 1, ?, '{}')",
         )
+        .bind(&server_id)
         .bind(old)
+        .bind(&server_id)
         .bind(old)
         .execute(db.pool())
         .await
@@ -2988,8 +3257,8 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
-        sqlx::query("INSERT INTO alert_states(state_key,active,updated_at) VALUES ('active',1,?),('expired',0,?)")
-            .bind(old).bind(old).execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO alert_states(state_key,server_id,active,updated_at) VALUES ('active',?,1,?),('expired',?,0,?)")
+            .bind(&identity.server_id).bind(old).bind(&identity.server_id).bind(old).execute(db.pool()).await.unwrap();
         cleanup_database_with_budget(&db, 1, 1, std::time::Duration::ZERO)
             .await
             .unwrap();

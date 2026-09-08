@@ -83,7 +83,6 @@ try {
   });
   upgradeServer.listen(0, "127.0.0.1");
   await once(upgradeServer, "listening");
-  websocketServer.on("headers", (headers) => headers.push("X-NodeFlare-Agent-Protocol: 2"));
   let samples = 0;
   websocketServer.on("connection", (socket) => {
     let persistedThrough = 0;
@@ -143,7 +142,7 @@ try {
       socket.send(JSON.stringify({
         type: "remote_task", task_id: taskId,
         command: process.platform === "win32"
-          ? "Start-Sleep -Seconds 2; Write-Output remote-finished"
+          ? "powershell -NoProfile -Command \"Start-Sleep -Seconds 2; Write-Output remote-finished\""
           : "sleep 2; printf remote-finished",
       }));
     }

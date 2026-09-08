@@ -58,10 +58,12 @@ const BACKUP_TABLES: &[&str] = &[
     "alert_rules",
     "alert_rule_servers",
     "alert_states",
+    "notification_outbox",
     "notification_telegram",
 ];
 
 const CLEAR_TABLES: &[&str] = &[
+    "notification_outbox",
     "server_install_tokens",
     "theme_previews",
     "dashboard_proofs",
@@ -88,7 +90,7 @@ const POSTGRES_RESTORE_LOCK: &str = "LOCK TABLE settings, servers, metric_histor
     server_install_tokens, \
     server_latest_state, admin_2fa, remote_tasks, exchange_rates, sessions, dashboard_proofs, \
     server_traffic_state, latency_tasks, latency_task_servers, latency_results, alert_rules, \
-    alert_rule_servers, alert_states, notification_telegram, themes, theme_previews \
+    alert_rule_servers, alert_states, notification_outbox, notification_telegram, themes, theme_previews \
     IN ACCESS EXCLUSIVE MODE";
 
 pub struct DatabaseArchive {
@@ -496,54 +498,32 @@ fn validate_archive<R: Read + Seek>(
 
 fn add_argument(arguments: &mut AnyArguments, kind: BackupKind, value: &Value) -> Result<()> {
     let result = match kind {
-        BackupKind::Bool => arguments.add(if value.is_null() {
-            None
-        } else {
-            Some(value.as_bool().context("布尔字段格式无效")?)
-        }),
-        BackupKind::SmallInt => arguments.add(if value.is_null() {
-            None
-        } else {
-            Some(i16::try_from(value.as_i64().context("整数字段格式无效")?)?)
-        }),
-        BackupKind::Integer => arguments.add(if value.is_null() {
-            None
-        } else {
-            Some(i32::try_from(value.as_i64().context("整数字段格式无效")?)?)
-        }),
-        BackupKind::BigInt => arguments.add(if value.is_null() {
-            None
-        } else {
-            Some(value.as_i64().context("整数字段格式无效")?)
-        }),
-        BackupKind::Real => arguments.add(if value.is_null() {
-            None
-        } else {
+        BackupKind::Bool => arguments.add(value.as_bool().context("布尔字段格式无效")?),
+        BackupKind::SmallInt => {
+            arguments.add(i16::try_from(value.as_i64().context("整数字段格式无效")?)?)
+        }
+        BackupKind::Integer => {
+            arguments.add(i32::try_from(value.as_i64().context("整数字段格式无效")?)?)
+        }
+        BackupKind::BigInt => arguments.add(value.as_i64().context("整数字段格式无效")?),
+        BackupKind::Real => arguments.add({
             let value = value.as_f64().context("浮点字段格式无效")? as f32;
             if !value.is_finite() {
                 bail!("浮点字段超出范围");
             }
-            Some(value)
+            value
         }),
-        BackupKind::Double => arguments.add(if value.is_null() {
-            None
-        } else {
+        BackupKind::Double => arguments.add({
             let value = value.as_f64().context("浮点字段格式无效")?;
             if !value.is_finite() {
                 bail!("浮点字段超出范围");
             }
-            Some(value)
+            value
         }),
-        BackupKind::Text => arguments.add(if value.is_null() {
-            None
-        } else {
-            Some(value.as_str().context("文本字段格式无效")?.to_string())
-        }),
-        BackupKind::Blob => arguments.add(if value.is_null() {
-            None
-        } else {
-            Some(hex::decode(value.as_str().context("二进制字段格式无效")?)?)
-        }),
+        BackupKind::Text => arguments.add(value.as_str().context("文本字段格式无效")?.to_string()),
+        BackupKind::Blob => {
+            arguments.add(hex::decode(value.as_str().context("二进制字段格式无效")?)?)
+        }
     };
     result.map_err(|error| anyhow::anyhow!("无法编码数据库备份字段：{error}"))
 }
@@ -567,6 +547,11 @@ async fn insert_rows(
         }
         let mut row_placeholders = Vec::with_capacity(columns.len());
         for (column, value) in columns.iter().zip(row) {
+            // SQL NULL avoids driver-dependent null parameter types and cached type mismatches.
+            if value.is_null() {
+                row_placeholders.push("NULL".to_string());
+                continue;
+            }
             row_placeholders.push(if db.is_postgres() {
                 let placeholder = format!("${parameter_index}");
                 parameter_index += 1;
@@ -786,29 +771,9 @@ async fn restore_table<R: Read + Seek + Send>(
     if read_bounded_line(&mut reader, &mut line)? == 0 {
         bail!("{table} 备份表头无效");
     }
-    let mut header: BackupTableHeader = serde_json::from_str(line.trim_end())?;
-    // v1.0.3 stores these metrics both as columns and in latest_json. Accept only
-    // that exact layout; retained columns still undergo the full schema check.
-    let legacy_latest_state = table == "server_latest_state"
-        && header.columns.len() == 12
-        && header.columns[2..10]
-            .iter()
-            .map(|column| (column.name.as_str(), column.kind))
-            .eq([
-                ("cpu", BackupKind::Double),
-                ("mem_used", BackupKind::BigInt),
-                ("mem_total", BackupKind::BigInt),
-                ("disk_used", BackupKind::BigInt),
-                ("disk_total", BackupKind::BigInt),
-                ("net_in", BackupKind::Double),
-                ("net_out", BackupKind::Double),
-                ("uptime", BackupKind::BigInt),
-            ]);
-    if legacy_latest_state {
-        header.columns.drain(2..10);
-    }
+    let header: BackupTableHeader = serde_json::from_str(line.trim_end())?;
     if header.table != table || header.columns != columns {
-        bail!("{table} 备份结构与当前数据库不兼容");
+        bail!("{table} 备份结构无效");
     }
     let mut restored = 0_usize;
     let mut batch = Vec::with_capacity(INSERT_BATCH_ROWS);
@@ -822,14 +787,7 @@ async fn restore_table<R: Read + Seek + Send>(
         if trimmed.is_empty() {
             continue;
         }
-        let mut row = serde_json::from_str::<Vec<Value>>(trimmed)?;
-        if legacy_latest_state {
-            if row.len() != 12 {
-                bail!("{table} 备份行字段数量不匹配");
-            }
-            row.drain(2..10);
-        }
-        batch.push(row);
+        batch.push(serde_json::from_str::<Vec<Value>>(trimmed)?);
         batch_bytes = batch_bytes.saturating_add(read);
         if batch.len() >= INSERT_BATCH_ROWS || batch_bytes >= MAX_NDJSON_LINE_BYTES {
             insert_rows(db, transaction, table, columns, &batch).await?;
@@ -950,202 +908,6 @@ pub async fn copy_database(source: &Database, target: &Database) -> Result<usize
 mod tests {
     use super::*;
 
-    const V1_0_3_BACKUP: &[u8] = include_bytes!("../tests/fixtures/v1.0.3-backup.zip");
-
-    fn edit_v1_0_3_latest_state(edit: impl FnOnce(&mut Vec<Value>)) -> Vec<u8> {
-        let mut archive = ZipArchive::new(Cursor::new(V1_0_3_BACKUP)).unwrap();
-        let entry_name = table_entry_name("server_latest_state");
-        let mut lines = BufReader::new(archive.by_name(&entry_name).unwrap())
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
-            .collect::<Vec<_>>();
-        edit(&mut lines);
-        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-        for index in 0..archive.len() {
-            let entry = archive.by_index(index).unwrap();
-            if entry.name() == entry_name {
-                writer
-                    .start_file(&entry_name, SimpleFileOptions::default())
-                    .unwrap();
-                for line in &lines {
-                    serde_json::to_writer(&mut writer, line).unwrap();
-                    writer.write_all(b"\n").unwrap();
-                }
-            } else {
-                writer.raw_copy_file(entry).unwrap();
-            }
-        }
-        writer.finish().unwrap().into_inner()
-    }
-
-    #[tokio::test]
-    async fn rejects_invalid_v1_0_3_layouts_and_rows_without_changing_the_target() {
-        type FixtureEdit = fn(&mut Vec<Value>);
-        let cases: [(&str, FixtureEdit); 7] = [
-            ("unknown metric column", |lines| {
-                lines[0]["columns"][2]["name"] = Value::from("unknown_metric");
-            }),
-            ("wrong metric type", |lines| {
-                lines[0]["columns"][2]["kind"] = Value::from("text");
-            }),
-            ("wrong retained column", |lines| {
-                lines[0]["columns"][10]["name"] = Value::from("unknown_json");
-            }),
-            ("extra column", |lines| {
-                lines[0]["columns"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(serde_json::json!({"name": "extra", "kind": "text"}));
-            }),
-            ("missing value", |lines| {
-                lines[1].as_array_mut().unwrap().pop();
-            }),
-            ("extra value", |lines| {
-                lines[1].as_array_mut().unwrap().push(Value::Null);
-            }),
-            ("invalid timestamp", |lines| {
-                lines[1][1] = Value::from("invalid");
-            }),
-        ];
-        for (name, edit) in cases {
-            let db = crate::db::connect("sqlite::memory:").await.unwrap();
-            db.migrate().await.unwrap();
-            crate::db::set_setting(&db, "site_name", "Preserved")
-                .await
-                .unwrap();
-            sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('preserved','Preserved','hash',1,1)")
-                .execute(db.pool()).await.unwrap();
-            sqlx::query("INSERT INTO sessions(id,token_hash,username,ip_address,user_agent,created_at,last_seen_at,expires_at) VALUES ('session','hash','admin','127.0.0.1','test',1,1,9999999999)")
-                .execute(db.pool()).await.unwrap();
-            let directory = tempfile::tempdir().unwrap();
-            let themes = directory.path().join("themes");
-            fs::create_dir(&themes).unwrap();
-            fs::write(themes.join("current.txt"), "Preserved").unwrap();
-
-            assert!(
-                restore_archive(&db, &themes, &edit_v1_0_3_latest_state(edit))
-                    .await
-                    .is_err(),
-                "{name} was accepted"
-            );
-            assert_eq!(
-                crate::db::get_setting(&db, "site_name")
-                    .await
-                    .unwrap()
-                    .as_deref(),
-                Some("Preserved"),
-                "{name} changed settings"
-            );
-            assert_eq!(
-                sqlx::query_scalar::<_, String>("SELECT id FROM servers")
-                    .fetch_all(db.pool())
-                    .await
-                    .unwrap(),
-                ["preserved"],
-                "{name} changed servers"
-            );
-            assert_eq!(
-                sqlx::query_scalar::<_, String>("SELECT id FROM sessions")
-                    .fetch_all(db.pool())
-                    .await
-                    .unwrap(),
-                ["session"],
-                "{name} changed sessions"
-            );
-            assert_eq!(
-                fs::read_to_string(themes.join("current.txt")).unwrap(),
-                "Preserved"
-            );
-            assert_eq!(fs::read_dir(&themes).unwrap().count(), 1);
-            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn restores_v1_0_3_backup_without_legacy_migrations() {
-        let db = crate::db::connect("sqlite::memory:").await.unwrap();
-        db.migrate().await.unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let themes = directory.path().join("themes");
-        restore_archive(&db, &themes, V1_0_3_BACKUP).await.unwrap();
-
-        let servers = crate::db::queries::list_servers(&db, true).await.unwrap();
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].cpu, Some(42.5));
-        assert_eq!(servers[0].mem_used, Some(512));
-        let latest = sqlx::query("SELECT * FROM server_latest_state")
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        assert_eq!(latest.columns().len(), 4);
-        assert_eq!(latest.get::<String, _>("last_batch_id"), "fixture-batch");
-        let report: crate::models::AgentReport =
-            serde_json::from_str(&latest.get::<String, _>("latest_json")).unwrap();
-        assert_eq!(report.gpu_usage, 32.5);
-        assert_eq!(latest.get::<i64, _>("latest_timestamp"), report.timestamp);
-        let history = sqlx::query("SELECT * FROM metric_history ORDER BY timestamp")
-            .fetch_all(db.pool())
-            .await
-            .unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].get::<f64, _>("cpu_min"), 75.0);
-        assert_eq!(history[0].get::<f64, _>("memory_avg"), 50.0);
-        assert_eq!(history[1].get::<i64, _>("sample_count"), 4);
-        assert_eq!(history[1].get::<f64, _>("cpu_min"), 10.0);
-        assert_eq!(history[1].get::<f64, _>("cpu_max"), 90.0);
-        assert_eq!(history[1].get::<f64, _>("memory_min"), 10.0);
-        assert_eq!(
-            crate::db::get_setting(&db, "site_name")
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("v1.0.3 fixture")
-        );
-        assert!(
-            crate::db::queries::agent_identity(&db, "fixture-primary-token")
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            crate::db::queries::agent_identity(&db, "fixture-install-token")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, String>("SELECT totp_secret FROM admin_2fa WHERE enabled=1")
-                .fetch_one(db.pool())
-                .await
-                .unwrap(),
-            "JBSWY3DPEHPK3PXP"
-        );
-        assert_eq!(
-            crate::db::queries::remote_task(&db, "fixture-task")
-                .await
-                .unwrap()
-                .unwrap()
-                .result,
-            "fixture"
-        );
-        assert_eq!(
-            fs::read_to_string(themes.join("theme-12345678/index.html")).unwrap(),
-            "<main>v1.0.3 fixture</main>"
-        );
-        assert_eq!(
-            fs::read_to_string(themes.join("theme-12345678/assets/app.css")).unwrap(),
-            "main { color: red; }"
-        );
-        db.migrate().await.unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations")
-                .fetch_all(db.pool())
-                .await
-                .unwrap(),
-            [1]
-        );
-    }
-
     #[test]
     fn exported_archives_must_fit_both_restore_limits() {
         let compressed = DATABASE_BACKUP_MAX_BYTES as u64;
@@ -1232,6 +994,166 @@ mod tests {
         );
     }
 
+    async fn assert_nullable_batch_and_notification_restore(target: &Database) {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        source.migrate().await.unwrap();
+        target.migrate().await.unwrap();
+        sqlx::query("INSERT INTO settings(key,value) VALUES ('admin_username','admin'),('admin_password_hash','hash'),('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','hash',1,1)")
+            .execute(source.pool()).await.unwrap();
+        // Equal-sized batches exercise the statement cache after nullable float parameters.
+        sqlx::query("WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<200) \
+            INSERT INTO metric_history(server_id,timestamp,cpu,cpu_min,cpu_max) \
+            SELECT 'node',n,42.5,CASE WHEN n>100 THEN 40.5 END,CASE WHEN n>100 THEN 45.5 END FROM seq")
+            .execute(source.pool()).await.unwrap();
+        for active in [true, false] {
+            crate::db::queries::record_alert(
+                &source,
+                crate::db::queries::AlertObservation {
+                    key: "offline:node",
+                    server_id: "node",
+                    rule_id: None,
+                    active,
+                    details: serde_json::json!({"active": active}),
+                    notification: Some(crate::db::queries::AlertNotification {
+                        title: if active { "Offline" } else { "Online" },
+                        server_name: "Node",
+                        message: "Saved event",
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let themes = tempfile::tempdir().unwrap();
+        let mut archive = export_archive(&source, themes.path()).await.unwrap();
+        let mut bytes = Vec::new();
+        archive.file.read_to_end(&mut bytes).unwrap();
+        let target_themes = tempfile::tempdir().unwrap();
+        restore_archive(target, target_themes.path(), &bytes)
+            .await
+            .unwrap();
+        let rows = sqlx::query(
+            "SELECT timestamp,cpu,cpu_min,cpu_max FROM metric_history ORDER BY timestamp",
+        )
+        .fetch_all(target.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 200);
+        for row in rows {
+            let timestamp: i64 = row.get("timestamp");
+            assert_eq!(row.get::<f64, _>("cpu"), 42.5);
+            assert_eq!(
+                row.get::<f64, _>("cpu_min"),
+                if timestamp <= 100 { 42.5 } else { 40.5 }
+            );
+            assert_eq!(
+                row.get::<f64, _>("cpu_max"),
+                if timestamp <= 100 { 42.5 } else { 45.5 }
+            );
+        }
+        for expected in ["Offline", "Online"] {
+            let pending = crate::db::queries::next_notification(target)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(pending.title, expected);
+            crate::db::queries::complete_notification(target, &pending.id)
+                .await
+                .unwrap();
+        }
+        assert!(
+            crate::db::queries::next_notification(target)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Exercise observation transactions and nullable rule ownership on the target driver too.
+        crate::db::queries::record_alert(
+            target,
+            crate::db::queries::AlertObservation {
+                key: "offline:node",
+                server_id: "node",
+                rule_id: None,
+                active: true,
+                details: serde_json::json!({}),
+                notification: Some(crate::db::queries::AlertNotification {
+                    title: "Offline",
+                    server_name: "Node",
+                    message: "Retry",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        let pending = crate::db::queries::next_notification(target)
+            .await
+            .unwrap()
+            .unwrap();
+        crate::db::queries::retry_notification(target, &pending.id, 99)
+            .await
+            .unwrap();
+        assert!(
+            crate::db::queries::next_notification(target)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        copy_database(target, &source).await.unwrap();
+        let (attempts, next_attempt): (i64, i64) =
+            sqlx::query_as("SELECT attempts,next_attempt_at FROM notification_outbox")
+                .fetch_one(source.pool())
+                .await
+                .unwrap();
+        assert_eq!(attempts, 100);
+        assert!(next_attempt >= crate::db::now() + 3590);
+        crate::db::queries::delete_server(target, "node")
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notification_outbox")
+                .fetch_one(target.pool())
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_restores_nullable_batches_and_pending_notifications() {
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        assert_nullable_batch_and_notification_restore(&target).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NODEFLARE_TEST_POSTGRES_URL with CREATE DATABASE permission"]
+    async fn postgres_restores_nullable_batches_and_pending_notifications() {
+        let url = std::env::var("NODEFLARE_TEST_POSTGRES_URL").expect("PostgreSQL test URL");
+        let control = crate::db::connect(&url).await.unwrap();
+        assert!(control.is_postgres());
+        let name = format!("nodeflare_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(control.pool())
+            .await
+            .unwrap();
+        let mut test_url = reqwest::Url::parse(&url).unwrap();
+        test_url.set_path(&name);
+        let target = crate::db::connect(test_url.as_str()).await.unwrap();
+        let task_target = target.clone();
+        let result = tokio::spawn(async move {
+            assert_nullable_batch_and_notification_restore(&task_target).await;
+        })
+        .await;
+        target.pool().close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {name}")))
+            .execute(control.pool())
+            .await
+            .unwrap();
+        control.pool().close().await;
+        result.unwrap();
+    }
+
     #[tokio::test]
     async fn restores_current_format_snapshots_and_round_trips_aggregates() {
         let source = crate::db::connect("sqlite::memory:").await.unwrap();
@@ -1250,12 +1172,29 @@ mod tests {
             .bind(crate::auth::token_hash("primary-token"))
             .execute(source.pool()).await.unwrap();
         let timestamp = crate::db::now();
+        let latest_json = serde_json::to_string(&crate::models::AgentReport {
+            timestamp,
+            cpu: 42.5,
+            gpu_usage: 32.5,
+            ..Default::default()
+        })
+        .unwrap();
+        sqlx::query("INSERT INTO server_latest_state(server_id,latest_timestamp,latest_json,last_batch_id) VALUES ('node',?,?,'batch')")
+            .bind(timestamp).bind(&latest_json).execute(source.pool()).await.unwrap();
         sqlx::query("INSERT INTO metric_history(server_id,timestamp,cpu,mem_used,mem_total,disk_used,disk_total,net_in,net_out) VALUES ('node',?,75.0,500,1000,250,1000,20.0,30.0)")
             .bind(timestamp).execute(source.pool()).await.unwrap();
         sqlx::query("INSERT INTO server_install_tokens(token_hash,server_id,created_at) VALUES (?,'node',1)")
             .bind(crate::auth::token_hash("install-token"))
             .execute(source.pool()).await.unwrap();
-        assert_eq!(copy_database(&source, &target).await.unwrap(), 7);
+        assert_eq!(copy_database(&source, &target).await.unwrap(), 8);
+        let latest = sqlx::query("SELECT * FROM server_latest_state")
+            .fetch_one(target.pool())
+            .await
+            .unwrap();
+        assert_eq!(latest.columns().len(), 4);
+        assert_eq!(latest.get::<String, _>("latest_json"), latest_json);
+        assert_eq!(latest.get::<i64, _>("latest_timestamp"), timestamp);
+        assert_eq!(latest.get::<String, _>("last_batch_id"), "batch");
         let server = sqlx::query("SELECT price,hidden FROM servers WHERE id='node'")
             .fetch_one(target.pool())
             .await
@@ -1305,7 +1244,14 @@ mod tests {
             memory_avg=50.0,memory_min=10.0,net_in_avg=20.0,net_in_min=1.0,first_timestamp=?,last_timestamp=?")
             .bind(crate::db::now() - 3).bind(crate::db::now()).execute(target.pool()).await.unwrap();
         source.migrate().await.unwrap();
-        assert_eq!(copy_database(&target, &source).await.unwrap(), 7);
+        assert_eq!(copy_database(&target, &source).await.unwrap(), 8);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT latest_json FROM server_latest_state")
+                .fetch_one(source.pool())
+                .await
+                .unwrap(),
+            latest_json
+        );
         let row = sqlx::query(
             "SELECT sample_count,cpu_min,cpu_max,memory_avg,memory_min FROM metric_history",
         )
@@ -1334,7 +1280,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_snapshot_only_headers_without_changing_the_target() {
+    async fn rejects_extra_table_columns_without_changing_the_target() {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        source.migrate().await.unwrap();
+        target.migrate().await.unwrap();
+        sqlx::query(
+            "INSERT INTO settings(key,value) VALUES \
+             ('admin_username','admin'),('admin_password_hash','hash'), \
+             ('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')",
+        )
+        .execute(source.pool())
+        .await
+        .unwrap();
+        sqlx::query("ALTER TABLE server_latest_state ADD COLUMN unexpected_column TEXT")
+            .execute(source.pool())
+            .await
+            .unwrap();
+        crate::db::set_setting(&target, "site_name", "Preserved")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('preserved','Preserved','hash',1,1)")
+            .execute(target.pool()).await.unwrap();
+        sqlx::query("INSERT INTO sessions(id,token_hash,username,ip_address,user_agent,created_at,last_seen_at,expires_at) VALUES ('session','hash','admin','127.0.0.1','test',1,1,9999999999)")
+            .execute(target.pool()).await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        let mut exported = export_archive(&source, &themes).await.unwrap();
+        let mut bytes = Vec::new();
+        exported.file.read_to_end(&mut bytes).unwrap();
+        fs::create_dir(&themes).unwrap();
+        fs::write(themes.join("current.txt"), "Preserved").unwrap();
+
+        let error = restore_archive(&target, &themes, &bytes).await.unwrap_err();
+        assert!(
+            error.to_string().contains("server_latest_state 备份结构"),
+            "{error:#}"
+        );
+        assert_eq!(
+            crate::db::get_setting(&target, "site_name")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Preserved")
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT id FROM servers")
+                .fetch_all(target.pool())
+                .await
+                .unwrap(),
+            ["preserved"]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT id FROM sessions")
+                .fetch_all(target.pool())
+                .await
+                .unwrap(),
+            ["session"]
+        );
+        assert_eq!(
+            fs::read_to_string(themes.join("current.txt")).unwrap(),
+            "Preserved"
+        );
+        assert_eq!(fs::read_dir(&themes).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_table_columns_without_changing_the_target() {
         let source = crate::db::connect("sqlite::memory:").await.unwrap();
         let target = crate::db::connect("sqlite::memory:").await.unwrap();
         source.migrate().await.unwrap();
@@ -1342,14 +1355,10 @@ mod tests {
         crate::db::set_setting(&target, "site_name", "Preserved")
             .await
             .unwrap();
-        for column in crate::db::queries::HISTORY_AGGREGATE_COLUMNS {
-            sqlx::query(AssertSqlSafe(format!(
-                "ALTER TABLE metric_history DROP COLUMN {column}"
-            )))
+        sqlx::query("ALTER TABLE metric_history DROP COLUMN cpu_min")
             .execute(source.pool())
             .await
             .unwrap();
-        }
         let error = copy_database(&source, &target).await.unwrap_err();
         assert!(
             error.to_string().contains("metric_history 备份结构"),

@@ -75,8 +75,6 @@ const PUBLIC_IP_V6_URL: &str = "https://ipv6.icanhazip.com/";
 const RUNTIME_STATS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CLOCK_CALIBRATION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOCK_CALIBRATION_MIN_CHANGE_MS: i64 = 20_000;
-const AGENT_PROTOCOL_VERSION: &str = "2";
-const AGENT_CAPABILITIES: &str = "metrics-v1,config-v1,remote-exec-v1,task-ack-v1";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -1760,14 +1758,6 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
         request
             .headers_mut()
             .insert("User-Agent", format!("nodeflare-agent/{VERSION}").parse()?);
-        request.headers_mut().insert(
-            "X-NodeFlare-Agent-Protocol",
-            AGENT_PROTOCOL_VERSION.parse()?,
-        );
-        request.headers_mut().insert(
-            "X-NodeFlare-Agent-Capabilities",
-            AGENT_CAPABILITIES.parse()?,
-        );
         let stream = connect_live_stream(&url, deadline)?;
         match client_tls(request, stream) {
             Ok(connected) => break connected,
@@ -1796,16 +1786,6 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
         .get("date")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| clock_offset_from_http_date(value, started_ms, ended_ms));
-    if !response
-        .headers()
-        .get("x-nodeflare-agent-protocol")
-        .is_some_and(|value| value == AGENT_PROTOCOL_VERSION)
-    {
-        return Err(format!(
-            "backend protocol mismatch; update the backend to protocol {AGENT_PROTOCOL_VERSION}"
-        )
-        .into());
-    }
     Ok((socket, clock_offset_ms))
 }
 
@@ -1935,17 +1915,28 @@ struct CapturedOutput {
     truncated: bool,
 }
 
-fn capture_remote_output<R>(reader: R) -> mpsc::Receiver<CapturedOutput>
+fn capture_remote_output<R>(mut reader: R) -> mpsc::Receiver<CapturedOutput>
 where
     R: Read + Send + 'static,
 {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let mut bytes = Vec::new();
-        let mut reader = reader.take(REMOTE_STREAM_OUTPUT_BYTES + 1);
-        let _ = reader.read_to_end(&mut bytes);
-        let truncated = bytes.len() > REMOTE_STREAM_OUTPUT_BYTES as usize;
-        bytes.truncate(REMOTE_STREAM_OUTPUT_BYTES as usize);
+        let mut truncated = false;
+        let mut buffer = [0_u8; 8192];
+        // Keep draining after the limit so verbose commands do not receive SIGPIPE.
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let retained = read.min(REMOTE_STREAM_OUTPUT_BYTES as usize - bytes.len());
+                    bytes.extend_from_slice(&buffer[..retained]);
+                    truncated |= retained < read;
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
         let _ = sender.send(CapturedOutput { bytes, truncated });
     });
     receiver
@@ -3548,12 +3539,12 @@ mod tests {
     use super::{
         CLOCK_CALIBRATION_MAX_AGE, CapturedOutput, CliOptions, ClockCalibration,
         GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, MAX_PENDING_LATENCY_RESULTS,
-        PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES, RemoteExecutor,
-        RemoteTaskJournalEntry, RemoteTaskMessage, Report, TaskResultMessage,
-        UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval, ack_wss_interval, advance_deadline,
-        clock_offset_from_http_date, corrected_timestamp, execute_remote_task_with_timeout,
-        gpu_name_from_uevent, is_public_probe_ip, live_endpoint, live_update_payload,
-        monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
+        PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES,
+        REMOTE_STREAM_OUTPUT_BYTES, RemoteExecutor, RemoteTaskJournalEntry, RemoteTaskMessage,
+        Report, TaskResultMessage, UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval,
+        ack_wss_interval, advance_deadline, clock_offset_from_http_date, corrected_timestamp,
+        execute_remote_task_with_timeout, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
+        live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
         parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
         parse_system_profiler_gpu_names, ping_latencies, ping_latency, prune_report_samples,
         release_asset_sha256, remote_result_text, sanitize_latency_tasks, update_check_jitter,
@@ -3755,16 +3746,45 @@ mod tests {
     }
 
     #[test]
-    fn remote_command_output_is_bounded() {
+    fn combined_remote_output_is_bounded_at_utf8_boundaries() {
         let result = remote_result_text(
             &CapturedOutput {
-                bytes: vec![b'x'; REMOTE_RESULT_OUTPUT_BYTES + 100],
+                bytes: vec![b'x'; REMOTE_STREAM_OUTPUT_BYTES as usize],
                 truncated: true,
             },
-            &CapturedOutput::default(),
+            &CapturedOutput {
+                bytes: "输出"
+                    .repeat(REMOTE_STREAM_OUTPUT_BYTES as usize / 6)
+                    .into_bytes(),
+                truncated: false,
+            },
         );
         assert!(result.len() < REMOTE_RESULT_OUTPUT_BYTES + 64);
         assert!(result.ends_with("[输出已截断]"));
+        assert!(!result.contains('\u{fffd}'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verbose_remote_commands_finish_after_output_is_truncated() {
+        for command in [
+            "set -e; head -c 1048576 /dev/zero; printf completed >&2",
+            "set -e; head -c 1048576 /dev/zero >&2; printf completed",
+        ] {
+            let result = execute_remote_task_with_timeout(
+                &RemoteTaskMessage {
+                    message_type: "remote_task".to_string(),
+                    task_id: "verbose-output".to_string(),
+                    command: command.to_string(),
+                },
+                Duration::from_secs(5),
+            );
+            assert_eq!(result.status, "success");
+            assert_eq!(result.exit_code, Some(0));
+            assert!(result.result.contains("completed"));
+            assert!(result.result.ends_with("[输出已截断]"));
+            assert!(result.result.len() < REMOTE_RESULT_OUTPUT_BYTES + 64);
+        }
     }
 
     fn temporary_remote_task_journal(label: &str) -> PathBuf {

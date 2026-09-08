@@ -307,6 +307,7 @@ export interface AlertRule {
   threshold: number;
   duration_minutes: number;
   aggregation: AlertAggregation;
+  all_servers: boolean;
   enabled: boolean;
   server_ids: string[];
 }

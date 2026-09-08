@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::models::{LoginSessionView, PublicConfig, SettingsInput, SettingsView};
 use anyhow::{Context, Result};
 use sqlx::any::{AnyPoolOptions, install_default_drivers};
-use sqlx::migrate::{MigrateError, Migrator};
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
@@ -191,21 +191,10 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        let result = match self.kind {
+        match self.kind {
             DatabaseKind::Sqlite => SQLITE_MIGRATOR.run(&self.pool).await,
             DatabaseKind::Postgres => POSTGRES_MIGRATOR.run(&self.pool).await,
-        };
-        if let Err(error) = result {
-            if matches!(
-                error,
-                MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_)
-            ) {
-                return Err(anyhow::Error::new(error).context(
-                    "数据库结构与当前版本不匹配；请使用匹配版本的程序，或配置全新数据库",
-                ));
-            }
-            return Err(error.into());
-        }
+        }?;
         Ok(())
     }
 }
@@ -455,7 +444,6 @@ pub async fn initialize(pool: &Database, config: &Config) -> Result<()> {
         ("offline_alert_minutes", "5".to_string()),
         ("expiry_alert_days", "7".to_string()),
         ("traffic_alert_percentage", "80".to_string()),
-        ("history_cache_version", "0".to_string()),
     ];
 
     let mut transaction = pool.pool().begin().await?;
@@ -501,9 +489,6 @@ pub async fn initialize(pool: &Database, config: &Config) -> Result<()> {
             .await?;
         }
         sqlx::query("DELETE FROM sessions")
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("DELETE FROM settings WHERE key LIKE 'session_%'")
             .execute(&mut *transaction)
             .await?;
         tracing::info!(timestamp = now, "initialized password scheme");
@@ -1076,28 +1061,6 @@ mod tests {
                 .unwrap(),
             0
         );
-    }
-
-    #[tokio::test]
-    async fn mismatched_migrations_are_rejected_without_rewriting_data() {
-        for statement in [
-            "UPDATE _sqlx_migrations SET checksum=X'' WHERE version=1",
-            "INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES (2,'retired',1,X'',0)",
-        ] {
-            let db = connect("sqlite::memory:").await.unwrap();
-            db.migrate().await.unwrap();
-            set_setting(&db, "site_name", "Preserved").await.unwrap();
-            sqlx::query(sqlx::AssertSqlSafe(statement))
-                .execute(db.pool())
-                .await
-                .unwrap();
-            let error = db.migrate().await.unwrap_err();
-            assert!(error.to_string().contains("全新数据库"), "{error:#}");
-            assert_eq!(
-                get_setting(&db, "site_name").await.unwrap().as_deref(),
-                Some("Preserved")
-            );
-        }
     }
 
     #[tokio::test]

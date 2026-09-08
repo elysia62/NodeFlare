@@ -11,6 +11,7 @@ const emptyRule: AlertRuleInput = {
   threshold: 90,
   duration_minutes: 5,
   aggregation: "average",
+  all_servers: true,
   enabled: true,
   server_ids: [],
 };
@@ -31,7 +32,6 @@ export function AlertRuleManager({ servers, onError, onNotice }: {
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [editing, setEditing] = useState<AlertRule | "new" | null>(null);
   const [form, setForm] = useState<AlertRuleInput>(emptyRule);
-  const [allServers, setAllServers] = useState(true);
   const [busy, setBusy] = useState(false);
   const editorDialog = useDialog<HTMLElement>(editing !== null, () => setEditing(null));
 
@@ -50,16 +50,16 @@ export function AlertRuleManager({ servers, onError, onNotice }: {
       threshold: rule.threshold,
       duration_minutes: rule.duration_minutes,
       aggregation: rule.aggregation,
+      all_servers: rule.all_servers,
       enabled: rule.enabled,
       server_ids: [...rule.server_ids],
     } : { ...emptyRule, server_ids: [] });
-    setAllServers(!rule?.server_ids.length);
   }
 
   async function save() {
     setBusy(true);
     onError("");
-    const input = { ...form, server_ids: allServers ? [] : form.server_ids };
+    const input = { ...form, server_ids: form.all_servers ? [] : form.server_ids };
     try {
       if (editing === "new") await api.createAlertRule(input);
       else if (editing) await api.updateAlertRule(editing.id, input);
@@ -84,6 +84,7 @@ export function AlertRuleManager({ servers, onError, onNotice }: {
         threshold: rule.threshold,
         duration_minutes: rule.duration_minutes,
         aggregation: rule.aggregation,
+        all_servers: rule.all_servers,
         enabled: !rule.enabled,
         server_ids: rule.server_ids,
       });
@@ -98,7 +99,7 @@ export function AlertRuleManager({ servers, onError, onNotice }: {
     <div className="alert-rule-list">
       {rules.map((rule) => <div className="alert-rule-row" key={rule.id}>
         <Checkbox checked={rule.enabled} onChange={() => void toggle(rule)} ariaLabel={`${rule.name}启用状态`} />
-        <div><strong>{rule.name}</strong><small>{metricLabels[rule.metric]} ≥ {rule.threshold} {rule.metric.startsWith("net_") ? "MiB/s" : "%"} · {rule.duration_minutes} 分钟{rule.aggregation === "continuous" ? "持续" : "平均"} · {rule.server_ids.length ? `${rule.server_ids.length} 台服务器` : "全部服务器"}</small></div>
+        <div><strong>{rule.name}</strong><small>{metricLabels[rule.metric]} ≥ {rule.threshold} {rule.metric.startsWith("net_") ? "MiB/s" : "%"} · {rule.duration_minutes} 分钟{rule.aggregation === "continuous" ? "持续" : "平均"} · {rule.all_servers ? "全部服务器" : `${rule.server_ids.length} 台服务器`}</small></div>
         <button type="button" className="icon-btn" title="编辑规则" onClick={() => open(rule)}><Pencil size={15} /></button>
         <button type="button" className="icon-btn danger" title="删除规则" onClick={() => void remove(rule)}><Trash2 size={15} /></button>
       </div>)}
@@ -110,9 +111,9 @@ export function AlertRuleManager({ servers, onError, onNotice }: {
       <label><span>规则名称</span><input required maxLength={80} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} /></label>
       <div className="form-grid"><label><span>监控指标</span><select value={form.metric} onChange={(event) => setForm((current) => ({ ...current, metric: event.target.value as AlertRuleInput["metric"] }))}>{Object.entries(metricLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label><span>阈值（{unit}）</span><input required type="number" min="0.01" max={unit === "%" ? 100 : 1000000} step="0.01" value={form.threshold} onChange={(event) => setForm((current) => ({ ...current, threshold: Number(event.target.value) }))} /></label></div>
       <div className="form-grid"><label><span>时间窗口（分钟）</span><input required type="number" min="1" max="1440" value={form.duration_minutes} onChange={(event) => setForm((current) => ({ ...current, duration_minutes: Number(event.target.value) }))} /></label><label><span>判断方式</span><select value={form.aggregation} onChange={(event) => setForm((current) => ({ ...current, aggregation: event.target.value as AlertRuleInput["aggregation"] }))}><option value="average">窗口平均值</option><option value="continuous">窗口内持续超限</option></select></label></div>
-      <div className="settings-toggles"><label className="toggle-row"><b>启用规则</b><Checkbox checked={form.enabled} onChange={(value) => setForm((current) => ({ ...current, enabled: value }))} /></label><label className="toggle-row"><b>全部服务器</b><Checkbox checked={allServers} onChange={setAllServers} /></label></div>
-      {!allServers ? <div className="alert-server-picker">{servers.map((server) => <label key={server.id}><Checkbox checked={form.server_ids.includes(server.id)} onChange={(checked) => setForm((current) => ({ ...current, server_ids: checked ? [...current.server_ids, server.id] : current.server_ids.filter((id) => id !== server.id) }))} /><span>{server.name}</span></label>)}</div> : null}
-      <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button type="button" className="primary-btn" onClick={() => void save()} disabled={busy || !form.name.trim() || (!allServers && !form.server_ids.length)}><Save size={15} />保存规则</button></div>
+      <div className="settings-toggles"><label className="toggle-row"><b>启用规则</b><Checkbox checked={form.enabled} onChange={(value) => setForm((current) => ({ ...current, enabled: value }))} /></label><label className="toggle-row"><b>全部服务器</b><Checkbox checked={form.all_servers} onChange={(value) => setForm((current) => ({ ...current, all_servers: value }))} /></label></div>
+      {!form.all_servers ? <div className="alert-server-picker">{servers.map((server) => <label key={server.id}><Checkbox checked={form.server_ids.includes(server.id)} onChange={(checked) => setForm((current) => ({ ...current, server_ids: checked ? [...current.server_ids, server.id] : current.server_ids.filter((id) => id !== server.id) }))} /><span>{server.name}</span></label>)}</div> : null}
+      <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button type="button" className="primary-btn" onClick={() => void save()} disabled={busy || !form.name.trim() || (!form.all_servers && !form.server_ids.length)}><Save size={15} />保存规则</button></div>
     </section></div> : null}
   </div>;
 }
