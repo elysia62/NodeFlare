@@ -304,7 +304,6 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/api/bootstrap", get(routes::public::bootstrap))
-        .route("/api/config", get(routes::public::config))
         .route("/api/history/{id}", get(routes::public::history))
         .route("/api/latency/{id}", get(routes::public::latency_history))
         .route("/api/exchange-rates", get(routes::public::exchange_rates))

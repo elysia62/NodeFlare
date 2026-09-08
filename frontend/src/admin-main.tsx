@@ -16,8 +16,8 @@ function AdminApp() {
 
   async function loadConfig() {
     try {
-      const next = await api.config();
-      setConfig(next);
+      const next = await api.bootstrap();
+      setConfig(next.config);
       setError("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法加载管理面板");

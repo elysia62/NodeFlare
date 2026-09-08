@@ -1,4 +1,4 @@
-import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, Config, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
+import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
 
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
 
@@ -43,7 +43,6 @@ function sensitiveHeaders(proof: SensitiveProof): Headers {
 
 export const api = {
   bootstrap: () => request<Bootstrap>("/api/bootstrap", { cache: "no-store", signal: AbortSignal.timeout(15_000) }),
-  config: () => request<Config>("/api/config"),
   exchangeRates: () => request<ExchangeRates>("/api/exchange-rates"),
   refreshExchangeRates: () => request<ExchangeRates>("/api/admin/exchange-rates/refresh", { method: "POST" }, true),
   adminServers: () => request<{ servers: AdminServer[] }>("/api/admin/servers", {}, true),

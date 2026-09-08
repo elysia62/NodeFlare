@@ -115,13 +115,6 @@ pub async fn bootstrap(
     }))
 }
 
-pub async fn config(State(state): State<Arc<AppState>>) -> Result<Json<PublicConfig>, ApiResponse> {
-    let settings = crate::db::load_settings(&state.db)
-        .await
-        .map_err(ApiResponse::internal)?;
-    Ok(Json(public_config_with_totp(&state, &settings).await?))
-}
-
 pub async fn history(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
