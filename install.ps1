@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-$Repository = "imengying/NodeFlare"
+$Repository = "elysia62/NodeFlare"
 $TaskName = "nodeflare"
 $InstallDir = Join-Path $env:ProgramFiles "NodeFlare"
 $ServerFile = Join-Path $InstallDir "nodeflare.exe"

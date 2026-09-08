@@ -21,19 +21,19 @@
 Linux / macOS：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/install.sh | sudo sh
 ```
 
 FreeBSD：
 
 ```sh
-fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh
+fetch -qo - https://raw.githubusercontent.com/elysia62/NodeFlare/main/install.sh | sudo sh
 ```
 
 Windows PowerShell（管理员）：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/imengying/NodeFlare/main/install.ps1 -OutFile "$env:TEMP\nodeflare-install.ps1"
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/elysia62/NodeFlare/main/install.ps1 -OutFile "$env:TEMP\nodeflare-install.ps1"
 Unblock-File "$env:TEMP\nodeflare-install.ps1"
 & "$env:TEMP\nodeflare-install.ps1"
 ```
@@ -54,9 +54,9 @@ nodeflare.example.com {
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
 # FreeBSD
-fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
+fetch -qo - https://raw.githubusercontent.com/elysia62/NodeFlare/main/install.sh | sudo sh -s -- --uninstall
 ```
 
 Linux 常用 systemd 命令：
@@ -74,7 +74,7 @@ journalctl -u nodeflare -f
 Linux：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh \
+curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent.sh \
   | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token'
 ```
 
@@ -82,17 +82,17 @@ curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agen
 
 ```bash
 # macOS ARM64
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-macos.sh \
+curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/install-macos.sh \
   | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token'
 # FreeBSD
-fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-freebsd.sh \
+fetch -qo - https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/install-freebsd.sh \
   | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token'
 ```
 
 Windows PowerShell（管理员）：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install.ps1 -OutFile "$env:TEMP\nodeflare-agent-install.ps1"
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/install.ps1 -OutFile "$env:TEMP\nodeflare-agent-install.ps1"
 Unblock-File "$env:TEMP\nodeflare-agent-install.ps1"
 & "$env:TEMP\nodeflare-agent-install.ps1" -e "https://nodeflare.example.com" -t "Agent Token"
 ```
@@ -100,17 +100,17 @@ Unblock-File "$env:TEMP\nodeflare-agent-install.ps1"
 更新（自动沿用已安装的服务地址、Token 和保存间隔），网络受限时可加下载加速前缀 `-m https://ghproxy.net`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh | sudo sh -s -- --update
+curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent.sh | sudo sh -s -- --update
 # macOS ARM64
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-macos.sh | sudo sh -s -- --update
+curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/install-macos.sh | sudo sh -s -- --update
 # FreeBSD
-fetch -qo - https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install-freebsd.sh | sudo sh -s -- --update
+fetch -qo - https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/install-freebsd.sh | sudo sh -s -- --update
 ```
 
 Windows 管理员 PowerShell（先重新下载最新脚本）：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/install.ps1 -OutFile "$env:TEMP\nodeflare-agent-install.ps1"
+Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/install.ps1 -OutFile "$env:TEMP\nodeflare-agent-install.ps1"
 Unblock-File "$env:TEMP\nodeflare-agent-install.ps1"
 & "$env:TEMP\nodeflare-agent-install.ps1" -Update
 ```
@@ -128,7 +128,7 @@ Linux systemd 下，请通过 SSH 或本机终端重装、手动更新或卸载 
 Agent 服务名为 `nodeflare-agent`，卸载：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imengying/NodeFlare/main/agent/agent.sh | sudo sh -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent.sh | sudo sh -s -- --uninstall
 ```
 
 ## 配置
@@ -183,7 +183,7 @@ SQLite / PostgreSQL 首次启动时自动创建数据库结构。ZIP 恢复会�
 ## 从源码开发
 
 ```bash
-git clone https://github.com/imengying/NodeFlare.git
+git clone https://github.com/elysia62/NodeFlare.git
 cd NodeFlare
 bun install --frozen-lockfile
 cp backend/config.example.toml backend/config.toml

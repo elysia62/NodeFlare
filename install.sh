@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repository=imengying/NodeFlare
+repository=elysia62/NodeFlare
 init_system=""
 systemd_file=/etc/systemd/system/nodeflare.service
 openrc_file=/etc/init.d/nodeflare

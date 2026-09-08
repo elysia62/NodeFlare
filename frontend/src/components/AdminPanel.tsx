@@ -55,7 +55,7 @@ import { Flag } from "./Flag";
 import pkg from "../../package.json";
 
 const VERSION = import.meta.env.VITE_NODEFLARE_VERSION || pkg.version;
-const AGENT_SCRIPT_BASE = "https://raw.githubusercontent.com/imengying/NodeFlare/main/agent";
+const AGENT_SCRIPT_BASE = "https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent";
 
 type AgentPlatform = "linux" | "windows" | "macos" | "freebsd";
 type ThemeSourceMode = "repository" | "upload";
@@ -1295,7 +1295,7 @@ export function AdminPanel({
                   <div className="about-brand"><SiteLogo alt="" width="52" height="52" /><div><strong>NodeFlare</strong><small>基于 Rust、Axum、SQLite / PostgreSQL 与 WebSocket 的服务器监控</small></div></div>
                   <div className="about-rows">
                     <div className="about-row"><span>版本</span><strong>v{VERSION}</strong></div>
-                    <div className="about-row"><span>项目地址</span><a href="https://github.com/imengying/NodeFlare" target="_blank" rel="noreferrer">github.com/imengying/NodeFlare<ExternalLink size={13} /></a></div>
+                    <div className="about-row"><span>项目地址</span><a href="https://github.com/elysia62/NodeFlare" target="_blank" rel="noreferrer">github.com/elysia62/NodeFlare<ExternalLink size={13} /></a></div>
                     <div className="about-row"><span>开源协议</span><strong>MIT License</strong></div>
                   </div>
                 </div>

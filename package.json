@@ -2,7 +2,7 @@
   "name": "nodeflare",
   "version": "1.0.0",
   "private": true,
-  "repository": "https://github.com/imengying/NodeFlare",
+  "repository": "https://github.com/elysia62/NodeFlare",
   "packageManager": "bun@1.4.0",
   "workspaces": [
     "frontend"

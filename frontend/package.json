@@ -2,7 +2,7 @@
   "name": "nodeflare-ui",
   "version": "1.0.0",
   "private": true,
-  "repository": "https://github.com/imengying/NodeFlare",
+  "repository": "https://github.com/elysia62/NodeFlare",
   "type": "module",
   "scripts": {
     "dev": "vite",

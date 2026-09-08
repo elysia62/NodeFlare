@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 license = "MIT"
 description = "Server monitoring system with WebSocket support"
-repository = "https://github.com/imengying/NodeFlare"
+repository = "https://github.com/elysia62/NodeFlare"
 
 [[bin]]
 name = "nodeflare"

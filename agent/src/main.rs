@@ -37,7 +37,7 @@ const VERSION: &str = match option_env!("NODEFLARE_VERSION") {
     Some(version) if !version.is_empty() => version,
     _ => env!("CARGO_PKG_VERSION"),
 };
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/imengying/NodeFlare/releases/latest";
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/elysia62/NodeFlare/releases/latest";
 const PROBE_ATTEMPTS: usize = 4;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;

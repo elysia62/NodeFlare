@@ -168,7 +168,7 @@ if ($LASTEXITCODE -ne 0) { Write-InstallError "无法限制程序目录权限" }
 & icacls.exe $StateDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-InstallError "无法限制 Agent 数据目录权限" }
 $Temporary = "$AgentFile.$PID.download.exe"
-$ReleaseApi = "https://api.github.com/repos/imengying/NodeFlare/releases/latest"
+$ReleaseApi = "https://api.github.com/repos/elysia62/NodeFlare/releases/latest"
 $Artifact = "agent-windows-x64.exe"
 try {
   Write-Step "正在获取 GitHub 最新正式版本（$Artifact）"
@@ -182,7 +182,7 @@ try {
     Write-InstallError "Release 缺少 $Artifact 的 SHA-256 摘要"
   }
   $ExpectedChecksum = $DigestMatch.Groups[1].Value
-  $DownloadUrl = "https://github.com/imengying/NodeFlare/releases/download/$($Release.tag_name)/$Artifact"
+  $DownloadUrl = "https://github.com/elysia62/NodeFlare/releases/download/$($Release.tag_name)/$Artifact"
   if ($Mirror) {
     $DownloadUrl = "$Mirror/$DownloadUrl"
     Write-Step "正在通过下载加速前缀拉取 Agent $($Release.tag_name)"

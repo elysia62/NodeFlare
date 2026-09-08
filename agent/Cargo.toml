@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 license = "MIT"
 description = "Independent Rust telemetry agent for NodeFlare"
-repository = "https://github.com/imengying/NodeFlare"
+repository = "https://github.com/elysia62/NodeFlare"
 
 [dependencies]
 clap = { version = "4.6", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
