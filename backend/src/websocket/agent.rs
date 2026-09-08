@@ -106,7 +106,7 @@ async fn run(
         let _ = previous.sender.try_send(AgentCommand::Close);
     }
 
-    // Close the token-rotation race between authentication and registration.
+    // Recheck the token after registration in case the node changed meanwhile.
     let still_authorized = matches!(
         crate::db::queries::agent_identity(&state.db, &token).await,
         Ok(Some(current)) if current.server_id == identity.server_id

@@ -243,17 +243,6 @@ MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
   MONITOR_AGENT_TOKEN="$agent_token" MONITOR_SERVER_ID="$server_id" \
   MONITOR_LATENCY_TASK_ID="$latency_task_id" \
   node scripts/websocket-smoke.mjs
-token_without_admin_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
-  -X POST \
-  "$MONITOR_BASE_URL/api/admin/servers/$server_id/token")
-[ "$token_without_admin_status" = "401" ]
-rotated_agent_token=$(MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
-  MONITOR_AGENT_TOKEN="$agent_token" MONITOR_SERVER_ID="$server_id" \
-  MONITOR_LATENCY_TASK_ID="$latency_task_id" MONITOR_CONFIG_ONLY=1 \
-  MONITOR_ROTATE_AGENT_TOKEN=1 node scripts/websocket-smoke.mjs)
-[ "$rotated_agent_token" != "$agent_token" ]
-agent_token=$rotated_agent_token
-
 step "persisted metrics: admin IP metadata"
 request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/servers" | \
   jq -e --arg id "$server_id" '.servers | any(.id == $id and .last_ip == "8.8.8.8")' >/dev/null

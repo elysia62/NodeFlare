@@ -11,15 +11,9 @@ const serverId = process.env.MONITOR_SERVER_ID;
 const latencyTaskId = process.env.MONITOR_LATENCY_TASK_ID;
 const expectTaskAssigned = process.env.MONITOR_EXPECT_TASK_ASSIGNED !== "0";
 const configOnly = process.env.MONITOR_CONFIG_ONLY === "1";
-const expectAgentRejected = process.env.MONITOR_EXPECT_AGENT_REJECTED === "1";
-const rotateAgentToken = process.env.MONITOR_ROTATE_AGENT_TOKEN === "1";
 
-if (!baseUrl || !agentToken || (!expectAgentRejected && (!adminToken || !serverId || !latencyTaskId))) {
-  throw new Error(
-    expectAgentRejected
-      ? "MONITOR_BASE_URL and MONITOR_AGENT_TOKEN are required"
-      : "MONITOR_BASE_URL, MONITOR_ADMIN_TOKEN, MONITOR_AGENT_TOKEN, MONITOR_SERVER_ID and MONITOR_LATENCY_TASK_ID are required",
-  );
+if (!baseUrl || !adminToken || !agentToken || !serverId || !latencyTaskId) {
+  throw new Error("MONITOR_BASE_URL, MONITOR_ADMIN_TOKEN, MONITOR_AGENT_TOKEN, MONITOR_SERVER_ID and MONITOR_LATENCY_TASK_ID are required");
 }
 
 function websocketUrl(path) {
@@ -279,11 +273,6 @@ function waitForSocketClose(socket, expected, timeoutMs = 5_000) {
 await expectSocketStatus("/api/agent/ws", "invalid-agent-token", 401);
 await expectSocketStatus("/api/agent/ws", "", 401);
 await expectSocketStatus("/api/agent/ws", "x".repeat(513), 401);
-if (expectAgentRejected) {
-  await expectSocketStatus("/api/agent/ws", agentToken, 401);
-  process.exit(0);
-}
-
 const dashboard = configOnly ? null : await openSocket("/api/ws", adminToken);
 let agent;
 let enabledTotpSecret = "";
@@ -325,48 +314,27 @@ try {
   ) {
     throw new Error(`Invalid Agent config: ${JSON.stringify(config)}`);
   }
-  if (rotateAgentToken) {
-    const firstSocket = agent;
-    const firstClosed = waitForSocketClose(firstSocket, "a duplicate Agent connected");
-    const replacement = await openSocket("/api/agent/ws", agentToken);
-    await waitForJsonMessage(
-      replacement,
-      "replacement Agent config",
-      (message) => message.type === "config" && message.config,
-    );
-    await firstClosed;
-    agent = replacement;
+  if (!configOnly) {
+  const installUrl = new URL(`/api/admin/servers/${encodeURIComponent(serverId)}/agent-token`, baseUrl);
+  assert.equal((await fetch(installUrl, { method: "POST" })).status, 401);
+  const installResponse = await fetch(installUrl, {
+    method: "POST", headers: { Authorization: `Bearer ${adminToken}` },
+  });
+  assert(installResponse.ok, await installResponse.clone().text());
+  const installToken = (await installResponse.json()).agent_token;
+  assert(installToken && installToken !== agentToken);
+  const originalPong = once(agent, "pong", { signal: AbortSignal.timeout(5_000) });
+  agent.ping();
+  await originalPong;
 
-    const rotatedClosed = waitForSocketClose(agent, "the Agent Token rotated");
-    const rotateResponse = await fetch(
-      new URL(`/api/admin/servers/${encodeURIComponent(serverId)}/token`, baseUrl),
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${adminToken}` },
-      },
-    );
-    if (!rotateResponse.ok) {
-      throw new Error(
-        `Agent Token rotation returned HTTP ${rotateResponse.status}: ${await rotateResponse.text()}`,
-      );
-    }
-    const rotated = await rotateResponse.json();
-    const rotatedToken = rotated.agent_token;
-    if (!rotatedToken || rotatedToken === agentToken) {
-      throw new Error("Agent Token rotation did not return a new token");
-    }
-    await rotatedClosed;
-    await expectSocketStatus("/api/agent/ws", agentToken, 401);
+  const originalClosed = waitForSocketClose(agent, "a replacement Agent connected");
+  agent = await openSocket("/api/agent/ws", installToken);
+  await waitForJsonMessage(agent, "installed Agent config", (message) => message.type === "config");
+  await originalClosed;
+  await closeSocket(agent);
+  agent = await openSocket("/api/agent/ws", agentToken, { "X-Forwarded-For": "8.8.8.8" });
+  await waitForJsonMessage(agent, "primary Agent config", (message) => message.type === "config");
 
-    const rotatedSocket = await openSocket("/api/agent/ws", rotatedToken);
-    await waitForJsonMessage(
-      rotatedSocket,
-      "rotated Agent config",
-      (message) => message.type === "config" && message.config,
-    );
-    await closeSocket(rotatedSocket);
-    process.stdout.write(`${rotatedToken}\n`);
-  } else if (!configOnly) {
   if (!passwordDerived) throw new Error("MONITOR_PASSWORD_DERIVED is required for TOTP setup");
   const setupResponse = await fetch(new URL("/api/admin/2fa/setup", baseUrl), {
     method: "POST",

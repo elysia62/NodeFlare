@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const installer = readFileSync(new URL("../../install.sh", import.meta.url), "utf8");
@@ -70,10 +70,74 @@ describe("server uninstall ownership", () => {
   }
 });
 
-function start(scenario: string) {
+describe("Windows uninstall ownership", () => {
+  const powershell = Bun.which("pwsh");
+  for (const kind of ["server", "agent"] as const) {
+    const source = readFileSync(new URL(kind === "server" ? "../../install.ps1" : "../../agent/install.ps1", import.meta.url), "utf8");
+    const branch = kind === "server"
+      ? source.match(/^if \(\$Mode -eq "Uninstall"\) \{[\s\S]*?^\}/m)?.[0]
+      : source.match(/^if \(\$Uninstall\) \{[\s\S]*?^\}/m)?.[0];
+    if (!branch) throw new Error(`Missing Windows ${kind} uninstall branch`);
+
+    test.skipIf(!powershell)(`${kind} keeps the other service's shared files and data`, () => {
+      const directory = mkdtempSync(join(tmpdir(), "nodeflare-windows-uninstall-"));
+      const files = {
+        "install/nodeflare.exe": "server-binary",
+        "install/share/frontend/index.html": "server-frontend",
+        "install/agent.exe": "agent-binary",
+        "install/run-agent.ps1": "agent-launcher",
+        "data/Server/config.toml": "server-data",
+        "data/Agent/config.json": "agent-data",
+      };
+      try {
+        for (const [path, content] of Object.entries(files)) {
+          mkdirSync(dirname(join(directory, path)), { recursive: true });
+          writeFileSync(join(directory, path), content);
+        }
+        const result = spawnSync(powershell!, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `
+          $ErrorActionPreference = "Stop"
+          function Write-Step { }
+          function Stop-ScheduledTask { }
+          function Unregister-ScheduledTask { }
+          $Mode = "Uninstall"
+          $Uninstall = $true
+          $Purge = $false
+          $TaskName = "unused"
+          $InstallDir = Join-Path $env:TEST_DIRECTORY "install"
+          $ShareDir = Join-Path $InstallDir "share"
+          $ServerFile = Join-Path $InstallDir "nodeflare.exe"
+          $AgentFile = Join-Path $InstallDir "agent.exe"
+          $LauncherFile = Join-Path $InstallDir "run-agent.ps1"
+          $DataDir = Join-Path $env:TEST_DIRECTORY "data"
+          $StateDir = Join-Path $DataDir "Agent"
+          if ($env:TEST_KIND -eq "server") { $DataDir = Join-Path $DataDir "Server" }
+          ${branch}
+        `], { env: { ...process.env, TEST_DIRECTORY: directory, TEST_KIND: kind }, encoding: "utf8", timeout: 10_000 });
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        const peerPaths = kind === "server"
+          ? ["install/agent.exe", "install/run-agent.ps1", "data/Agent/config.json"]
+          : ["install/nodeflare.exe", "install/share/frontend/index.html", "data/Server/config.toml"];
+        for (const path of peerPaths) {
+          expect(readFileSync(join(directory, path), "utf8")).toBe(files[path as keyof typeof files]);
+        }
+        expect(existsSync(join(directory, kind === "server" ? "install/nodeflare.exe" : "install/agent.exe"))).toBe(false);
+        if (kind === "agent") {
+          expect(existsSync(join(directory, "install/run-agent.ps1"))).toBe(false);
+          expect(existsSync(join(directory, "data/Agent"))).toBe(false);
+        }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+function start(scenario: string, init = "systemd") {
   return spawnSync("sh", ["-c", `
     set -eu
-    init_system=systemd
+    init_system=$TEST_INIT
+    launchd_file=/unused/nodeflare.plist
     tick=0
     sleep() { tick=$((tick + 1)); }
     systemctl() {
@@ -90,9 +154,24 @@ function start(scenario: string) {
         *) return 99 ;;
       esac
     }
+    launchctl() {
+      case "$1" in
+        bootstrap) [ "$SCENARIO" != command-failure ] ;;
+        print)
+          [ "$SCENARIO" != query-failure ] || return 1
+          if [ "$SCENARIO" = waiting ] || { [ "$SCENARIO" = exits ] && [ "$tick" -ge 2 ]; }; then
+            printf 'state = waiting\nlast exit code = 1\n'
+          elif [ "$SCENARIO" = restarts ] && [ "$tick" -ge 2 ]; then
+            printf 'state = running\npid = 456\n'
+          else
+            printf 'state = running\npid = 123\n'
+          fi ;;
+        *) return 99 ;;
+      esac
+    }
     ${startFunction}
     if start_server; then printf 'ready:%s\n' "$tick"; else exit 1; fi
-  `], { env: { ...process.env, SCENARIO: scenario }, encoding: "utf8" });
+  `], { env: { ...process.env, SCENARIO: scenario, TEST_INIT: init }, encoding: "utf8" });
 }
 
 describe("installer startup verification", () => {
@@ -104,6 +183,19 @@ describe("installer startup verification", () => {
   for (const scenario of ["exits", "restarts", "command-failure"]) {
     test(`rejects ${scenario} even when called in an if condition`, () => {
       expect(start(scenario).status).toBe(1);
+    });
+  }
+});
+
+describe("launchd installer startup verification", () => {
+  test("waits for the same process to remain active", () => {
+    const result = start("healthy", "launchd");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("ready:10\n");
+  });
+  for (const scenario of ["exits", "restarts", "command-failure", "waiting", "query-failure"]) {
+    test(`rejects ${scenario}`, () => {
+      expect(start(scenario, "launchd").status).toBe(1);
     });
   }
 });

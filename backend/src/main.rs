@@ -253,10 +253,6 @@ async fn main() -> Result<()> {
             patch(routes::admin::servers_order),
         )
         .route(
-            "/api/admin/servers/{id}/token",
-            post(routes::admin::server_token_rotate),
-        )
-        .route(
             "/api/admin/servers/{id}/agent-token",
             post(routes::admin::server_agent_token),
         )
@@ -351,7 +347,6 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/api/bootstrap", get(routes::public::bootstrap))
         .route("/api/config", get(routes::public::config))
-        .route("/api/servers", get(routes::public::servers))
         .route("/api/history/{id}", get(routes::public::history))
         .route("/api/latency/{id}", get(routes::public::latency_history))
         .route("/api/exchange-rates", get(routes::public::exchange_rates))

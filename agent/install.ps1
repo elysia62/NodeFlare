@@ -119,9 +119,10 @@ if ($Uninstall) {
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $AgentFile -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $LauncherFile -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $StateDir -Recurse -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $DataDir -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
+  try { [IO.Directory]::Delete($DataDir, $false) } catch [IO.IOException] { }
+  try { [IO.Directory]::Delete($InstallDir, $false) } catch [IO.IOException] { }
   Write-Host "Agent 已卸载"
   exit 0
 }

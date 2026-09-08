@@ -512,26 +512,6 @@ pub async fn reorder_servers(db: &Database, ids: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub async fn rotate_server_token(db: &Database, id: &str) -> Result<Option<String>> {
-    let token = auth::random_token(32);
-    let token_hash = auth::token_hash(&token);
-    let mut transaction = db.pool().begin().await?;
-    let result = sqlx::query(db.sql("UPDATE servers SET token_hash=?, updated_at=? WHERE id=?"))
-        .bind(&token_hash)
-        .bind(now())
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-    if result.rows_affected() > 0 {
-        sqlx::query(db.sql("DELETE FROM server_install_tokens WHERE server_id=?"))
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-    }
-    transaction.commit().await?;
-    Ok((result.rows_affected() > 0).then_some(token))
-}
-
 pub async fn agent_install_token(db: &Database, id: &str) -> Result<Option<String>> {
     let token = auth::random_token(32);
     let exists = sqlx::query_scalar::<_, i64>(db.sql("SELECT COUNT(*) FROM servers WHERE id=?"))
@@ -1478,6 +1458,19 @@ pub async fn update_latency_task(
 ) -> Result<bool> {
     let timestamp = now();
     let mut transaction = db.pool().begin().await?;
+    // Only a different probe destination starts a new history segment.
+    sqlx::query(db.sql(
+        "UPDATE latency_task_servers SET assigned_at=? WHERE task_id=? AND EXISTS (\
+         SELECT 1 FROM latency_tasks WHERE id=latency_task_servers.task_id AND \
+         (task_type<>? OR target<>? OR COALESCE(port, 0)<>?))",
+    ))
+    .bind(timestamp)
+    .bind(id)
+    .bind(&input.task_type)
+    .bind(input.target.trim())
+    .bind(input.port.unwrap_or(0))
+    .execute(&mut *transaction)
+    .await?;
     let result = sqlx::query(db.sql(
         "UPDATE latency_tasks SET name=?, task_type=?, target=?, port=?, interval_seconds=?, \
          default_enabled=?, updated_at=? WHERE id=?",
@@ -1508,6 +1501,20 @@ async fn replace_task_servers(
     server_ids: &[String],
     timestamp: i64,
 ) -> Result<()> {
+    let existing = sqlx::query(
+        db.sql("SELECT server_id, assigned_at FROM latency_task_servers WHERE task_id=?"),
+    )
+    .bind(task_id)
+    .fetch_all(&mut **transaction)
+    .await?
+    .into_iter()
+    .map(|row| {
+        Ok::<_, sqlx::Error>((
+            row.try_get::<String, _>("server_id")?,
+            row.try_get::<i64, _>("assigned_at")?,
+        ))
+    })
+    .collect::<std::result::Result<HashMap<_, _>, _>>()?;
     sqlx::query(db.sql("DELETE FROM latency_task_servers WHERE task_id=?"))
         .bind(task_id)
         .execute(&mut **transaction)
@@ -1518,7 +1525,7 @@ async fn replace_task_servers(
         ))
         .bind(task_id)
         .bind(server_id)
-        .bind(timestamp)
+        .bind(existing.get(server_id).copied().unwrap_or(timestamp))
         .execute(&mut **transaction)
         .await?;
     }
@@ -2635,22 +2642,6 @@ mod tests {
                 .is_some()
         );
         assert_ne!(first_install_token, second_install_token);
-
-        let rotated_token = rotate_server_token(&db, &id).await.unwrap().unwrap();
-        assert!(agent_identity(&db, &primary_token).await.unwrap().is_none());
-        assert!(
-            agent_identity(&db, &first_install_token)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            agent_identity(&db, &second_install_token)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(agent_identity(&db, &rotated_token).await.unwrap().is_some());
     }
 
     fn sample(timestamp: i64, cpu: f64) -> AgentReport {
@@ -3150,6 +3141,85 @@ mod tests {
         assert_eq!(points[0].task_id, task_id);
         assert_eq!(points[0].latency_ms, -1.0);
         assert_eq!(points[0].packet_loss, 100.0);
+    }
+
+    #[tokio::test]
+    async fn latency_history_survives_metadata_edits_but_not_probe_or_assignment_changes() {
+        for change in ["metadata", "target", "port", "type", "reassign"] {
+            let db = super::super::connect("sqlite::memory:").await.unwrap();
+            db.migrate().await.unwrap();
+            let (server_id, _) = create_server(&db, &server_input(0)).await.unwrap();
+            let mut input = LatencyTaskInput {
+                name: "Persistent latency".to_string(),
+                task_type: "tcp".to_string(),
+                target: "example.com".to_string(),
+                port: Some(443),
+                interval_seconds: 60,
+                default_enabled: false,
+                server_ids: vec![server_id.clone()],
+            };
+            let task_id = create_latency_task(&db, &input).await.unwrap();
+            let assigned_at = now() - 300;
+            sqlx::query(db.sql(
+                "UPDATE latency_task_servers SET assigned_at=? WHERE task_id=? AND server_id=?",
+            ))
+            .bind(assigned_at)
+            .bind(&task_id)
+            .bind(&server_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+            sqlx::query(db.sql(
+                "INSERT INTO latency_results(task_id, server_id, timestamp, latency_ms, packet_loss) \
+                 VALUES (?, ?, ?, 12.0, 0.0)",
+            ))
+            .bind(&task_id)
+            .bind(&server_id)
+            .bind(assigned_at + 60)
+            .execute(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(
+                latency_history(&db, &server_id, 1).await.unwrap().1.len(),
+                1
+            );
+
+            match change {
+                "metadata" => {
+                    input.name = "Renamed latency".to_string();
+                    input.interval_seconds = 120;
+                    input.default_enabled = true;
+                    let (additional, _) = create_server(&db, &server_input(0)).await.unwrap();
+                    input.server_ids.push(additional);
+                }
+                "target" => input.target = "example.org".to_string(),
+                "port" => input.port = Some(80),
+                "type" => {
+                    input.task_type = "icmp".to_string();
+                    input.port = None;
+                }
+                "reassign" => {
+                    input.server_ids.clear();
+                    update_latency_task(&db, &task_id, &input).await.unwrap();
+                    assert!(
+                        latency_history(&db, &server_id, 1)
+                            .await
+                            .unwrap()
+                            .1
+                            .is_empty()
+                    );
+                    input.server_ids.push(server_id.clone());
+                }
+                _ => unreachable!(),
+            }
+            update_latency_task(&db, &task_id, &input).await.unwrap();
+            let (_, points) = latency_history(&db, &server_id, 1).await.unwrap();
+            assert_eq!(
+                points.len(),
+                if change == "metadata" { 1 } else { 0 },
+                "{change}"
+            );
+        }
     }
 
     #[tokio::test]

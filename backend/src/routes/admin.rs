@@ -120,19 +120,6 @@ pub async fn servers_order(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-pub async fn server_token_rotate(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Response, ApiResponse> {
-    validate_id(&id)?;
-    let token = crate::db::queries::rotate_server_token(&state.db, &id)
-        .await
-        .map_err(ApiResponse::internal)?
-        .ok_or_else(|| ApiResponse::not_found("节点不存在"))?;
-    state.disconnect_agent(&id).await;
-    Ok(Json(serde_json::json!({"agent_token": token})).into_response())
-}
-
 pub async fn server_agent_token(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

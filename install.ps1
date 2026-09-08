@@ -182,7 +182,7 @@ if ($Mode -eq "Uninstall") {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $ServerFile -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $ShareDir -Recurse -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
+  try { [IO.Directory]::Delete($InstallDir, $false) } catch [IO.IOException] { }
   if ($Purge) {
     Remove-Item -LiteralPath $DataDir -Recurse -Force -ErrorAction SilentlyContinue
     Write-Step "已删除配置和全部服务端持久数据"

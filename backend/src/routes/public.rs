@@ -122,20 +122,6 @@ pub async fn config(State(state): State<Arc<AppState>>) -> Result<Json<PublicCon
     Ok(Json(public_config_with_totp(&state, &settings).await?))
 }
 
-pub async fn servers(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Response, ApiResponse> {
-    require_dashboard(&state, &headers).await?;
-    let servers = crate::db::queries::list_servers(&state.db, false)
-        .await
-        .map_err(ApiResponse::internal)?
-        .into_iter()
-        .map(public_server)
-        .collect::<Vec<_>>();
-    Ok(Json(serde_json::json!({"servers": servers})).into_response())
-}
-
 pub async fn history(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

@@ -585,7 +585,21 @@ start_server() {
       ;;
     launchd)
       launchctl bootstrap system "$launchd_file" || return 1
-      launchctl print system/nodeflare >/dev/null
+      started_pid=""
+      attempt=1
+      while [ "$attempt" -le 10 ]; do
+        sleep 1
+        launchd_status=$(launchctl print system/nodeflare) || return 1
+        printf '%s\n' "$launchd_status" | grep -Eq '^[[:space:]]*state = running$' || return 1
+        current_pid=$(printf '%s\n' "$launchd_status" | awk '$1 == "pid" && $2 == "=" { print $3; exit }')
+        case "$current_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+        if [ -z "$started_pid" ]; then
+          started_pid=$current_pid
+        else
+          [ "$current_pid" = "$started_pid" ] || return 1
+        fi
+        attempt=$((attempt + 1))
+      done
       ;;
     freebsd)
       sysrc nodeflare_enable=YES >/dev/null || return 1
