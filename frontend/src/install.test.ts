@@ -125,7 +125,6 @@ describe("installer port selection", () => {
           admin_password='TestPassword123'
           public_frontend_dir=$config_dir/frontend
           admin_frontend_dir=$config_dir/admin
-          agent_installer_dir=$config_dir/agent
           theme_dir=$config_dir/themes
           prompt_port
           write_config
@@ -162,7 +161,6 @@ describe("server installer update output", () => {
           share_dir=$install_dir/share
           public_frontend_dir=$share_dir/frontend
           admin_frontend_dir=$share_dir/admin
-          agent_installer_dir=$share_dir/agent
           server_binary=$install_dir/nodeflare
           init_system=systemd
           download_release() { release_version=1.2.3; package_dir=$TEST_DIRECTORY/package; }
@@ -194,6 +192,63 @@ describe("server installer update output", () => {
           expect(result.stderr).toContain("startup diagnostic");
           expect(result.stderr).toContain("服务启动失败");
         }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+describe("server bundle installation", () => {
+  for (const separateShare of [false, true]) {
+    test(`replaces bundled resources without changing agent data (separate share=${separateShare})`, () => {
+      const directory = mkdtempSync(join(tmpdir(), "nodeflare-bundle-install-"));
+      const installDir = join(directory, "install");
+      const shareDir = join(separateShare ? directory : installDir, "share");
+      const configDir = join(directory, "config");
+      const packageDir = join(directory, "package");
+      try {
+        for (const path of [installDir, shareDir, join(configDir, "agent"), join(configDir, "themes"), join(packageDir, "share", "frontend"), join(packageDir, "share", "admin")]) {
+          mkdirSync(path, { recursive: true });
+        }
+        writeFileSync(join(installDir, "agent"), "agent-binary");
+        writeFileSync(join(shareDir, "obsolete-resource"), "obsolete");
+        writeFileSync(join(configDir, "config.toml"), 'bind_addr = "127.0.0.1:3100"\n');
+        writeFileSync(join(configDir, "agent", "remote-tasks.json"), "agent-state");
+        writeFileSync(join(configDir, "themes", "theme.txt"), "custom-theme");
+        writeFileSync(join(packageDir, "nodeflare"), "server-binary");
+        writeFileSync(join(packageDir, "share", "frontend", "index.html"), "public");
+        writeFileSync(join(packageDir, "share", "admin", "admin.html"), "admin");
+        const start = installer.lastIndexOf("\ndownload_release\n");
+        if (start < 0) throw new Error("Missing installer entry point");
+        const result = spawnSync("sh", ["-c", `
+          set -eu
+          ${shellFunctions("log", "fail", "print_install_result")}
+          config_dir=$TEST_DIRECTORY/config
+          config_file=$config_dir/config.toml
+          theme_dir=$config_dir/themes
+          install_dir=$TEST_DIRECTORY/install
+          share_dir=$TEST_SHARE_DIR
+          public_frontend_dir=$share_dir/frontend
+          admin_frontend_dir=$share_dir/admin
+          server_binary=$install_dir/nodeflare
+          download_release() { release_version=1.2.3; package_dir=$TEST_DIRECTORY/package; }
+          snapshot_install() { :; }
+          stop_server() { :; }
+          install_service() { :; }
+          chown() { :; }
+          start_server() { return 0; }
+          ${installer.slice(start)}
+        `], { env: { ...process.env, TEST_DIRECTORY: directory, TEST_SHARE_DIR: shareDir }, encoding: "utf8" });
+        expect(result.status).toBe(0);
+        expect(existsSync(join(shareDir, "obsolete-resource"))).toBe(false);
+        expect(readFileSync(join(shareDir, "frontend", "index.html"), "utf8")).toBe("public");
+        expect(readFileSync(join(shareDir, "admin", "admin.html"), "utf8")).toBe("admin");
+        expect(readFileSync(join(installDir, "nodeflare"), "utf8")).toBe("server-binary");
+        expect(readFileSync(join(installDir, "agent"), "utf8")).toBe("agent-binary");
+        expect(readFileSync(join(configDir, "config.toml"), "utf8")).toBe('bind_addr = "127.0.0.1:3100"\n');
+        expect(readFileSync(join(configDir, "agent", "remote-tasks.json"), "utf8")).toBe("agent-state");
+        expect(readFileSync(join(configDir, "themes", "theme.txt"), "utf8")).toBe("custom-theme");
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }

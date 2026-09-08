@@ -28,7 +28,6 @@ turnstile_secret_key = ""
 # 路径相对于本配置文件所在目录
 frontend_dir = "../frontend/dist"
 admin_frontend_dir = "../frontend/admin-dist"
-agent_dir = "../agent"
 
 # 下载或上传的主题 ZIP 解压目录
 theme_dir = "themes"

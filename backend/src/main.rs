@@ -190,7 +190,6 @@ async fn main() -> Result<()> {
     for (label, path) in [
         ("public frontend", &config.frontend_dir),
         ("admin frontend", &config.admin_frontend_dir),
-        ("Agent installers", &config.agent_dir),
     ] {
         if !path.exists() {
             tracing::warn!(label, path = %path.display(), "asset directory does not exist");

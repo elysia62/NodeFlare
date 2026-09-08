@@ -179,8 +179,7 @@ jobs:
             'turnstile_secret_key = ""' \
             "frontend_dir = \"$GITHUB_WORKSPACE/frontend/dist\"" \
             "admin_frontend_dir = \"$GITHUB_WORKSPACE/frontend/admin-dist\"" \
-            "theme_dir = \"$sqlite_dir/themes\"" \
-            "agent_dir = \"$GITHUB_WORKSPACE/agent\"" > "$sqlite_config"
+            "theme_dir = \"$sqlite_dir/themes\"" > "$sqlite_config"
           target/backend/debug/nodeflare --config "$sqlite_config" > "$sqlite_dir/server.log" 2>&1 &
           sqlite_pid=$!
           wait_ready http://127.0.0.1:18080 "$sqlite_dir/server.log" "$sqlite_pid"
@@ -208,8 +207,7 @@ jobs:
             'turnstile_secret_key = ""' \
             "frontend_dir = \"$GITHUB_WORKSPACE/frontend/dist\"" \
             "admin_frontend_dir = \"$GITHUB_WORKSPACE/frontend/admin-dist\"" \
-            "theme_dir = \"$postgres_dir/themes\"" \
-            "agent_dir = \"$GITHUB_WORKSPACE/agent\"" > "$postgres_config"
+            "theme_dir = \"$postgres_dir/themes\"" > "$postgres_config"
           target/backend/debug/nodeflare --config "$postgres_config" > "$postgres_dir/server.log" 2>&1 &
           postgres_pid=$!
           wait_ready http://127.0.0.1:18081 "$postgres_dir/server.log" "$postgres_pid"
@@ -757,16 +755,15 @@ jobs:
           FORMAT: ${{ matrix.format }}
         run: |
           set -euo pipefail
-          mkdir -p package/share/frontend package/share/admin package/share/agent release inputs/frontend/unpacked
+          mkdir -p package/share/frontend package/share/admin release inputs/frontend/unpacked
           cp "inputs/server/$BINARY" "package/$PACKAGE_BINARY"
           tar -xzf "inputs/frontend/nodeflare-frontend-$VERSION.tar.gz" -C inputs/frontend/unpacked
           cp -a inputs/frontend/unpacked/dist/. package/share/frontend/
           cp -a inputs/frontend/unpacked/admin-dist/. package/share/admin/
-          cp agent/agent.sh agent/install-macos.sh agent/install-freebsd.sh agent/install.ps1 package/share/agent/
           cp deploy/nodeflare.service package/nodeflare.service
           cp LICENSE package/LICENSE
-          chmod 0755 "package/$PACKAGE_BINARY" package/share/agent/*.sh
-          chmod 0644 package/LICENSE package/nodeflare.service package/share/agent/install.ps1
+          chmod 0755 "package/$PACKAGE_BINARY"
+          chmod 0644 package/LICENSE package/nodeflare.service
           if [ "$FORMAT" = zip ]; then
             (cd package && zip -qr "../release/$ASSET" .)
             unzip -tq "release/$ASSET"

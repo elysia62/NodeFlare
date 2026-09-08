@@ -18,9 +18,6 @@ pub async fn handle(State(state): State<Arc<AppState>>, OriginalUri(uri): Origin
     if let Some(relative) = path.strip_prefix("/admin-assets/") {
         return local_file(&state.config.admin_frontend_dir, relative, false).await;
     }
-    if let Some(relative) = path.strip_prefix("/agent/") {
-        return local_file(&state.config.agent_dir, relative, false).await;
-    }
     if let Some(preview) = path.strip_prefix("/__theme-preview/") {
         let (token, relative) = preview.split_once('/').unwrap_or((preview, ""));
         let base = match crate::db::queries::theme_preview_url(&state.db, token).await {

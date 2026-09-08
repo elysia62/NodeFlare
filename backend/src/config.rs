@@ -43,8 +43,6 @@ pub struct Config {
     pub frontend_dir: PathBuf,
     #[serde(default = "default_admin_frontend_dir")]
     pub admin_frontend_dir: PathBuf,
-    #[serde(default = "default_agent_dir")]
-    pub agent_dir: PathBuf,
     #[serde(default = "default_theme_dir")]
     pub theme_dir: PathBuf,
     #[serde(default = "default_session_hours")]
@@ -103,10 +101,6 @@ fn default_admin_frontend_dir() -> PathBuf {
     default_share_dir().join("admin")
 }
 
-fn default_agent_dir() -> PathBuf {
-    default_share_dir().join("agent")
-}
-
 fn default_theme_dir() -> PathBuf {
     default_data_dir().join("themes")
 }
@@ -136,7 +130,6 @@ impl Config {
             .unwrap_or_else(|| Path::new("."));
         config.frontend_dir = resolve_path(base, &config.frontend_dir);
         config.admin_frontend_dir = resolve_path(base, &config.admin_frontend_dir);
-        config.agent_dir = resolve_path(base, &config.agent_dir);
         config.theme_dir = resolve_path(base, &config.theme_dir);
         config.database_url = resolve_database_url(base, &config.database_url)?;
         config.session_ttl_hours = config.session_ttl_hours.clamp(1, 24 * 90);
@@ -266,10 +259,10 @@ pub fn resolve_database_url(base: &Path, value: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, clear_bootstrap_password, default_admin_frontend_dir, default_agent_dir,
-        default_bind_addr, default_config_path, default_data_dir, default_database_url,
-        default_public_frontend_dir, default_share_dir, default_theme_dir, is_example_password,
-        resolve_database_url, update_database_url,
+        Args, clear_bootstrap_password, default_admin_frontend_dir, default_bind_addr,
+        default_config_path, default_data_dir, default_database_url, default_public_frontend_dir,
+        default_share_dir, default_theme_dir, is_example_password, resolve_database_url,
+        update_database_url,
     };
     use clap::Parser;
     use std::path::Path;
@@ -288,7 +281,6 @@ mod tests {
             default_admin_frontend_dir(),
             default_share_dir().join("admin")
         );
-        assert_eq!(default_agent_dir(), default_share_dir().join("agent"));
         assert_eq!(default_theme_dir(), default_data_dir().join("themes"));
     }
 

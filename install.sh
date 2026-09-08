@@ -52,7 +52,6 @@ server_binary=$install_dir/nodeflare
 theme_dir=$config_dir/themes
 public_frontend_dir=$share_dir/frontend
 admin_frontend_dir=$share_dir/admin
-agent_installer_dir=$share_dir/agent
 
 usage() {
   printf '%s\n' \
@@ -297,7 +296,6 @@ write_config() {
   escaped_password=$(toml_escape "$admin_password")
   escaped_frontend_dir=$(toml_escape "$public_frontend_dir")
   escaped_admin_dir=$(toml_escape "$admin_frontend_dir")
-  escaped_agent_dir=$(toml_escape "$agent_installer_dir")
   escaped_theme_dir=$(toml_escape "$theme_dir")
   config_temp=$(mktemp "$config_dir/.config.toml.XXXXXX")
   {
@@ -310,7 +308,6 @@ write_config() {
     printf 'turnstile_secret_key = ""\n'
     printf 'frontend_dir = "%s"\n' "$escaped_frontend_dir"
     printf 'admin_frontend_dir = "%s"\n' "$escaped_admin_dir"
-    printf 'agent_dir = "%s"\n' "$escaped_agent_dir"
     printf 'theme_dir = "%s"\n' "$escaped_theme_dir"
     printf 'session_ttl_hours = 168\n'
   } > "$config_temp"
@@ -426,7 +423,6 @@ download_release() {
   [ -f "$package_dir/nodeflare" ] \
     && [ -f "$package_dir/share/frontend/index.html" ] \
     && [ -f "$package_dir/share/admin/admin.html" ] \
-    && [ -f "$package_dir/share/agent/agent.sh" ] \
     && [ -f "$package_dir/LICENSE" ] \
     || fail "Release 文件不完整"
   chmod 0755 "$package_dir/nodeflare"
@@ -730,14 +726,11 @@ fi
 snapshot_install
 stop_server
 install -d -m 0700 "$config_dir" "$theme_dir"
-install -d -m 0755 "$install_dir" "$share_dir"
-rm -rf "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
-install -d -m 0755 "$public_frontend_dir" "$admin_frontend_dir" "$agent_installer_dir"
+install -d -m 0755 "$install_dir"
+rm -rf "$share_dir"
+install -d -m 0755 "$public_frontend_dir" "$admin_frontend_dir"
 cp -R "$package_dir/share/frontend/." "$public_frontend_dir/"
 cp -R "$package_dir/share/admin/." "$admin_frontend_dir/"
-cp -R "$package_dir/share/agent/." "$agent_installer_dir/"
-chmod 0755 "$agent_installer_dir/"*.sh
-chmod 0644 "$agent_installer_dir/install.ps1"
 install -m 0755 "$package_dir/nodeflare" "$server_binary"
 install_service
 

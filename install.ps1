@@ -126,7 +126,6 @@ function Wait-Server {
 function Write-Config([string]$Username, [string]$Password, [string]$DatabaseUrl, [int]$Port) {
   $FrontendDir = (Join-Path $ShareDir "frontend").Replace('\', '/')
   $AdminDir = (Join-Path $ShareDir "admin").Replace('\', '/')
-  $AgentDir = (Join-Path $ShareDir "agent").Replace('\', '/')
   $ThemePath = $ThemeDir.Replace('\', '/')
   $Lines = @(
     "database_url = `"$(Escape-Toml $DatabaseUrl)`""
@@ -138,7 +137,6 @@ function Write-Config([string]$Username, [string]$Password, [string]$DatabaseUrl
     'turnstile_secret_key = ""'
     "frontend_dir = `"$FrontendDir`""
     "admin_frontend_dir = `"$AdminDir`""
-    "agent_dir = `"$AgentDir`""
     "theme_dir = `"$ThemePath`""
     'session_ttl_hours = 168'
   )
@@ -233,7 +231,6 @@ try {
     $PackageServer,
     (Join-Path $PackageDir "share\frontend\index.html"),
     (Join-Path $PackageDir "share\admin\admin.html"),
-    (Join-Path $PackageDir "share\agent\agent.sh"),
     (Join-Path $PackageDir "LICENSE")
   )) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
