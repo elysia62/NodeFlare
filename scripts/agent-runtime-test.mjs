@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer } from "ws";
+import { gunzipSync } from "node:zlib";
 
 const binary = resolve(process.env.MONITOR_AGENT_BINARY ?? "agent/target/debug/nodeflare-agent");
 const directory = mkdtempSync(join(tmpdir(), "nodeflare-agent-runtime-"));
@@ -67,7 +68,7 @@ try {
   proxy.listen(0, "127.0.0.1");
   await once(proxy, "listening");
 
-  console.log("agent runtime: automatic update during one-second sampling");
+  console.log("agent runtime: automatic update during three-second sampling");
   websocketServer = new WebSocketServer({ noServer: true });
   upgradeServer = createHttpServer();
   let redirected = false;
@@ -89,27 +90,30 @@ try {
     socket.send(JSON.stringify({
       type: "config", ts: Math.floor(Date.now() / 1_000),
       config: {
-        report_interval: 15, collect_interval: 1, network_interface: "",
+        report_interval: 15, collect_interval: 3, network_interface: "",
         agent_mirror: "", auto_update: true, latency_tasks: [],
       },
     }));
-    socket.on("message", (raw) => {
-      const message = JSON.parse(raw.toString());
-      if (message.type !== "update") return;
+    let receivedThrough = 0;
+    socket.on("message", (raw, binary) => {
+      if (!binary) return;
+      const message = JSON.parse(gunzipSync(raw).toString());
       samples += message.samples.length;
-      if (message.persist) persistedThrough = Math.max(...message.samples.map((sample) => sample.timestamp));
+      receivedThrough = Math.max(receivedThrough, ...message.samples.map((sample) => sample.metrics.timestamp));
+      if (!message.persist) return;
+      persistedThrough = receivedThrough;
       socket.send(JSON.stringify({
         type: "ack", ts: Math.floor(Date.now() / 1_000),
         persisted: message.persist, persistenceError: false,
         persistedThroughTs: persistedThrough,
-        nextPersistAfterMs: 1_000, nextWssReportAfterMs: 1_000, realtimeHint: false,
+        nextPersistAfterMs: 15_000,
       }));
     });
   });
   let token;
   for (let index = 0; index < 100_000; index++) {
     const candidate = `runtime-update-${index}`;
-    if (createHash("sha256").update(candidate).digest().readBigUInt64BE(0) % 1_801n === 2n) {
+    if (createHash("sha256").update(candidate).digest().readBigUInt64BE(0) % 1_801n === 5n) {
       token = candidate;
       break;
     }
@@ -121,6 +125,40 @@ try {
   assert(redirected, "Same-origin WebSocket redirects must remain supported");
   await stopAgent(updating);
 
+  console.log("agent runtime: three-second uploads are unique and reconnect replays unconfirmed samples");
+  const telemetryConnections = [];
+  const trackTelemetry = (socket) => {
+    const connection = { timestamps: [], durable: 0, firstInfo: false, infoCount: 0, commits: 0 };
+    telemetryConnections.push(connection);
+    socket.on("message", (raw, binary) => {
+      if (!binary) return;
+      const message = JSON.parse(gunzipSync(raw).toString());
+      for (const sample of message.samples) {
+        if (!connection.timestamps.length) connection.firstInfo = Boolean(sample.info);
+        connection.infoCount += Number(Boolean(sample.info));
+        assert(!connection.timestamps.includes(sample.metrics.timestamp), "Sample was uploaded twice on the same connection");
+        connection.timestamps.push(sample.metrics.timestamp);
+      }
+      if (message.persist) {
+        connection.durable = connection.timestamps.at(-1);
+        connection.commits++;
+      }
+      if (telemetryConnections.length === 1 && connection.timestamps.length === 3) socket.terminate();
+    });
+  };
+  websocketServer.on("connection", trackTelemetry);
+  const telemetry = startAgent(upgradeServer.address().port, "runtime-telemetry", "telemetry");
+  await waitUntil(() => telemetryConnections.length >= 2 && telemetryConnections[1].commits >= 2,
+    40_000, "Telemetry reconnect or commit did not complete");
+  await stopAgent(telemetry);
+  websocketServer.off("connection", trackTelemetry);
+  const [before, after] = telemetryConnections;
+  assert(before.firstInfo && after.firstInfo, "Static info must be resent on reconnect");
+  assert.equal(before.infoCount, 1, "Unchanged static info must not be uploaded repeatedly");
+  assert(before.timestamps.slice(1).every((timestamp) => after.timestamps.includes(timestamp)), "Unconfirmed samples were lost");
+  assert(!after.timestamps.includes(before.durable), "Durable samples must not be replayed");
+  assert(before.timestamps.slice(1).every((timestamp, index) => timestamp - before.timestamps[index] >= 3), "Sampling interval is shorter than three seconds");
+
   console.log("agent runtime: remote command survives disconnect and returns its result");
   const taskId = randomUUID();
   let remoteConnections = 0;
@@ -128,7 +166,8 @@ try {
   let remoteResult;
   websocketServer.on("connection", (socket) => {
     remoteConnections++;
-    socket.on("message", (raw) => {
+    socket.on("message", (raw, binary) => {
+      if (binary) return;
       const message = JSON.parse(raw.toString());
       if (message.type === "task_received" && message.task_id === taskId) {
         received = true;

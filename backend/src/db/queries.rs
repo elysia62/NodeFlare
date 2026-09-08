@@ -43,7 +43,6 @@ pub struct AgentIdentity {
     pub server_id: String,
     pub hidden: bool,
     pub report_interval: i64,
-    pub collect_interval: i64,
     pub reset_day: i64,
     pub rx_correction: i64,
     pub tx_correction: i64,
@@ -58,10 +57,10 @@ pub struct PersistResult {
 }
 
 #[derive(Debug, Clone, Default)]
-struct TrafficState {
+pub(crate) struct TrafficState {
     cycle_key: i64,
     reset_day: i64,
-    timestamp: i64,
+    pub timestamp: i64,
     raw_rx: i64,
     raw_tx: i64,
     used_rx: i64,
@@ -276,6 +275,14 @@ fn aggregate_history(reports: &[AgentReport], interval: i64) -> Vec<HistoryRow> 
 }
 
 pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<ServerView>> {
+    list_servers_with_live(db, include_hidden, &HashMap::new()).await
+}
+
+pub async fn list_servers_with_live(
+    db: &Database,
+    include_hidden: bool,
+    live: &HashMap<String, AgentReport>,
+) -> Result<Vec<ServerView>> {
     let statement = if include_hidden {
         "SELECT s.id, s.name, s.region, s.group_name, s.tags, s.hidden, s.expires_at, \
          s.traffic_limit, s.traffic_limit_type, s.price, s.billing_cycle, s.currency, \
@@ -296,17 +303,26 @@ pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<Ser
          WHERE s.hidden=0 ORDER BY s.sort_order, s.created_at"
     };
     let rows = sqlx::query(statement).fetch_all(db.pool()).await?;
-    let latency = latest_latency_map(db).await?;
+    let latency = latest_latency_map(db, live).await?;
     rows.into_iter()
         .map(|row| {
             let id: String = row.try_get("id")?;
             let latest_json: Option<String> = row.try_get("latest_json")?;
-            let report = latest_json
+            let persisted_report = latest_json
                 .as_deref()
                 .filter(|value| !value.is_empty() && *value != "{}")
                 .and_then(|value| serde_json::from_str::<AgentReport>(value).ok());
-            let value = |read: fn(&AgentReport) -> f64| report.as_ref().map(read);
-            let integer = |read: fn(&AgentReport) -> i64| report.as_ref().map(read);
+            let report = live
+                .get(&id)
+                .filter(|current| {
+                    current.timestamp
+                        >= persisted_report
+                            .as_ref()
+                            .map_or(0, |report| report.timestamp)
+                })
+                .or(persisted_report.as_ref());
+            let value = |read: fn(&AgentReport) -> f64| report.map(read);
+            let integer = |read: fn(&AgentReport) -> i64| report.map(read);
             let text = |read: fn(&AgentReport) -> &String| report.as_ref().map(|r| read(r).clone());
             Ok(ServerView {
                 id: id.clone(),
@@ -328,7 +344,9 @@ pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<Ser
                 network_interface: row.try_get("network_interface")?,
                 reset_day: row.try_get("reset_day")?,
                 report_interval: row.try_get("report_interval")?,
-                collect_interval: row.try_get("collect_interval")?,
+                collect_interval: row
+                    .try_get::<i64, _>("collect_interval")?
+                    .max(nodeflare_telemetry::MIN_COLLECT_INTERVAL as i64),
                 rx_correction: row.try_get("rx_correction")?,
                 tx_correction: row.try_get("tx_correction")?,
                 agent_mirror: row.try_get("agent_mirror")?,
@@ -544,7 +562,7 @@ pub async fn server_name(db: &Database, id: &str) -> Result<Option<String>> {
 pub async fn agent_identity(db: &Database, token: &str) -> Result<Option<AgentIdentity>> {
     let token_hash = auth::token_hash(token);
     let row = sqlx::query(db.sql(
-        "SELECT id, hidden, report_interval, collect_interval, reset_day, rx_correction, \
+        "SELECT id, hidden, report_interval, reset_day, rx_correction, \
          tx_correction FROM servers WHERE token_hash=? OR EXISTS (\
          SELECT 1 FROM server_install_tokens WHERE server_id=servers.id AND token_hash=?\
          )",
@@ -558,7 +576,6 @@ pub async fn agent_identity(db: &Database, token: &str) -> Result<Option<AgentId
             server_id: row.try_get("id")?,
             hidden: row.try_get::<i64, _>("hidden")? != 0,
             report_interval: row.try_get("report_interval")?,
-            collect_interval: row.try_get("collect_interval")?,
             reset_day: row.try_get("reset_day")?,
             rx_correction: row.try_get("rx_correction")?,
             tx_correction: row.try_get("tx_correction")?,
@@ -582,7 +599,7 @@ pub async fn agent_config(db: &Database, id: &str) -> Result<Option<serde_json::
     let tasks = tasks_for_server(db, id).await?;
     Ok(Some(serde_json::json!({
         "report_interval": row.try_get::<i64, _>("report_interval")?,
-        "collect_interval": row.try_get::<i64, _>("collect_interval")?,
+        "collect_interval": row.try_get::<i64, _>("collect_interval")?.max(nodeflare_telemetry::MIN_COLLECT_INTERVAL as i64),
         "network_interface": row.try_get::<String, _>("network_interface")?,
         "agent_mirror": row.try_get::<String, _>("agent_mirror")?,
         "auto_update": row.try_get::<i64, _>("auto_update")? != 0,
@@ -596,7 +613,6 @@ pub async fn save_agent_batch(
     batch_id: &str,
     reports: &[AgentReport],
     remote_ip: &str,
-    persist: bool,
 ) -> Result<PersistResult> {
     let mut reports = reports.to_vec();
     reports.sort_by_key(|report| report.timestamp);
@@ -615,16 +631,12 @@ pub async fn save_agent_batch(
         anyhow::bail!("report batch exceeds 720 samples");
     }
 
-    let needs_write = persist
-        || reports
-            .iter()
-            .any(|report| !report.latency_results.is_empty());
-    let mut transaction = if db.is_postgres() || !needs_write {
+    let mut transaction = if db.is_postgres() {
         db.pool().begin().await?
     } else {
         db.pool().begin_with("BEGIN IMMEDIATE").await?
     };
-    if db.is_postgres() && needs_write {
+    if db.is_postgres() {
         sqlx::query("SELECT id FROM servers WHERE id=$1 FOR UPDATE")
             .bind(&identity.server_id)
             .fetch_one(&mut *transaction)
@@ -666,29 +678,7 @@ pub async fn save_agent_batch(
     for report in &mut reports {
         apply_traffic(report, &mut traffic, identity);
     }
-    let latest = reports.last().context("report batch became empty")?;
     let report_interval = identity.report_interval.clamp(15, 3600);
-    let next_persist_at = persisted_before.saturating_add(report_interval);
-    // Only a complete persistence batch may advance the durable watermark.
-    if !persist {
-        let next_persist_after_ms =
-            next_persist_at.saturating_sub(latest.timestamp).max(1) as u64 * 1000;
-        if reports
-            .iter()
-            .any(|report| !report.latency_results.is_empty())
-        {
-            save_latency_rows(db, &mut transaction, &identity.server_id, &reports).await?;
-            transaction.commit().await?;
-        } else {
-            transaction.rollback().await?;
-        }
-        return Ok(PersistResult {
-            reports,
-            persisted: false,
-            persisted_through: persisted_before,
-            next_persist_after_ms,
-        });
-    }
 
     let history_rows = aggregate_history(&reports, report_interval);
     save_history_rows(db, &mut transaction, &identity.server_id, &history_rows).await?;
@@ -731,7 +721,7 @@ pub async fn save_agent_batch(
     })
 }
 
-fn valid_agent_report(report: &AgentReport, current: i64) -> bool {
+pub(crate) fn valid_agent_report(report: &AgentReport, current: i64) -> bool {
     fn finite_between(value: f64, minimum: f64, maximum: f64) -> bool {
         value.is_finite() && (minimum..=maximum).contains(&value)
     }
@@ -849,7 +839,18 @@ async fn load_traffic_state(
     .map_err(Into::into)
 }
 
-fn apply_traffic(report: &mut AgentReport, state: &mut TrafficState, identity: &AgentIdentity) {
+pub(crate) async fn agent_traffic_state(db: &Database, server_id: &str) -> Result<TrafficState> {
+    let mut transaction = db.pool().begin().await?;
+    let state = load_traffic_state(db, &mut transaction, server_id).await?;
+    transaction.rollback().await?;
+    Ok(state)
+}
+
+pub(crate) fn apply_traffic(
+    report: &mut AgentReport,
+    state: &mut TrafficState,
+    identity: &AgentIdentity,
+) {
     if report.timestamp <= state.timestamp {
         report.net_rx_total = state.used_rx.saturating_add(identity.rx_correction).max(0);
         report.net_tx_total = state.used_tx.saturating_add(identity.tx_correction).max(0);
@@ -1171,12 +1172,13 @@ pub async fn history(db: &Database, server_id: &str, hours: i64) -> Result<Vec<H
          MAX(disk_utilization) AS disk_utilization FROM ( \
            SELECT (timestamp / ?) * ? AS bucket_timestamp, metric_history.* \
            FROM metric_history WHERE server_id=? \
-             AND last_timestamp>=? \
+             AND timestamp>=? AND last_timestamp>=? \
          ) samples GROUP BY bucket_timestamp ORDER BY bucket_timestamp",
     ))
     .bind(bucket)
     .bind(bucket)
     .bind(server_id)
+    .bind(since.saturating_sub(3600))
     .bind(since)
     .fetch_all(db.pool())
     .await?;
@@ -1327,9 +1329,23 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
-async fn latest_latency_map(db: &Database) -> Result<HashMap<String, Vec<LatencySample>>> {
+async fn latest_latency_map(
+    db: &Database,
+    live: &HashMap<String, AgentReport>,
+) -> Result<HashMap<String, Vec<LatencySample>>> {
+    let mut live_latency = HashMap::<(&str, &str), &AgentLatencyResult>::new();
+    for (server_id, report) in live {
+        for value in &report.latency_results {
+            let current = live_latency
+                .entry((server_id, &value.task_id))
+                .or_insert(value);
+            if value.timestamp > current.timestamp {
+                *current = value;
+            }
+        }
+    }
     let rows = sqlx::query(
-        "SELECT a.server_id, t.id AS task_id, t.name, t.task_type, t.target, t.port, \
+        "SELECT a.server_id, a.assigned_at, t.id AS task_id, t.name, t.task_type, t.target, t.port, \
          lr.timestamp, lr.latency_ms, lr.packet_loss FROM latency_task_servers a \
          JOIN latency_tasks t ON t.id=a.task_id LEFT JOIN latency_results lr \
          ON lr.task_id=a.task_id AND lr.server_id=a.server_id AND lr.timestamp=( \
@@ -1343,24 +1359,31 @@ async fn latest_latency_map(db: &Database) -> Result<HashMap<String, Vec<Latency
     let mut result = HashMap::<String, Vec<LatencySample>>::new();
     for row in rows {
         let server_id: String = row.try_get("server_id")?;
-        result
-            .entry(server_id.clone())
-            .or_default()
-            .push(LatencySample {
-                task_id: row.try_get("task_id")?,
-                server_id,
-                name: row.try_get("name")?,
-                task_type: row.try_get("task_type")?,
-                target: row.try_get("target")?,
-                port: row.try_get("port")?,
-                timestamp: row
-                    .try_get::<Option<i64>, _>("timestamp")?
-                    .unwrap_or_default(),
-                latency_ms: row.try_get::<Option<f64>, _>("latency_ms")?.unwrap_or(-1.0),
-                packet_loss: row
-                    .try_get::<Option<f64>, _>("packet_loss")?
-                    .unwrap_or(-1.0),
-            });
+        let mut point = LatencySample {
+            task_id: row.try_get("task_id")?,
+            server_id: server_id.clone(),
+            name: row.try_get("name")?,
+            task_type: row.try_get("task_type")?,
+            target: row.try_get("target")?,
+            port: row.try_get("port")?,
+            timestamp: row
+                .try_get::<Option<i64>, _>("timestamp")?
+                .unwrap_or_default(),
+            latency_ms: row.try_get::<Option<f64>, _>("latency_ms")?.unwrap_or(-1.0),
+            packet_loss: row
+                .try_get::<Option<f64>, _>("packet_loss")?
+                .unwrap_or(-1.0),
+        };
+        let assigned_at = row.try_get::<i64, _>("assigned_at")?;
+        if let Some(current) = live_latency
+            .get(&(server_id.as_str(), point.task_id.as_str()))
+            .filter(|value| value.timestamp >= point.timestamp && value.timestamp >= assigned_at)
+        {
+            point.timestamp = current.timestamp;
+            point.latency_ms = current.latency_ms;
+            point.packet_loss = current.packet_loss;
+        }
+        result.entry(server_id).or_default().push(point);
     }
     Ok(result)
 }
@@ -2672,17 +2695,17 @@ mod tests {
             sample(start + 1, 90.0),
             sample(start + 2, 20.0),
         ];
-        let first = save_agent_batch(&db, &identity, "first", &reports[..2], "", true)
+        let first = save_agent_batch(&db, &identity, "first", &reports[..2], "")
             .await
             .unwrap();
         assert_eq!(first.persisted_through, start + 1);
         // Reconnect with an overlapping batch: only the unacknowledged sample is added.
-        let second = save_agent_batch(&db, &identity, "overlap", &reports[1..], "", true)
+        let second = save_agent_batch(&db, &identity, "overlap", &reports[1..], "")
             .await
             .unwrap();
         assert_eq!(second.persisted_through, start + 2);
         for id in ["overlap", "another-retry"] {
-            let retry = save_agent_batch(&db, &identity, id, &reports, "", true)
+            let retry = save_agent_batch(&db, &identity, id, &reports, "")
                 .await
                 .unwrap();
             assert!(retry.reports.is_empty());
@@ -2712,20 +2735,27 @@ mod tests {
         let reports = (0..121)
             .map(|offset| sample(start + offset, 25.0))
             .collect::<Vec<_>>();
-        save_agent_batch(&db, &identity, "initial", &reports[..1], "", true)
+        save_agent_batch(&db, &identity, "initial", &reports[..1], "")
             .await
             .unwrap();
-        let live = save_agent_batch(&db, &identity, "live", &reports[120..], "", false)
+        let mut buffer = crate::websocket::ingest::AgentBuffer::new(&db, &identity.server_id)
             .await
             .unwrap();
-        assert!(!live.persisted);
-        assert_eq!(live.persisted_through, start);
+        let live = buffer
+            .receive(&db, &identity, "", reports[120..].to_vec(), false)
+            .await
+            .unwrap();
+        assert!(live.acknowledgement.is_none());
+        assert_eq!(live.latest.unwrap().timestamp, start + 120);
+        assert_eq!(
+            list_servers(&db, true).await.unwrap()[0].timestamp,
+            Some(start)
+        );
         // Even a payload-size-limited batch shorter than report_interval must commit.
         for (index, batch) in reports[1..].chunks(3).enumerate() {
-            let result =
-                save_agent_batch(&db, &identity, &format!("batch-{index}"), batch, "", true)
-                    .await
-                    .unwrap();
+            let result = save_agent_batch(&db, &identity, &format!("batch-{index}"), batch, "")
+                .await
+                .unwrap();
             assert!(result.persisted);
             assert_eq!(result.persisted_through, batch.last().unwrap().timestamp);
         }
@@ -2739,10 +2769,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latest_latency_cache_respects_probe_assignment_boundaries() {
+        let (db, identity) = test_server().await;
+        let current = now();
+        let task_id = create_latency_task(
+            &db,
+            &LatencyTaskInput {
+                name: "Cache test".into(),
+                task_type: "tcp".into(),
+                target: "example.com".into(),
+                port: Some(443),
+                interval_seconds: 60,
+                default_enabled: false,
+                server_ids: vec![identity.server_id.clone()],
+            },
+        )
+        .await
+        .unwrap();
+        let live = HashMap::from([(
+            identity.server_id.clone(),
+            AgentReport {
+                timestamp: current,
+                latency_results: vec![AgentLatencyResult {
+                    task_id: task_id.clone(),
+                    timestamp: current,
+                    latency_ms: 28.4,
+                    packet_loss: 0.0,
+                }],
+                ..AgentReport::default()
+            },
+        )]);
+        assert_eq!(
+            list_servers_with_live(&db, true, &live).await.unwrap()[0].latency[0].latency_ms,
+            28.4
+        );
+        sqlx::query("UPDATE latency_task_servers SET assigned_at=? WHERE task_id=?")
+            .bind(current + 1)
+            .bind(&task_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let latest = list_servers_with_live(&db, true, &live)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(latest.latency[0].timestamp, 0);
+        assert_eq!(latest.latency[0].latency_ms, -1.0);
+    }
+
+    #[tokio::test]
+    async fn live_buffer_commits_without_reupload_and_replays_only_unconfirmed_samples() {
+        use crate::websocket::ingest::AgentBuffer;
+        let (db, identity) = test_server().await;
+        let start = now() - 120;
+        let first = sample(start, 10.0);
+        let second = sample(start + 3, 20.0);
+        let third = sample(start + 6, 30.0);
+        let mut buffer = AgentBuffer::new(&db, &identity.server_id).await.unwrap();
+        let initial = buffer
+            .receive(&db, &identity, "", vec![first.clone()], true)
+            .await
+            .unwrap();
+        assert_eq!(initial.acknowledgement.unwrap().persisted_through, start);
+
+        let result = buffer
+            .receive(&db, &identity, "", vec![second.clone()], false)
+            .await
+            .unwrap();
+        assert!(result.acknowledgement.is_none());
+        let latest = result.latest.unwrap();
+        let snapshot = HashMap::from([(identity.server_id.clone(), latest)]);
+        assert_eq!(
+            list_servers_with_live(&db, true, &snapshot).await.unwrap()[0].cpu,
+            Some(20.0)
+        );
+        assert_eq!(list_servers(&db, true).await.unwrap()[0].cpu, Some(10.0));
+        let duplicate = buffer
+            .receive(&db, &identity, "", vec![second.clone()], false)
+            .await
+            .unwrap();
+        assert!(duplicate.latest.is_none());
+        let committed = buffer
+            .receive(&db, &identity, "", Vec::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            committed.acknowledgement.unwrap().persisted_through,
+            start + 3
+        );
+        assert!(committed.latest.is_none());
+
+        buffer
+            .receive(&db, &identity, "", vec![third.clone()], false)
+            .await
+            .unwrap();
+        drop(buffer);
+        let mut reconnected = AgentBuffer::new(&db, &identity.server_id).await.unwrap();
+        let replay = reconnected
+            .receive(&db, &identity, "", vec![first, second, third], true)
+            .await
+            .unwrap();
+        let ack = replay.acknowledgement.unwrap();
+        assert_eq!(ack.persisted_through, start + 6);
+        assert_eq!(ack.reports.len(), 1);
+        assert_eq!(
+            history(&db, &identity.server_id, 1)
+                .await
+                .unwrap()
+                .iter()
+                .map(|point| point.sample_count)
+                .sum::<i64>(),
+            3
+        );
+        assert_eq!(
+            ack.reports[0].net_rx_total,
+            replay.latest.unwrap().net_rx_total
+        );
+    }
+
+    #[tokio::test]
+    async fn live_buffer_bounds_pending_samples_and_retains_all_latency_results() {
+        use crate::websocket::ingest::AgentBuffer;
+        let (db, identity) = test_server().await;
+        let start = now() - 2400;
+        let reports: Vec<_> = (0..721)
+            .map(|index| AgentReport {
+                timestamp: start + index * 3,
+                latency_results: vec![AgentLatencyResult {
+                    task_id: "test-task".into(),
+                    timestamp: start + index * 3,
+                    latency_ms: 20.0,
+                    packet_loss: 0.0,
+                }],
+                ..AgentReport::default()
+            })
+            .collect();
+        let mut buffer = AgentBuffer::new(&db, &identity.server_id).await.unwrap();
+        let buffered = buffer
+            .receive(&db, &identity, "", reports[..719].to_vec(), false)
+            .await
+            .unwrap();
+        assert!(buffered.acknowledgement.is_none());
+        assert_eq!(buffered.latest.unwrap().latency_results.len(), 719);
+        let bounded = buffer
+            .receive(&db, &identity, "", reports[719..].to_vec(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            bounded.acknowledgement.unwrap().persisted_through,
+            reports[718].timestamp
+        );
+        assert_eq!(bounded.latest.unwrap().latency_results.len(), 2);
+        let committed = buffer
+            .receive(&db, &identity, "", Vec::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            committed.acknowledgement.unwrap().persisted_through,
+            reports[720].timestamp
+        );
+        assert_eq!(
+            history(&db, &identity.server_id, 1)
+                .await
+                .unwrap()
+                .iter()
+                .map(|point| point.sample_count)
+                .sum::<i64>(),
+            721
+        );
+    }
+
+    #[tokio::test]
     async fn failed_persistence_rolls_back_history_and_watermark() {
         let (db, identity) = test_server().await;
         let start = now() - 60;
-        save_agent_batch(&db, &identity, "initial", &[sample(start, 10.0)], "", true)
+        save_agent_batch(&db, &identity, "initial", &[sample(start, 10.0)], "")
             .await
             .unwrap();
         sqlx::query(
@@ -2753,17 +2954,14 @@ mod tests {
         .await
         .unwrap();
         let next = sample(start + 1, 90.0);
-        assert!(
-            save_agent_batch(
-                &db,
-                &identity,
-                "next",
-                std::slice::from_ref(&next),
-                "",
-                true
-            )
+        let mut buffer = crate::websocket::ingest::AgentBuffer::new(&db, &identity.server_id)
             .await
-            .is_err()
+            .unwrap();
+        assert!(
+            buffer
+                .receive(&db, &identity, "", vec![next], true)
+                .await
+                .is_err()
         );
         let count = sqlx::query_scalar::<_, i64>(
             "SELECT CAST(SUM(sample_count) AS BIGINT) FROM metric_history",
@@ -2782,10 +2980,11 @@ mod tests {
             .execute(db.pool())
             .await
             .unwrap();
-        let result = save_agent_batch(&db, &identity, "next", &[next], "", true)
+        let result = buffer
+            .receive(&db, &identity, "", Vec::new(), true)
             .await
             .unwrap();
-        assert_eq!(result.persisted_through, start + 1);
+        assert_eq!(result.acknowledgement.unwrap().persisted_through, start + 1);
     }
 
     #[tokio::test]
@@ -2798,7 +2997,7 @@ mod tests {
             sample(start + 2, 90.0),
             sample(start + 60, 10.0),
         ];
-        save_agent_batch(&db, &identity, "weighted", &reports, "", true)
+        save_agent_batch(&db, &identity, "weighted", &reports, "")
             .await
             .unwrap();
         let points = history(&db, &identity.server_id, 24).await.unwrap();
@@ -2838,7 +3037,7 @@ mod tests {
         let reports = (0..=120)
             .map(|offset| sample(start + offset, if offset == 60 { 10.0 } else { 90.0 }))
             .collect::<Vec<_>>();
-        save_agent_batch(&db, &identity, "alert-data", &reports, "", true)
+        save_agent_batch(&db, &identity, "alert-data", &reports, "")
             .await
             .unwrap();
         for metric in ["cpu", "memory", "disk", "net_in", "net_out"] {
@@ -2894,15 +3093,7 @@ mod tests {
             let identity = identity.clone();
             let reports = reports.clone();
             handles.push(tokio::spawn(async move {
-                save_agent_batch(
-                    &db,
-                    &identity,
-                    &format!("retry-{index}"),
-                    &reports,
-                    "",
-                    true,
-                )
-                .await
+                save_agent_batch(&db, &identity, &format!("retry-{index}"), &reports, "").await
             }));
         }
         for handle in handles {
@@ -3031,7 +3222,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let result = save_agent_batch(&db, &identity, "large-batch", &reports, "127.0.0.1", true)
+        let result = save_agent_batch(&db, &identity, "large-batch", &reports, "127.0.0.1")
             .await
             .unwrap();
         let rows = sqlx::query_scalar::<_, i64>(
@@ -3054,22 +3245,24 @@ mod tests {
         assert_eq!(latency_rows, 600);
 
         let persisted_at = start + 599;
-        let skipped = save_agent_batch(
-            &db,
-            &identity,
-            "realtime-only",
-            &[AgentReport {
-                timestamp: persisted_at + 1,
-                ..AgentReport::default()
-            }],
-            "127.0.0.1",
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(!skipped.persisted);
-        assert_eq!(skipped.persisted_through, persisted_at);
-        assert_eq!(skipped.next_persist_after_ms, 59_000);
+        let mut buffer = crate::websocket::ingest::AgentBuffer::new(&db, &identity.server_id)
+            .await
+            .unwrap();
+        let skipped = buffer
+            .receive(
+                &db,
+                &identity,
+                "127.0.0.1",
+                vec![AgentReport {
+                    timestamp: persisted_at + 1,
+                    ..AgentReport::default()
+                }],
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(skipped.acknowledgement.is_none());
+        assert_eq!(skipped.latest.unwrap().timestamp, persisted_at + 1);
 
         let due = save_agent_batch(
             &db,
@@ -3080,7 +3273,6 @@ mod tests {
                 ..AgentReport::default()
             }],
             "127.0.0.1",
-            true,
         )
         .await
         .unwrap();
@@ -3131,7 +3323,6 @@ mod tests {
                 ..AgentReport::default()
             }],
             "127.0.0.1",
-            true,
         )
         .await
         .unwrap();
@@ -3291,7 +3482,7 @@ mod tests {
     async fn cleanup_is_bounded_and_keeps_current_data_and_server_state() {
         let (db, identity) = test_server().await;
         let current = now();
-        save_agent_batch(&db, &identity, "latest", &[sample(current, 40.0)], "", true)
+        save_agent_batch(&db, &identity, "latest", &[sample(current, 40.0)], "")
             .await
             .unwrap();
         let task_id = create_latency_task(

@@ -1,3 +1,7 @@
+pub use nodeflare_telemetry::{
+    DiskMetric as AgentDiskMetric, GpuMetric as AgentGpuMetric,
+    LatencyResult as AgentLatencyResult, Report as AgentReport,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -137,83 +141,6 @@ pub struct LoginSessionView {
     pub last_seen_at: i64,
     pub expires_at: i64,
     pub current: bool,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentReport {
-    pub timestamp: i64,
-    pub cpu: f64,
-    pub load1: f64,
-    pub load5: f64,
-    pub load15: f64,
-    pub mem_used: i64,
-    pub mem_total: i64,
-    pub swap_used: i64,
-    pub swap_total: i64,
-    pub disk_used: i64,
-    pub disk_total: i64,
-    pub net_in: f64,
-    pub net_out: f64,
-    pub net_rx_total: i64,
-    pub net_tx_total: i64,
-    pub uptime: i64,
-    pub processes: i64,
-    pub tcp_connections: i64,
-    pub udp_connections: i64,
-    pub cpu_cores: i64,
-    pub cpu_model: String,
-    pub os: String,
-    pub kernel: String,
-    pub arch: String,
-    pub virtualization: String,
-    pub gpu_usage: f64,
-    pub gpu_model: String,
-    pub agent_version: String,
-    pub ip_v4: String,
-    pub ip_v6: String,
-    pub disk_read_bps: f64,
-    pub disk_write_bps: f64,
-    pub disk_read_iops: f64,
-    pub disk_write_iops: f64,
-    pub disk_await_ms: f64,
-    pub disk_utilization: f64,
-    pub disks: Vec<AgentDiskMetric>,
-    pub gpus: Vec<AgentGpuMetric>,
-    pub latency_results: Vec<AgentLatencyResult>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentDiskMetric {
-    pub name: String,
-    pub mount_point: String,
-    pub used: i64,
-    pub total: i64,
-    pub read_bps: f64,
-    pub write_bps: f64,
-    pub read_iops: f64,
-    pub write_iops: f64,
-    pub await_ms: f64,
-    pub utilization: f64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentGpuMetric {
-    pub model: String,
-    pub usage: Option<f64>,
-    pub memory_used: i64,
-    pub memory_total: i64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentLatencyResult {
-    pub task_id: String,
-    pub timestamp: i64,
-    pub latency_ms: f64,
-    pub packet_loss: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -445,12 +372,6 @@ pub struct ServerOrderInput {
 #[serde(deny_unknown_fields)]
 pub struct ServerBatchInput {
     pub ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WakeServersInput {
-    pub server_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

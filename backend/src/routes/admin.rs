@@ -34,7 +34,8 @@ pub struct DatabaseMigrationInput {
 }
 
 pub async fn servers_get(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    let servers = crate::db::queries::list_servers(&state.db, true)
+    let live = state.live_reports.read().await.clone();
+    let servers = crate::db::queries::list_servers_with_live(&state.db, true, &live)
         .await
         .map_err(ApiResponse::internal)?;
     Ok(Json(serde_json::json!({"servers": servers})).into_response())
@@ -871,7 +872,8 @@ fn validate_server(input: &ServerInput) -> Result<(), &'static str> {
     }
     if !(1..=31).contains(&input.reset_day)
         || !(15..=3600).contains(&input.report_interval)
-        || !(1..=60).contains(&input.collect_interval)
+        || !(nodeflare_telemetry::MIN_COLLECT_INTERVAL as i64..=60)
+            .contains(&input.collect_interval)
         || input.collect_interval > input.report_interval
         || (input.report_interval + input.collect_interval - 1) / input.collect_interval > 720
     {
@@ -1125,7 +1127,7 @@ mod server_validation_tests {
             "hidden": false, "expires_at": null, "traffic_limit": 0,
             "traffic_limit_type": "sum", "price": 0, "billing_cycle": 30,
             "currency": "CNY", "auto_renewal": false, "network_interface": "",
-            "reset_day": 1, "report_interval": 60, "collect_interval": 1,
+            "reset_day": 1, "report_interval": 60, "collect_interval": 3,
             "rx_correction": 0, "tx_correction": 0, "agent_mirror": "",
             "offline_notify_disabled": false, "auto_update": true
         }))

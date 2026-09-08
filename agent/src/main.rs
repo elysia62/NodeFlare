@@ -1,5 +1,7 @@
 mod live_batch;
 mod runtime_stats;
+use nodeflare_telemetry as telemetry;
+use telemetry::{DiskMetric, GpuMetric, LatencyResult, Report};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -63,7 +65,6 @@ const MAX_PENDING_SPOOL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PENDING_SPOOL_LINE_BYTES: usize = 1024 * 1024;
 const LIVE_ACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const LIVE_HINT_READ_TIMEOUT: Duration = Duration::from_millis(10);
-const LIVE_REPORT_DIVISOR: u64 = 15;
 const BASIC_INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SLOW_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const PUBLIC_IP_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -120,14 +121,6 @@ struct LatencyTask {
     target: String,
     port: Option<i64>,
     interval_seconds: u64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LatencyResult {
-    task_id: String,
-    timestamp: i64,
-    latency_ms: f64,
-    packet_loss: f64,
 }
 
 struct LatencyExecutor {
@@ -383,10 +376,7 @@ impl LiveSender {
         stats: Arc<runtime_stats::RuntimeStats>,
     ) -> Result<Self> {
         let pending = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
-        let send_interval = Arc::new(Mutex::new(live_batch_interval(
-            config.report_interval,
-            config.collect_interval,
-        )));
+        let send_interval = Arc::new(Mutex::new(live_batch_interval(config.collect_interval)));
         let persisted_through = Arc::new(AtomicI64::new(0));
         let remote_config = Arc::new(Mutex::new(None));
         let endpoint = live_endpoint(&config.endpoint)?;
@@ -433,9 +423,9 @@ impl LiveSender {
         }
     }
 
-    fn set_send_interval(&self, report_interval: u64, collect_interval: u64) {
+    fn set_send_interval(&self, collect_interval: u64) {
         if let Ok(mut interval) = self.send_interval.lock() {
-            *interval = live_batch_interval(report_interval, collect_interval);
+            *interval = live_batch_interval(collect_interval);
         }
         self.pending.1.notify_one();
     }
@@ -452,78 +442,8 @@ impl LiveSender {
     }
 }
 
-fn live_batch_interval(report_interval: u64, collect_interval: u64) -> Duration {
-    let seconds = report_interval
-        .clamp(15, 3600)
-        .div_ceil(LIVE_REPORT_DIVISOR)
-        .clamp(1, 60)
-        .max(collect_interval.clamp(1, 60));
-    Duration::from_secs(seconds)
-}
-
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
-struct DiskMetric {
-    name: String,
-    mount_point: String,
-    used: i64,
-    total: i64,
-    read_bps: f64,
-    write_bps: f64,
-    read_iops: f64,
-    write_iops: f64,
-    await_ms: f64,
-    utilization: f64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct GpuMetric {
-    model: String,
-    usage: Option<f64>,
-    memory_used: i64,
-    memory_total: i64,
-}
-
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
-struct Report {
-    timestamp: i64,
-    cpu: f64,
-    load1: f64,
-    load5: f64,
-    load15: f64,
-    mem_used: i64,
-    mem_total: i64,
-    swap_used: i64,
-    swap_total: i64,
-    disk_used: i64,
-    disk_total: i64,
-    net_in: f64,
-    net_out: f64,
-    net_rx_total: i64,
-    net_tx_total: i64,
-    uptime: i64,
-    processes: i64,
-    tcp_connections: i64,
-    udp_connections: i64,
-    cpu_cores: i64,
-    cpu_model: String,
-    os: String,
-    kernel: String,
-    arch: String,
-    virtualization: String,
-    gpu_usage: f64,
-    gpu_model: String,
-    agent_version: String,
-    ip_v4: String,
-    ip_v6: String,
-    disk_read_bps: f64,
-    disk_write_bps: f64,
-    disk_read_iops: f64,
-    disk_write_iops: f64,
-    disk_await_ms: f64,
-    disk_utilization: f64,
-    disks: Vec<DiskMetric>,
-    gpus: Vec<GpuMetric>,
-    latency_results: Vec<LatencyResult>,
+fn live_batch_interval(collect_interval: u64) -> Duration {
+    Duration::from_secs(collect_interval.clamp(telemetry::MIN_COLLECT_INTERVAL, 60))
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1720,7 +1640,7 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
         token,
         endpoint: endpoint.trim_end_matches('/').to_string(),
         report_interval: interval,
-        collect_interval: 1,
+        collect_interval: telemetry::MIN_COLLECT_INTERVAL,
         network_interface: String::new(),
         agent_mirror: String::new(),
         auto_update: true,
@@ -1735,12 +1655,6 @@ fn live_endpoint(endpoint: &str) -> Result<String> {
     let path = format!("{}/api/agent/ws", url.path().trim_end_matches('/'));
     url.set_path(&path);
     Ok(url.to_string())
-}
-
-fn report_batch_id(reports: &[Report]) -> String {
-    let encoded = serde_json::to_vec(reports).unwrap_or_default();
-    let digest = Sha256::digest(encoded);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 type LiveSocket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
@@ -1853,10 +1767,6 @@ struct LiveAck {
     persisted_through_ts: i64,
     #[serde(rename = "nextPersistAfterMs")]
     next_persist_after_ms: u64,
-    #[serde(rename = "nextWssReportAfterMs")]
-    next_wss_report_after_ms: u64,
-    #[serde(rename = "realtimeHint")]
-    realtime_hint: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2463,11 +2373,6 @@ fn flush_remote_results(socket: &mut LiveSocket, executor: &mut RemoteExecutor) 
     Ok(())
 }
 
-fn ack_wss_interval(ack: &LiveAck) -> Duration {
-    Duration::from_millis(ack.next_wss_report_after_ms)
-        .clamp(Duration::from_secs(1), Duration::from_secs(3600))
-}
-
 fn ack_persist_interval(ack: &LiveAck) -> Duration {
     Duration::from_millis(ack.next_persist_after_ms)
         .clamp(Duration::from_secs(1), Duration::from_secs(3600))
@@ -2583,7 +2488,7 @@ fn wait_for_live_ack(
         }
         set_live_read_timeout(socket, Some(remaining))?;
         match read_live_ack(socket)? {
-            LiveRead::Ack(ack) if !ack.realtime_hint => {
+            LiveRead::Ack(ack) => {
                 return Ok(LiveRead::Ack(ack));
             }
             LiveRead::Config(config) => {
@@ -2598,24 +2503,30 @@ fn wait_for_live_ack(
                 remote_executor.acknowledge(&task_id);
             }
             LiveRead::Closed => return Ok(LiveRead::Closed),
-            LiveRead::Ack(_) | LiveRead::Pending => {}
+            LiveRead::Pending => {}
         }
     }
 }
 
-fn live_update_payload(reports: &[Report], persist: bool) -> Result<String> {
-    let message = serde_json::json!({
-        "type": "update",
-        "batchId": report_batch_id(reports),
-        "samples": reports,
-        "persist": persist,
-    });
-    Ok(serde_json::to_string(&message)?)
+fn live_update_payload(
+    reports: Vec<Report>,
+    persist: bool,
+    info: &mut Option<telemetry::Info>,
+) -> Result<Vec<u8>> {
+    let mut next_info = info.clone();
+    let payload = telemetry::encode(&telemetry::Update::from_reports(
+        reports,
+        persist,
+        &mut next_info,
+    ))?;
+    *info = next_info;
+    Ok(payload)
 }
 
 fn observe_persisted_through(target: &AtomicI64, ack: &LiveAck) {
-    let _ = ack.persisted;
-    target.fetch_max(ack.persisted_through_ts.max(0), Ordering::AcqRel);
+    if ack.persisted && !ack.persistence_error {
+        target.fetch_max(ack.persisted_through_ts.max(0), Ordering::AcqRel);
+    }
 }
 
 fn prune_live_queue(pending: &Arc<(Mutex<VecDeque<Report>>, Condvar)>, persisted_through: i64) {
@@ -2647,9 +2558,11 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         stats,
     } = worker;
     let mut socket: Option<LiveSocket> = None;
-    let mut wss_interval = configured_interval
-        .lock()
-        .map_or(Duration::from_secs(1), |interval| *interval);
+    let mut wss_interval = configured_interval.lock().map_or(
+        Duration::from_secs(telemetry::MIN_COLLECT_INTERVAL),
+        |interval| *interval,
+    );
+    let mut info = None;
     let mut accepted_through = persisted_through.load(Ordering::Acquire);
     let mut next_send_at = Instant::now();
     let mut next_probe_at = Instant::now();
@@ -2671,6 +2584,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                         continue;
                     }
                     socket = Some(connected);
+                    info = None;
                     remote_executor.reset_delivery();
                     accepted_through = persisted_through.load(Ordering::Acquire);
                     next_send_at = Instant::now();
@@ -2700,17 +2614,16 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         let (batch, persist, more_pending) = loop {
             let now = Instant::now();
             let persisted = persisted_through.load(Ordering::Acquire);
-            if now >= next_probe_at {
-                let persistence_batch = live_batch_after(&queue, persisted);
-                if !persistence_batch.is_empty() {
-                    let last = persistence_batch.last().unwrap().timestamp;
-                    let more_pending = queue.iter().any(|report| report.timestamp > last);
-                    break (persistence_batch, true, more_pending);
-                }
-            }
             let unsent = live_batch_after(&queue, accepted_through);
-            if !unsent.is_empty() && now >= next_send_at {
-                break (unsent, false, false);
+            let persist =
+                now >= next_probe_at && queue.iter().any(|report| report.timestamp > persisted);
+            if persist || (!unsent.is_empty() && now >= next_send_at) {
+                let last = unsent
+                    .last()
+                    .map_or(accepted_through, |report| report.timestamp);
+                let more_pending = queue.iter().any(|report| report.timestamp > last);
+                // A commit can be empty: samples already sent remain buffered by the server.
+                break (unsent, persist || more_pending, more_pending);
             }
 
             let wake_at = if !unsent.is_empty() {
@@ -2738,10 +2651,6 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                 } else {
                     match read_live_ack(connected) {
                         Ok(LiveRead::Closed) => drop_socket = true,
-                        Ok(LiveRead::Ack(ack)) if ack.realtime_hint => {
-                            wss_interval = ack_wss_interval(&ack);
-                            next_send_at = Instant::now() + wss_interval;
-                        }
                         Ok(LiveRead::Ack(ack)) => {
                             observe_persisted_through(&persisted_through, &ack);
                             if ack.persistence_error {
@@ -2750,8 +2659,6 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                             } else {
                                 prune_live_queue(&pending, ack.persisted_through_ts);
                                 accepted_through = accepted_through.max(ack.persisted_through_ts);
-                                wss_interval = ack_wss_interval(&ack);
-                                next_send_at = Instant::now() + wss_interval;
                                 next_probe_at = Instant::now() + ack_persist_interval(&ack);
                             }
                         }
@@ -2792,10 +2699,15 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         drop(queue);
 
         if let Ok(interval) = configured_interval.lock() {
-            wss_interval = (*interval).clamp(Duration::from_secs(1), Duration::from_secs(60));
+            wss_interval = (*interval).clamp(
+                Duration::from_secs(telemetry::MIN_COLLECT_INTERVAL),
+                Duration::from_secs(60),
+            );
         }
 
-        let payload = match live_update_payload(&batch, persist) {
+        let batch_last = batch.last().map(|report| report.timestamp);
+        let batch_len = batch.len();
+        let payload = match live_update_payload(batch, persist, &mut info) {
             Ok(payload) => payload,
             Err(error) => {
                 eprintln!("live payload encode failed: {error}");
@@ -2805,7 +2717,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
         };
         let sent = socket
             .as_mut()
-            .is_some_and(|socket| socket.send(Message::Text(payload.into())).is_ok());
+            .is_some_and(|socket| socket.send(Message::Binary(payload.into())).is_ok());
         if !sent {
             socket = None;
             accepted_through = persisted_through.load(Ordering::Acquire);
@@ -2814,7 +2726,14 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
             thread::sleep(LIVE_RECONNECT_DELAY);
             continue;
         }
-        stats.live_batch_sent(batch.len());
+        stats.live_batch_sent(batch_len);
+        if let Some(timestamp) = batch_last {
+            accepted_through = accepted_through.max(timestamp);
+        }
+        next_send_at = Instant::now() + wss_interval;
+        if !persist {
+            continue;
+        }
 
         let mut drop_socket = false;
         if let Some(socket) = socket.as_mut() {
@@ -2827,18 +2746,11 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
                         drop_socket = true;
                     } else {
                         prune_live_queue(&pending, ack.persisted_through_ts);
-                        if let Some(timestamp) = batch.iter().map(|report| report.timestamp).max() {
-                            accepted_through = accepted_through.max(timestamp);
-                        }
                         accepted_through = accepted_through.max(ack.persisted_through_ts);
-                        wss_interval = ack_wss_interval(&ack);
-                        next_send_at = Instant::now() + wss_interval;
                         next_probe_at = Instant::now() + ack_persist_interval(&ack);
-                        if persist
-                            && more_pending
-                            && batch
-                                .last()
-                                .is_some_and(|report| ack.persisted_through_ts >= report.timestamp)
+                        if more_pending
+                            && batch_last
+                                .is_some_and(|timestamp| ack.persisted_through_ts >= timestamp)
                         {
                             next_probe_at = Instant::now();
                         }
@@ -2874,7 +2786,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
 fn apply_remote(config: &mut RuntimeConfig, remote: &RemoteConfig) -> bool {
     if valid_sample_schedule(remote.report_interval, remote.collect_interval) {
         config.report_interval = remote.report_interval;
-        config.collect_interval = remote.collect_interval;
+        config.collect_interval = remote.collect_interval.max(telemetry::MIN_COLLECT_INTERVAL);
     }
     config
         .network_interface
@@ -3380,7 +3292,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
                 if config.collect_interval != previous_collect_interval
                     || config.report_interval != previous_report_interval
                 {
-                    live.set_send_interval(config.report_interval, config.collect_interval);
+                    live.set_send_interval(config.collect_interval);
                 }
             }
         }
@@ -3542,7 +3454,7 @@ mod tests {
         PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES,
         REMOTE_STREAM_OUTPUT_BYTES, RemoteExecutor, RemoteTaskJournalEntry, RemoteTaskMessage,
         Report, TaskResultMessage, UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval,
-        ack_wss_interval, advance_deadline, clock_offset_from_http_date, corrected_timestamp,
+        advance_deadline, clock_offset_from_http_date, corrected_timestamp,
         execute_remote_task_with_timeout, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
         live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
         parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
@@ -3693,24 +3605,20 @@ mod tests {
     }
 
     #[test]
-    fn accepts_server_realtime_ack_interval() {
+    fn accepts_durable_ack_interval_and_limits_upload_frequency() {
         let ack: LiveAck = serde_json::from_str(
-            r#"{"type":"ack","ts":100,"persisted":false,"persistenceError":false,"persistedThroughTs":90,"nextPersistAfterMs":60000,"nextWssReportAfterMs":5000,"realtimeHint":false}"#,
+            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextPersistAfterMs":60000}"#,
         )
         .unwrap();
-        assert_eq!(ack_wss_interval(&ack), Duration::from_secs(5));
         assert_eq!(ack_persist_interval(&ack), Duration::from_secs(60));
-        let slow: LiveAck = serde_json::from_str(
-            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextPersistAfterMs":60000,"nextWssReportAfterMs":1,"realtimeHint":true}"#,
-        )
-        .unwrap();
-        assert_eq!(ack_wss_interval(&slow), Duration::from_secs(1));
-        assert!(slow.realtime_hint);
         let idle: LiveAck = serde_json::from_str(
-            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextPersistAfterMs":120000,"nextWssReportAfterMs":3600000,"realtimeHint":false}"#,
+            r#"{"type":"ack","ts":100,"persisted":true,"persistenceError":false,"persistedThroughTs":100,"nextPersistAfterMs":120000}"#,
         )
         .unwrap();
         assert_eq!(ack_persist_interval(&idle), Duration::from_secs(120));
+        assert_eq!(super::live_batch_interval(1), Duration::from_secs(3));
+        assert_eq!(super::live_batch_interval(3), Duration::from_secs(3));
+        assert_eq!(super::live_batch_interval(15), Duration::from_secs(15));
     }
 
     #[cfg(unix)]
@@ -3873,7 +3781,7 @@ mod tests {
     #[test]
     fn encodes_realtime_samples_as_a_batch() {
         let payload = live_update_payload(
-            &[
+            vec![
                 Report {
                     timestamp: 10,
                     cpu: 20.0,
@@ -3886,13 +3794,13 @@ mod tests {
                 },
             ],
             false,
+            &mut None,
         )
         .unwrap();
-        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(value["type"], "update");
+        let value: serde_json::Value = nodeflare_telemetry::decode(&payload).unwrap();
         assert_eq!(value["persist"], false);
         assert_eq!(value["samples"].as_array().unwrap().len(), 2);
-        assert_eq!(value["samples"][1]["cpu"], 30.0);
+        assert_eq!(value["samples"][1]["metrics"]["cpu"], 30.0);
     }
 
     #[test]

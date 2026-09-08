@@ -272,7 +272,7 @@ MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
 if [ -n "${MONITOR_AGENT_BINARY:-}" ]; then
   step "real Agent failed-latency and persistence"
   request -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -X PATCH \
-    --data "$(printf '%s' "$server_input" | jq '.report_interval=15 | .collect_interval=1')" \
+    --data "$(printf '%s' "$server_input" | jq '.report_interval=15 | .collect_interval=3')" \
     "$MONITOR_BASE_URL/api/admin/servers/$server_id" >/dev/null
   agent_latency_task_id=$(request -H "Authorization: Bearer $admin_token" \
     -H 'Content-Type: application/json' \

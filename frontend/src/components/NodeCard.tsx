@@ -94,10 +94,11 @@ function CarrierPanel({ label, rows, kind, empty }: {
   );
 }
 
-export function NodeCard({ server, config, liveLatencyResults, onOpen }: {
+export function NodeCard({ server, config, liveLatencyResults, liveConnected, onOpen }: {
   server: Server;
   config: Config;
   liveLatencyResults?: LiveLatencyResult[];
+  liveConnected: boolean;
   onOpen: () => void;
 }) {
   const threshold = config.offline_threshold_seconds;
@@ -108,7 +109,7 @@ export function NodeCard({ server, config, liveLatencyResults, onOpen }: {
   const traffic = server.traffic_limit > 0 ? Math.min(100, (usedTraffic / server.traffic_limit) * 100) : 0;
   const locale = config.locale;
   const showCarriers = themeToggle(config, "showCarrierLatency", false);
-  const quality = useNodeLatency(server, config.show_latency, locale, showCarriers ? carrierSelection(config) : null, liveLatencyResults);
+  const quality = useNodeLatency(server, config.show_latency, locale, showCarriers ? carrierSelection(config) : null, liveLatencyResults, liveConnected);
   const price = formatPrice(server, locale);
   const remainingValue = remainingAssetValue(server.price, server.billing_cycle, server.expires_at);
   const showExpiryPanel = config.show_expiry || config.show_price;

@@ -8,25 +8,14 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
+use nodeflare_telemetry as telemetry;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
 use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TASK_RESULT_BYTES: usize = 1024 * 1024;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateMessage {
-    #[serde(rename = "type")]
-    _message_type: String,
-    #[serde(rename = "batchId")]
-    batch_id: String,
-    samples: Vec<AgentReport>,
-    persist: bool,
-}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,14 +81,12 @@ async fn run(
         return;
     };
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentCommand>(256);
+    let mut info = None;
     let previous = state.agents.write().await.insert(
         identity.server_id.clone(),
         AgentConnection {
             connection_id: connection_id.clone(),
             sender: outbound_tx.clone(),
-            report_interval: identity.report_interval,
-            collect_interval: identity.collect_interval,
-            live_until: Arc::new(AtomicI64::new(0)),
         },
     );
     if let Some(previous) = previous {
@@ -107,11 +94,12 @@ async fn run(
     }
 
     // Recheck the token after registration in case the node changed meanwhile.
+    let initialized = super::ingest::AgentBuffer::new(&state.db, &identity.server_id).await;
     let still_authorized = matches!(
         crate::db::queries::agent_identity(&state.db, &token).await,
         Ok(Some(current)) if current.server_id == identity.server_id
     );
-    if !still_authorized {
+    if !still_authorized || initialized.is_err() {
         let mut agents = state.agents.write().await;
         if agents
             .get(&identity.server_id)
@@ -124,6 +112,7 @@ async fn run(
         tracing::warn!(server_id = %identity.server_id, "rejected stale Agent connection");
         return;
     }
+    let mut buffer = initialized.expect("Agent buffer was initialized");
     tracing::info!(server_id = %identity.server_id, remote_ip, "Agent connected");
 
     if let Some(config) = crate::db::queries::agent_config(&state.db, &identity.server_id)
@@ -166,9 +155,80 @@ async fn run(
     });
 
     while let Some(message) = websocket_rx.next().await {
+        // Registration waits for in-flight ingestion before loading the next connection's watermark.
+        let connections = state.agents.read().await;
+        if !connections
+            .get(&identity.server_id)
+            .is_some_and(|connection| connection.connection_id == connection_id)
+        {
+            break;
+        }
         match message {
+            Ok(Message::Binary(bytes)) => {
+                let result = async {
+                    let _activity = state
+                        .database_activity
+                        .write()
+                        .map_err(|_| anyhow::anyhow!("database is under maintenance"))?;
+                    let update: telemetry::Update = telemetry::decode(&bytes)?;
+                    let persist = update.persist;
+                    let reports = update.into_reports(&mut info)?;
+                    let result = buffer
+                        .receive(&state.db, &identity, &remote_ip, reports, persist)
+                        .await?;
+                    state
+                        .last_agent_reports
+                        .write()
+                        .await
+                        .insert(identity.server_id.clone(), crate::db::now());
+                    if let Some(acknowledgement) = result.acknowledgement {
+                        send_ack(&outbound_tx, &acknowledgement);
+                        if !acknowledgement.reports.is_empty() {
+                            evaluate_alerts(&state, &identity.server_id);
+                        }
+                    }
+                    if let Some(report) = result.latest {
+                        let mut live = state.live_reports.write().await;
+                        if live
+                            .get(&identity.server_id)
+                            .is_none_or(|current| current.timestamp < report.timestamp)
+                        {
+                            broadcast_report(&state, &identity, &report);
+                            let mut cached = report;
+                            if let Some(previous) = live.get(&identity.server_id) {
+                                cached
+                                    .latency_results
+                                    .extend(previous.latency_results.iter().cloned());
+                            }
+                            cached.latency_results.sort_by(|left, right| {
+                                left.task_id
+                                    .cmp(&right.task_id)
+                                    .then(right.timestamp.cmp(&left.timestamp))
+                            });
+                            cached
+                                .latency_results
+                                .dedup_by(|left, right| left.task_id == right.task_id);
+                            cached
+                                .latency_results
+                                .retain(|value| value.timestamp >= crate::db::now() - 7200);
+                            cached
+                                .latency_results
+                                .sort_by_key(|value| std::cmp::Reverse(value.timestamp));
+                            cached.latency_results.truncate(4096);
+                            live.insert(identity.server_id.clone(), cached);
+                        }
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                if let Err(error) = result {
+                    tracing::warn!(%error, server_id = %identity.server_id, "Agent telemetry failed");
+                    send_persistence_error(&outbound_tx, 0);
+                    break;
+                }
+            }
             Ok(Message::Text(text)) if text.len() <= MAX_AGENT_MESSAGE_BYTES => {
-                handle_text(&state, &identity, &remote_ip, &outbound_tx, &text).await;
+                handle_text(&state, &identity, &outbound_tx, &text).await;
             }
             Ok(Message::Ping(payload)) => {
                 let _ = outbound_tx.try_send(AgentCommand::Pong(payload.to_vec()));
@@ -193,7 +253,6 @@ async fn run(
 async fn handle_text(
     state: &Arc<AppState>,
     identity: &AgentIdentity,
-    remote_ip: &str,
     outbound: &mpsc::Sender<AgentCommand>,
     text: &str,
 ) {
@@ -205,80 +264,6 @@ async fn handle_text(
         return;
     };
     match value.get("type").and_then(serde_json::Value::as_str) {
-        Some("update") => {
-            let Ok(update) = serde_json::from_value::<UpdateMessage>(value) else {
-                send_persistence_error(outbound, 0);
-                return;
-            };
-            if !valid_batch_id(&update.batch_id) {
-                send_persistence_error(outbound, 0);
-                return;
-            }
-            match crate::db::queries::save_agent_batch(
-                &state.db,
-                identity,
-                &update.batch_id,
-                &update.samples,
-                remote_ip,
-                update.persist,
-            )
-            .await
-            {
-                Ok(result) => {
-                    state
-                        .last_agent_reports
-                        .write()
-                        .await
-                        .insert(identity.server_id.clone(), crate::db::now());
-                    let next_wss_report_after_ms =
-                        state.agent_wss_interval_ms(&identity.server_id).await;
-                    send_ack(outbound, &result, next_wss_report_after_ms);
-                    if !result.reports.is_empty() {
-                        broadcast_reports(state, identity, &result.reports);
-                    }
-                    if result.persisted && !result.reports.is_empty() {
-                        let state = Arc::clone(state);
-                        let server_id = identity.server_id.clone();
-                        tokio::spawn(async move {
-                            let Ok(_activity) = state.database_activity.write() else {
-                                return;
-                            };
-                            let settings = match crate::db::load_settings(&state.db).await {
-                                Ok(settings) => settings,
-                                Err(error) => {
-                                    tracing::error!(%error, "failed to load alert settings");
-                                    return;
-                                }
-                            };
-                            if !settings.notification_enabled {
-                                return;
-                            }
-                            let server_name =
-                                crate::db::queries::server_name(&state.db, &server_id)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_else(|| server_id.clone());
-                            if let Err(error) = crate::notify::evaluate_resource_alerts(
-                                &state.db,
-                                &settings,
-                                &server_id,
-                                &server_name,
-                            )
-                            .await
-                            {
-                                tracing::error!(%error, server_id, "resource alert evaluation failed");
-                            }
-                            state.notification_wake.notify_one();
-                        });
-                    }
-                }
-                Err(error) => {
-                    tracing::error!(%error, server_id = %identity.server_id, "Agent batch persistence failed");
-                    send_persistence_error(outbound, 0);
-                }
-            }
-        }
         Some("task_result") => {
             let Ok(result) = serde_json::from_value::<TaskResultMessage>(value) else {
                 return;
@@ -335,11 +320,39 @@ async fn handle_text(
     }
 }
 
-fn send_ack(
-    outbound: &mpsc::Sender<AgentCommand>,
-    result: &PersistResult,
-    next_wss_report_after_ms: u64,
-) {
+fn evaluate_alerts(state: &Arc<AppState>, server_id: &str) {
+    let state = Arc::clone(state);
+    let server_id = server_id.to_string();
+    tokio::spawn(async move {
+        let Ok(_activity) = state.database_activity.write() else {
+            return;
+        };
+        let settings = match crate::db::load_settings(&state.db).await {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::error!(%error, "failed to load alert settings");
+                return;
+            }
+        };
+        if !settings.notification_enabled {
+            return;
+        }
+        let server_name = crate::db::queries::server_name(&state.db, &server_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| server_id.clone());
+        if let Err(error) =
+            crate::notify::evaluate_resource_alerts(&state.db, &settings, &server_id, &server_name)
+                .await
+        {
+            tracing::error!(%error, server_id, "resource alert evaluation failed");
+        }
+        state.notification_wake.notify_one();
+    });
+}
+
+fn send_ack(outbound: &mpsc::Sender<AgentCommand>, result: &PersistResult) {
     let _ = outbound.try_send(AgentCommand::Text(
         serde_json::json!({
             "type": "ack",
@@ -348,8 +361,6 @@ fn send_ack(
             "persistenceError": false,
             "persistedThroughTs": result.persisted_through,
             "nextPersistAfterMs": result.next_persist_after_ms,
-            "nextWssReportAfterMs": next_wss_report_after_ms,
-            "realtimeHint": false,
         })
         .to_string(),
     ));
@@ -364,58 +375,43 @@ fn send_persistence_error(outbound: &mpsc::Sender<AgentCommand>, persisted: i64)
             "persistenceError": true,
             "persistedThroughTs": persisted,
             "nextPersistAfterMs": 5000,
-            "nextWssReportAfterMs": 5000,
-            "realtimeHint": false,
         })
         .to_string(),
     ));
 }
 
-fn broadcast_reports(state: &AppState, identity: &AgentIdentity, reports: &[AgentReport]) {
-    if identity.hidden {
+fn broadcast_report(state: &AppState, identity: &AgentIdentity, report: &AgentReport) {
+    if identity.hidden || state.dashboard_tx.receiver_count() == 0 {
         return;
     }
-    let samples = reports
-        .iter()
-        .map(|report| {
-            let mut data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(object) = data.as_object_mut() {
-                for key in [
-                    "timestamp",
-                    "cpu_model",
-                    "os",
-                    "kernel",
-                    "arch",
-                    "virtualization",
-                    "gpu_model",
-                    "agent_version",
-                    "ip_v4",
-                    "ip_v6",
-                ] {
-                    object.remove(key);
-                }
-            }
-            serde_json::json!({"ts": report.timestamp, "data": data})
-        })
-        .collect::<Vec<_>>();
-    let payload = serde_json::json!({
+    let mut data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(object) = data.as_object_mut() {
+        for key in [
+            "timestamp",
+            "cpu_model",
+            "os",
+            "kernel",
+            "arch",
+            "virtualization",
+            "gpu_model",
+            "agent_version",
+            "ip_v4",
+            "ip_v6",
+        ] {
+            object.remove(key);
+        }
+    }
+    let payload = telemetry::encode(&serde_json::json!({
         "type": "batchUpdate",
         "ts": crate::db::now(),
-        "updates": [{"serverId": identity.server_id, "samples": samples}],
-    })
-    .to_string();
-    let _ = state.dashboard_tx.send(DashboardEvent {
-        server_id: identity.server_id.clone(),
-        payload,
-    });
-}
-
-fn valid_batch_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        "updates": [{"serverId": identity.server_id, "samples": [{"ts": report.timestamp, "data": data}]}],
+    }));
+    if let Ok(payload) = payload {
+        let _ = state.dashboard_tx.send(DashboardEvent {
+            server_id: identity.server_id.clone(),
+            payload: payload.into(),
+        });
+    }
 }
 
 fn valid_task_id(value: &str) -> bool {
@@ -452,9 +448,6 @@ mod tests {
         let connection = AgentConnection {
             connection_id: "test".to_string(),
             sender,
-            report_interval: 60,
-            collect_interval: 1,
-            live_until: Arc::new(AtomicI64::new(0)),
         };
         let task = RemoteTaskInfo {
             id: uuid::Uuid::new_v4().to_string(),
@@ -493,14 +486,14 @@ mod tests {
 
     #[test]
     fn updates_require_an_explicit_persistence_flag() {
-        let mut message = serde_json::json!({"type": "update", "batchId": "batch", "samples": []});
-        assert!(serde_json::from_value::<UpdateMessage>(message.clone()).is_err());
+        let mut message = serde_json::json!({"samples": []});
+        assert!(serde_json::from_value::<telemetry::Update>(message.clone()).is_err());
         message["persist"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<UpdateMessage>(message.clone()).is_err());
+        assert!(serde_json::from_value::<telemetry::Update>(message.clone()).is_err());
         for persist in [true, false] {
             message["persist"] = persist.into();
             assert_eq!(
-                serde_json::from_value::<UpdateMessage>(message.clone())
+                serde_json::from_value::<telemetry::Update>(message.clone())
                     .unwrap()
                     .persist,
                 persist

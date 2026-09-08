@@ -4,6 +4,7 @@
 /backend/target/
 /backend/build/
 /agent/target/
+/shared/target/
 /frontend/dist/
 /frontend/admin-dist/
 /release/

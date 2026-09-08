@@ -13,7 +13,6 @@ import { useFavicon, useStoredAppearance, useSystemDark } from "./hooks/useBrows
 import { resolveBackground, themeToggle } from "./theme";
 import {
   BOOTSTRAP_POLL_INTERVAL_MS,
-  createLiveFlushScheduler,
   createRefreshQueue,
   shouldSyncBootstrap,
 } from "./refresh";
@@ -35,6 +34,7 @@ export interface AppState {
   configReady: boolean;
   servers: Server[];
   liveMetrics: LiveMetricsMap;
+  liveConnected: boolean;
   exchangeRates: ExchangeRates | null;
   loading: boolean;
   error: string;
@@ -72,6 +72,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [configReady, setConfigReady] = useState(demoMode);
   const [servers, setServers] = useState<Server[]>([]);
   const [liveMetrics, setLiveMetrics] = useState<LiveMetricsMap>({});
+  const [liveConnected, setLiveConnected] = useState(false);
+  const pendingLive = useRef<BatchUpdate[]>([]);
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [loading, setLoading] = useState(true);
@@ -217,12 +219,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let timer: number | undefined;
+    const tick = () => {
+      setClockNow(Date.now());
+      if (!pendingLive.current.length) return;
+      const batch = pendingLive.current;
+      pendingLive.current = [];
+      setLiveMetrics((current) => applyBatch(current, batch, serversRef.current));
+    };
     const sync = () => {
       window.clearInterval(timer);
       timer = undefined;
       if (document.hidden || navigator.onLine === false) return;
-      setClockNow(Date.now());
-      timer = window.setInterval(() => setClockNow(Date.now()), 1_000);
+      tick();
+      timer = window.setInterval(tick, 1_000);
     };
     sync();
     document.addEventListener("visibilitychange", sync);
@@ -239,43 +248,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!configReady || access !== "ok" || demoMode) return;
     let active = true;
-    let pending: BatchUpdate[] = [];
-    // Coalesce independently timed reports onto a shared one-second UI tick.
-    const flush = () => {
-      if (!pending.length) return;
-      const batch = pending;
-      pending = [];
-      setLiveMetrics((current) => applyBatch(current, batch, serversRef.current));
-    };
-    const scheduler = createLiveFlushScheduler(flush);
     const disconnect = connectLive({ serverId: selectedId }, {
       onBatch: (updates) => {
-        pending.push(...updates);
-        scheduler.schedule();
+        pendingLive.current.push(...updates);
       },
       onConnectedChange: (connected) => {
         liveConnectedRef.current = connected;
+        setLiveConnected(connected);
         if (!connected) {
-          scheduler.cancel();
-          pending = [];
+          pendingLive.current = [];
         }
         if (active && !connected && !document.hidden && navigator.onLine !== false) {
           void reload(true);
         }
       },
-      onWakeRequested: async () => {
-        const serverIds = selectedId ? [selectedId] : serversRef.current.map((server) => server.id);
-        for (let offset = 0; offset < serverIds.length; offset += 500) {
-          // The wake endpoint accepts one request per second and at most 500 nodes.
-          if (offset > 0) await new Promise((resolve) => window.setTimeout(resolve, 1_100));
-          if (!active || document.hidden || navigator.onLine === false) return;
-          await api.wakeServers(serverIds.slice(offset, offset + 500));
-        }
-      },
     });
     return () => {
       active = false;
-      scheduler.cancel();
+      pendingLive.current = [];
       disconnect();
     };
   }, [access, configReady, reload, selectedId]);
@@ -333,6 +323,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     configReady,
     servers: liveServers,
     liveMetrics,
+    liveConnected,
     exchangeRates,
     loading,
     error,
@@ -349,7 +340,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     reload: () => reload(),
     login,
     verify,
-  }), [access, background, blur, carrierLatency, config, configReady, dark, error, exchangeRates, goHome, liveMetrics, liveServers, loading, login, openServer, reload, selectedId, toggleTheme, verify]);
+  }), [access, background, blur, carrierLatency, config, configReady, dark, error, exchangeRates, goHome, liveConnected, liveMetrics, liveServers, loading, login, openServer, reload, selectedId, toggleTheme, verify]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

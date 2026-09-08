@@ -24,11 +24,8 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, watch};
 use tower_http::trace::TraceLayer;
-
-const LIVE_REPORT_DIVISOR: i64 = 15;
 
 pub struct AppState {
     pub db: db::Database,
@@ -38,6 +35,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub agents: RwLock<HashMap<String, websocket::AgentConnection>>,
     pub last_agent_reports: RwLock<HashMap<String, i64>>,
+    pub live_reports: RwLock<HashMap<String, models::AgentReport>>,
     pub started_at: i64,
     pub dashboard_tx: broadcast::Sender<websocket::DashboardEvent>,
     pub database_maintenance: Mutex<()>,
@@ -47,13 +45,13 @@ pub struct AppState {
     pub restart_tx: watch::Sender<bool>,
     pub login_attempts: security::AttemptLimiter,
     pub sensitive_attempts: security::AttemptLimiter,
-    pub wake_requests: security::IntervalLimiter,
     pub password_verifications: Arc<Semaphore>,
 }
 
 impl AppState {
     pub async fn disconnect_agents(&self) {
         let agents = std::mem::take(&mut *self.agents.write().await);
+        self.live_reports.write().await.clear();
         for connection in agents.into_values() {
             let _ = connection.sender.try_send(websocket::AgentCommand::Close);
         }
@@ -84,50 +82,10 @@ impl AppState {
 
     pub async fn disconnect_agent(&self, server_id: &str) {
         let connection = self.agents.write().await.remove(server_id);
+        self.live_reports.write().await.remove(server_id);
         if let Some(connection) = connection {
             let _ = connection.sender.try_send(websocket::AgentCommand::Close);
         }
-    }
-
-    pub async fn wake_agent(&self, server_id: &str) {
-        let Some(connection) = self.agents.read().await.get(server_id).cloned() else {
-            return;
-        };
-        connection
-            .live_until
-            .store(db::now().saturating_add(75), Ordering::Release);
-        let payload = serde_json::json!({
-            "type": "ack",
-            "ts": db::now(),
-            "persisted": false,
-            "persistenceError": false,
-            "persistedThroughTs": 0,
-            "nextPersistAfterMs": connection.report_interval.clamp(15, 3600) * 1000,
-            "nextWssReportAfterMs": connection.collect_interval.clamp(1, 60) * 1000,
-            "realtimeHint": true,
-        })
-        .to_string();
-        let _ = connection
-            .sender
-            .try_send(websocket::AgentCommand::Text(payload));
-    }
-
-    pub async fn agent_wss_interval_ms(&self, server_id: &str) -> u64 {
-        let Some(connection) = self.agents.read().await.get(server_id).cloned() else {
-            return 60_000;
-        };
-        let seconds = if connection.live_until.load(Ordering::Acquire) >= db::now() {
-            connection.collect_interval.clamp(1, 60)
-        } else {
-            (connection
-                .report_interval
-                .clamp(15, 3600)
-                .saturating_add(LIVE_REPORT_DIVISOR - 1)
-                / LIVE_REPORT_DIVISOR)
-                .clamp(1, 60)
-                .max(connection.collect_interval.clamp(1, 60))
-        };
-        seconds as u64 * 1000
     }
 
     pub async fn send_remote_task(
@@ -210,6 +168,7 @@ async fn main() -> Result<()> {
         http,
         agents: RwLock::new(HashMap::new()),
         last_agent_reports: RwLock::new(HashMap::new()),
+        live_reports: RwLock::new(HashMap::new()),
         started_at: db::now(),
         dashboard_tx,
         database_maintenance: Mutex::new(()),
@@ -227,7 +186,6 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(5 * 60),
             std::time::Duration::from_secs(10 * 60),
         ),
-        wake_requests: security::IntervalLimiter::new(std::time::Duration::from_secs(1)),
         password_verifications: Arc::new(Semaphore::new(4)),
     });
 
@@ -350,7 +308,6 @@ async fn main() -> Result<()> {
         .route("/api/history/{id}", get(routes::public::history))
         .route("/api/latency/{id}", get(routes::public::latency_history))
         .route("/api/exchange-rates", get(routes::public::exchange_rates))
-        .route("/api/live/wake", post(routes::public::wake_servers))
         .route(
             "/api/turnstile/verify",
             post(routes::auth::verify_turnstile),

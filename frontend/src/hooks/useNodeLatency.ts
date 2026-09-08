@@ -39,9 +39,20 @@ export interface NodeLatencyStats {
 }
 
 const cache = new Map<string, { at: number; signature: string; points: LatencySample[] }>();
+const requests = new Map<string, Promise<{ points: LatencySample[] }>>();
 const CACHE_TTL = 120_000;
 const REFRESH_INTERVAL = 120_000;
 const WINDOW_HOURS = 1;
+
+function fetchHistory(id: string, signature: string) {
+  const key = `${id}:${signature}`;
+  let request = requests.get(key);
+  if (!request) {
+    request = api.latencyHistory(id, WINDOW_HOURS).finally(() => requests.delete(key));
+    requests.set(key, request);
+  }
+  return request;
+}
 
 function mergePoints(...sources: LatencySample[][]): LatencySample[] {
   const points = new Map<string, LatencySample>();
@@ -69,11 +80,12 @@ export function useNodeLatency(
   locale: UiLocale,
   carrierSelection: CarrierSlotKey | null = null,
   liveResults?: LiveLatencyResult[],
+  liveConnected = false,
 ): NodeLatencyStats {
   const [fetched, setFetched] = useState<LatencySample[]>(server.latency);
   const [loading, setLoading] = useState(enabled);
 
-  const taskSignature = [...new Set(server.latency.map((point) => point.task_id))].sort().join(",");
+  const taskSignature = JSON.stringify(server.latency.map((point) => [point.task_id, point.name, point.task_type, point.target, point.port]));
 
   useEffect(() => {
     setFetched(server.latency);
@@ -83,6 +95,7 @@ export function useNodeLatency(
     if (!enabled) { setLoading(false); return; }
     let stopped = false;
     let running = false;
+    let loaded = false;
     let timer: number | undefined;
 
     const canRefresh = () => !document.hidden && navigator.onLine !== false;
@@ -94,7 +107,7 @@ export function useNodeLatency(
     };
     const schedule = () => {
       clearTimer();
-      if (!stopped && canRefresh()) {
+      if (!stopped && canRefresh() && (!liveConnected || !loaded)) {
         timer = window.setTimeout(() => void load(true), REFRESH_INTERVAL);
       }
     };
@@ -107,10 +120,12 @@ export function useNodeLatency(
         if (!force && hit?.signature === taskSignature && Date.now() - hit.at < CACHE_TTL) {
           setFetched(hit.points);
           setLoading(false);
+          loaded = true;
           return;
         }
         if (!hit) setLoading(true);
-        const result = await api.latencyHistory(server.id, WINDOW_HOURS);
+        const result = await fetchHistory(server.id, taskSignature);
+        loaded = true;
         if (!stopped) {
           cache.set(server.id, { at: Date.now(), signature: taskSignature, points: result.points });
           setFetched(result.points);
@@ -134,7 +149,7 @@ export function useNodeLatency(
     document.addEventListener("visibilitychange", handleVisibility);
     window.addEventListener("online", resume);
     window.addEventListener("offline", pause);
-    if (canRefresh()) void load(false);
+    if (canRefresh()) void load(liveConnected);
     return () => {
       stopped = true;
       clearTimer();
@@ -142,7 +157,7 @@ export function useNodeLatency(
       window.removeEventListener("online", resume);
       window.removeEventListener("offline", pause);
     };
-  }, [enabled, server.id, taskSignature]);
+  }, [enabled, liveConnected, server.id, taskSignature]);
 
   const points = useMemo(() => {
     const cutoff = Date.now() / 1000 - WINDOW_HOURS * 3600;

@@ -1,7 +1,6 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   BOOTSTRAP_LIVE_SYNC_INTERVAL_MS,
-  createLiveFlushScheduler,
   createRefreshQueue,
   hasActiveRemoteTasks,
   isRemoteTaskActive,
@@ -36,68 +35,6 @@ describe("createRefreshQueue", () => {
     releases[1]();
     await Promise.all([first, second, loud]);
     expect(maxRunning).toBe(1);
-  });
-});
-
-describe("createLiveFlushScheduler", () => {
-  test("uses a fixed one-second clock, coalesces bursts and skips idle ticks", () => {
-    let flushes = 0;
-    let tick = () => {};
-    const timer = 123 as unknown as ReturnType<typeof setInterval>;
-    const start = spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void, delay?: number) => {
-      expect(delay).toBe(1_000);
-      tick = callback as () => void;
-      return timer;
-    }) as typeof setInterval);
-    const stop = spyOn(globalThis, "clearInterval").mockImplementation(() => {});
-    try {
-      const scheduler = createLiveFlushScheduler(() => { flushes += 1; });
-      scheduler.schedule();
-      scheduler.schedule();
-      scheduler.schedule();
-      expect(flushes).toBe(0);
-      expect(start).toHaveBeenCalledTimes(1);
-      tick();
-      expect(flushes).toBe(1);
-      tick();
-      expect(flushes).toBe(1);
-      scheduler.schedule();
-      expect(start).toHaveBeenCalledTimes(1);
-      tick();
-      expect(flushes).toBe(2);
-      scheduler.cancel();
-      expect(stop).toHaveBeenCalledWith(timer);
-    } finally {
-      start.mockRestore();
-      stop.mockRestore();
-    }
-  });
-
-  test("cancel drops pending data and allows restarting the clock", () => {
-    let flushes = 0;
-    let tick = () => {};
-    const start = spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
-      tick = callback as () => void;
-      return 123 as unknown as ReturnType<typeof setInterval>;
-    }) as typeof setInterval);
-    const stop = spyOn(globalThis, "clearInterval").mockImplementation(() => {});
-    try {
-      const scheduler = createLiveFlushScheduler(() => { flushes += 1; });
-      scheduler.schedule();
-      scheduler.cancel();
-      scheduler.cancel();
-      tick();
-      expect(flushes).toBe(0);
-      expect(stop).toHaveBeenCalledTimes(1);
-      scheduler.schedule();
-      expect(start).toHaveBeenCalledTimes(2);
-      tick();
-      expect(flushes).toBe(1);
-      scheduler.cancel();
-    } finally {
-      start.mockRestore();
-      stop.mockRestore();
-    }
   });
 });
 

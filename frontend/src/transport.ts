@@ -7,6 +7,30 @@ const STABLE_CONNECTION_MS = 10_000;
 const CONNECTION_TIMEOUT = 10_000;
 const HEARTBEAT_INTERVAL = 30_000;
 const HEARTBEAT_TIMEOUT = 10_000;
+const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
+
+async function decodeMessage(data: ArrayBuffer) {
+  if (data.byteLength > MAX_MESSAGE_BYTES) throw new Error("Live message too large");
+  const reader = new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_MESSAGE_BYTES) throw new Error("Expanded live message too large");
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
 
 export function reconnectDelay(attempt: number, randomValue = Math.random()) {
   const exponent = Math.max(0, Math.min(30, Math.floor(attempt)));
@@ -19,7 +43,6 @@ export function reconnectDelay(attempt: number, randomValue = Math.random()) {
 export interface LiveTransportHandlers {
   onBatch: (updates: BatchUpdate[]) => void;
   onConnectedChange: (connected: boolean) => void;
-  onWakeRequested: () => Promise<void>;
 }
 
 export interface LiveTransportOptions {
@@ -48,7 +71,6 @@ export function connectLive(
   let reconnectAttempt = 0;
   let connected = false;
   let openedAt: number | null = null;
-  let wakeInFlight = false;
 
   const setConnected = (next: boolean) => {
     if (connected === next) return;
@@ -60,15 +82,6 @@ export function connectLive(
     if (reconnectTimer === null) return;
     window.clearTimeout(reconnectTimer);
     reconnectTimer = null;
-  };
-
-  const wakeAgents = () => {
-    if (cancelled || suspended || wakeInFlight) return;
-    wakeInFlight = true;
-    void Promise.resolve()
-      .then(() => { if (!cancelled && !suspended) return handlers.onWakeRequested(); })
-      .catch(() => {})
-      .finally(() => { wakeInFlight = false; });
   };
 
   const scheduleReconnect = () => {
@@ -111,7 +124,6 @@ export function connectLive(
     deadlineTimer = window.setTimeout(() => closeCurrentSocket(true), HEARTBEAT_TIMEOUT);
     try {
       socket.send("ping");
-      wakeAgents();
     } catch {
       closeCurrentSocket(true);
     }
@@ -128,6 +140,9 @@ export function connectLive(
       return;
     }
     socket = current;
+    current.binaryType = "arraybuffer";
+    let messages = Promise.resolve();
+    let queuedBytes = 0;
     deadlineTimer = window.setTimeout(() => closeCurrentSocket(true), CONNECTION_TIMEOUT);
     current.onopen = () => {
       if (socket !== current || cancelled || suspended) return;
@@ -152,12 +167,20 @@ export function connectLive(
         heartbeatTimer = window.setTimeout(heartbeat, HEARTBEAT_INTERVAL);
         return;
       }
-      try {
-        const message = JSON.parse(event.data);
-        if (message.type === "batchUpdate" && Array.isArray(message.updates)) {
+      if (!(event.data instanceof ArrayBuffer)) return;
+      const data = event.data;
+      queuedBytes += data.byteLength;
+      if (queuedBytes > MAX_MESSAGE_BYTES * 4) { closeCurrentSocket(true); return; }
+      // Decompression is asynchronous; preserve wire order and drop stale results after reconnects.
+      messages = messages.then(async () => {
+        if (socket !== current) return;
+        const message = await decodeMessage(data);
+        if (socket === current && message.type === "batchUpdate" && Array.isArray(message.updates)) {
           handlers.onBatch(message.updates as BatchUpdate[]);
         }
-      } catch {}
+      }).catch(() => {
+        if (socket === current) closeCurrentSocket(true);
+      }).finally(() => { queuedBytes -= data.byteLength; });
     };
   };
 

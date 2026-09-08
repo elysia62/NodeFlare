@@ -86,11 +86,15 @@ async fn run(
         tokio::select! {
             update = updates.recv() => match update {
                 Ok(update) if server_id.as_ref().is_none_or(|id| id == &update.server_id) => {
-                    if sender.send(Message::Text(update.payload.into())).await.is_err() {
+                    if sender.send(Message::Binary(update.payload)).await.is_err() {
                         break;
                     }
                 }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = sender.send(Message::Close(None)).await;
+                    break;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
             incoming = receiver.next() => match incoming {

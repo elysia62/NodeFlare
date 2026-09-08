@@ -96,7 +96,7 @@ function VerificationGate() {
 }
 
 function HomeView() {
-  const { carrierLatency, config, error, exchangeRates, liveMetrics, loading, openServer, reload, servers } = useApp();
+  const { carrierLatency, config, error, exchangeRates, liveConnected, liveMetrics, loading, openServer, reload, servers } = useApp();
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("__all__");
   const locale = config.locale;
@@ -125,7 +125,7 @@ function HomeView() {
         <div className="dashboard-loading"><span className="loading-ring" aria-hidden="true" /><p>{ui(locale, "加载中…", "Loading…")}</p></div>
       ) : visible.length ? (
         <section className={`node-grid ${carrierLatency ? "carrier-latency" : ""}`}>
-          {visible.map((server) => <NodeCard key={server.id} server={server} config={config} liveLatencyResults={liveMetrics[server.id]?.latencyResults} onOpen={() => openServer(server)} />)}
+          {visible.map((server) => <NodeCard key={server.id} server={server} config={config} liveConnected={liveConnected} liveLatencyResults={liveMetrics[server.id]?.latencyResults} onOpen={() => openServer(server)} />)}
         </section>
       ) : !error ? (
         <div className="empty-state"><strong>{servers.length ? ui(locale, "没有匹配的节点", "No matching servers") : ui(locale, "尚未添加节点", "No servers added")}</strong></div>

@@ -45,11 +45,6 @@ export const api = {
   bootstrap: () => request<Bootstrap>("/api/bootstrap", { cache: "no-store", signal: AbortSignal.timeout(15_000) }),
   config: () => request<Config>("/api/config"),
   exchangeRates: () => request<ExchangeRates>("/api/exchange-rates"),
-  wakeServers: (serverIds: string[]) => request<void>("/api/live/wake", {
-    method: "POST",
-    body: JSON.stringify({ server_ids: serverIds }),
-    signal: AbortSignal.timeout(15_000),
-  }),
   refreshExchangeRates: () => request<ExchangeRates>("/api/admin/exchange-rates/refresh", { method: "POST" }, true),
   adminServers: () => request<{ servers: AdminServer[] }>("/api/admin/servers", {}, true),
   history: (id: string, hours: number) =>

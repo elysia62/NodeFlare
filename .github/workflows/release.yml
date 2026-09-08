@@ -122,6 +122,10 @@ jobs:
         run: cargo fmt --manifest-path backend/Cargo.toml -- --check
       - name: Check Agent formatting
         run: cargo fmt --manifest-path agent/Cargo.toml -- --check
+      - name: Check telemetry formatting
+        run: cargo fmt --manifest-path shared/Cargo.toml -- --check
+      - name: Test telemetry codec
+        run: CARGO_TARGET_DIR=target/backend cargo test --locked --manifest-path shared/Cargo.toml
       - name: Lint backend
         run: CARGO_TARGET_DIR=target/backend cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings
       - name: Lint Agent

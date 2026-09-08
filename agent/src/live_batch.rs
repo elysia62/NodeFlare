@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use super::Report;
 
-pub(crate) const MAX_LIVE_BATCH_BYTES: usize = 768 * 1024;
+pub(crate) const MAX_LIVE_BATCH_BYTES: usize = nodeflare_telemetry::MAX_BATCH_BYTES;
 
 pub(crate) fn batch_len(queue: &VecDeque<Report>) -> usize {
     let mut encoded_bytes = 192_usize;
@@ -13,7 +13,7 @@ pub(crate) fn batch_len(queue: &VecDeque<Report>) -> usize {
         };
         let next_bytes = encoded_bytes
             .saturating_add(report_bytes.len())
-            .saturating_add(usize::from(count > 0));
+            .saturating_add(256);
         if next_bytes > MAX_LIVE_BATCH_BYTES {
             break;
         }
@@ -43,8 +43,9 @@ mod tests {
         let count = batch_len(&queue);
         assert!((1..10).contains(&count));
         let payload = crate::live_update_payload(
-            &queue.iter().take(count).cloned().collect::<Vec<_>>(),
+            queue.iter().take(count).cloned().collect::<Vec<_>>(),
             true,
+            &mut None,
         )
         .unwrap();
         assert!(payload.len() <= MAX_LIVE_BATCH_BYTES);
@@ -75,7 +76,7 @@ mod tests {
             if batch.is_empty() {
                 break;
             }
-            let message = crate::live_update_payload(&batch, true).unwrap();
+            let message = crate::live_update_payload(batch.clone(), true, &mut None).unwrap();
             assert!(message.len() <= MAX_LIVE_BATCH_BYTES);
             persisted = batch.last().unwrap().timestamp;
             received.extend(batch.into_iter().map(|report| report.timestamp));
@@ -95,10 +96,10 @@ mod tests {
         let reports = crate::live_batch_after(&queue, 100);
         assert_eq!(reports.first().unwrap().timestamp, 101);
         for persist in [true, false] {
-            let message = crate::live_update_payload(&reports, persist).unwrap();
-            let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+            let message = crate::live_update_payload(reports.clone(), persist, &mut None).unwrap();
+            let value: serde_json::Value = nodeflare_telemetry::decode(&message).unwrap();
             assert_eq!(value["persist"], persist);
-            assert_eq!(value.as_object().unwrap().len(), 4);
+            assert_eq!(value.as_object().unwrap().len(), 2);
         }
     }
 }

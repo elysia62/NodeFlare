@@ -1,6 +1,13 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { connectLive, reconnectDelay } from "./transport";
 import type { BatchUpdate } from "./live";
+import { gzipSync } from "node:zlib";
+
+function compressed(value: unknown): ArrayBuffer {
+  return Uint8Array.from(gzipSync(JSON.stringify(value))).buffer;
+}
+
+async function settle() { await new Promise((resolve) => setTimeout(resolve, 20)); }
 
 describe("reconnectDelay", () => {
   test("backs off exponentially", () => {
@@ -31,14 +38,15 @@ class FakeSocket {
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
+  binaryType = "blob";
+  onmessage: ((event: { data: string | ArrayBuffer }) => void) | null = null;
   sent: string[] = [];
   failSend = false;
 
   constructor(public url: URL) { FakeSocket.instances.push(this); }
   open() { this.readyState = FakeSocket.OPEN; this.onopen?.(); }
   close() { this.readyState = FakeSocket.CLOSED; this.onclose?.(); }
-  receive(data: string) { this.onmessage?.({ data }); }
+  receive(data: string | ArrayBuffer) { this.onmessage?.({ data }); }
   send(data: string) {
     if (this.failSend) throw new Error("Disconnected");
     this.sent.push(data);
@@ -70,7 +78,6 @@ function transportHarness() {
   const dispose = connectLive({ serverId: "node/1" }, {
     onBatch: (batch) => { batches.push(batch); },
     onConnectedChange: (connected) => { connections.push(connected); },
-    onWakeRequested: async () => {},
   });
   return {
     sockets: FakeSocket.instances,
@@ -172,7 +179,7 @@ describe("live connection lifecycle", () => {
     } finally { h.restore(); }
   });
 
-  test("ignores callbacks from closed sockets and accepts new batches", () => {
+  test("ignores callbacks from closed sockets and decodes batches in wire order", async () => {
     const h = transportHarness();
     try {
       const staleMessage = h.sockets[0].onmessage!;
@@ -184,8 +191,40 @@ describe("live connection lifecycle", () => {
       expect(h.connections).toEqual([]);
       expect(h.batches).toEqual([]);
       h.sockets[1].open();
-      h.sockets[1].receive('{"type":"batchUpdate","updates":[{"serverId":"new"}]}');
-      expect(h.batches).toEqual([[{ serverId: "new" }]]);
+      expect(h.sockets[1].binaryType).toBe("arraybuffer");
+      h.sockets[1].receive(compressed({ type: "batchUpdate", updates: [{ serverId: "first" }] }));
+      h.sockets[1].receive(compressed({ type: "batchUpdate", updates: [{ serverId: "second" }] }));
+      await settle();
+      expect(h.batches).toEqual([[{ serverId: "first" }], [{ serverId: "second" }]]);
+    } finally { h.restore(); }
+  });
+
+  test("drops queued decoding after disconnect and reconnects on invalid gzip", async () => {
+    const h = transportHarness();
+    try {
+      h.sockets[0].open();
+      h.sockets[0].receive(compressed({ type: "batchUpdate", updates: [{ serverId: "stale" }] }));
+      h.visibility(true);
+      await settle();
+      expect(h.batches).toEqual([]);
+      h.visibility(false);
+      h.sockets[1].open();
+      h.sockets[1].receive(new Uint8Array([1, 2, 3]).buffer);
+      await settle();
+      expect(h.sockets[1].readyState).toBe(FakeSocket.CLOSED);
+      h.advance(1_000);
+      expect(h.sockets).toHaveLength(3);
+    } finally { h.restore(); }
+  });
+
+  test("rejects decompression bombs", async () => {
+    const h = transportHarness();
+    try {
+      h.sockets[0].open();
+      h.sockets[0].receive(compressed("x".repeat(2 * 1024 * 1024 + 1)));
+      await settle();
+      expect(h.sockets[0].readyState).toBe(FakeSocket.CLOSED);
+      expect(h.batches).toEqual([]);
     } finally { h.restore(); }
   });
 });

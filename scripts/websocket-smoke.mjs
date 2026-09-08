@@ -1,6 +1,22 @@
 import WebSocket from "ws";
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { gzipSync, gunzipSync } from "node:zlib";
+
+function telemetryPayload(reports, persist) {
+  return gzipSync(JSON.stringify({
+    samples: reports.map((report) => {
+      const metrics = { ...report };
+      const info = {};
+      for (const key of ["cpu_model", "os", "kernel", "arch", "virtualization", "gpu_model", "agent_version", "ip_v4", "ip_v6"]) {
+        info[key] = metrics[key] ?? "";
+        delete metrics[key];
+      }
+      return { metrics, info };
+    }),
+    persist,
+  }));
+}
 
 const baseUrl = process.env.MONITOR_BASE_URL;
 const adminToken = process.env.MONITOR_ADMIN_TOKEN;
@@ -190,10 +206,10 @@ function waitForJsonMessage(socket, expected, predicate) {
       cleanup();
       reject(error);
     };
-    const onMessage = (data) => {
+    const onMessage = (data, binary) => {
       let message;
       try {
-        message = JSON.parse(data.toString());
+        message = JSON.parse((binary ? gunzipSync(data) : data).toString());
       } catch {
         return;
       }
@@ -358,7 +374,7 @@ try {
       name: "Offline remote smoke", region: "", group_name: "", tags: "", hidden: true,
       expires_at: null, traffic_limit: 0, traffic_limit_type: "max", price: 0,
       billing_cycle: 30, currency: "USD", auto_renewal: false, network_interface: "",
-      reset_day: 1, report_interval: 60, collect_interval: 1, rx_correction: 0,
+      reset_day: 1, report_interval: 60, collect_interval: 3, rx_correction: 0,
       tx_correction: 0, agent_mirror: "", offline_notify_disabled: true, auto_update: false,
     }),
   });
@@ -554,27 +570,6 @@ try {
     });
   }
 
-  const wakeHintPromise = waitForJsonMessage(
-    agent,
-    "batched overview wake hint",
-    (message) => message.type === "ack" && message.realtimeHint === true,
-  );
-  const wakeResponse = await fetch(new URL("/api/live/wake", baseUrl), {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${adminToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ server_ids: [serverId] }),
-  });
-  if (wakeResponse.status !== 204) {
-    throw new Error(`Batch wake returned HTTP ${wakeResponse.status}: ${await wakeResponse.text()}`);
-  }
-  const wakeHint = await wakeHintPromise;
-  if (wakeHint.nextWssReportAfterMs !== 5_000) {
-    throw new Error(`Invalid batch wake hint: ${JSON.stringify(wakeHint)}`);
-  }
-
   const timestamp = Math.floor(Date.now() / 1_000);
   const baseSample = {
     timestamp,
@@ -654,22 +649,10 @@ try {
     sample(5, { net_rx_total: 536870912, net_tx_total: 268435456 }),
   ];
   const latestTimestamp = timestamp + 5;
-  for (const persist of [undefined, null]) {
-    const rejectedAck = waitForJsonMessage(
-      agent,
-      "invalid persistence flag ACK",
-      (message) => message.type === "ack" && message.realtimeHint === false,
-    );
-    agent.send(JSON.stringify({ type: "update", batchId: "invalid-persist", samples, persist }));
-    const rejected = await rejectedAck;
-    if (rejected.persistenceError !== true || rejected.persisted !== false) {
-      throw new Error(`Accepted invalid persistence flag: ${JSON.stringify(rejected)}`);
-    }
-  }
   const ackPromise = waitForJsonMessage(
     agent,
     "Agent metric ACK",
-    (message) => message.type === "ack" && message.realtimeHint === false,
+    (message) => message.type === "ack",
   );
   const updatePromise = waitForJsonMessage(
     dashboard,
@@ -684,7 +667,7 @@ try {
           ),
       ),
   );
-  agent.send(JSON.stringify({ type: "update", batchId: `smoke-${timestamp}`, samples, persist: true }));
+  agent.send(telemetryPayload(samples, true));
   const [ack, update] = await Promise.all([ackPromise, updatePromise]);
   if (
     ack.ts <= 0 ||
@@ -692,11 +675,12 @@ try {
     ack.persistenceError !== false ||
     !Number.isInteger(ack.persistedThroughTs) ||
     ack.persistedThroughTs < latestTimestamp ||
-    ack.nextPersistAfterMs !== 60_000 ||
-    ack.nextWssReportAfterMs !== 5_000
+    ack.nextPersistAfterMs !== 60_000
   ) {
     throw new Error(`Invalid Agent metric ACK: ${JSON.stringify(ack)}`);
   }
+  assert.equal(update.updates[0].samples.length, 1, "Browser receives only the latest metric snapshot");
+  assert.equal(update.updates[0].samples[0].data.latency_results.length, 2, "All new latency results are retained");
 
   const publicIdentityFields = [
     "cpu_model",
