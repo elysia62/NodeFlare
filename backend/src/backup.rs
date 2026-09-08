@@ -786,7 +786,27 @@ async fn restore_table<R: Read + Seek + Send>(
     if read_bounded_line(&mut reader, &mut line)? == 0 {
         bail!("{table} 备份表头无效");
     }
-    let header: BackupTableHeader = serde_json::from_str(line.trim_end())?;
+    let mut header: BackupTableHeader = serde_json::from_str(line.trim_end())?;
+    // v1.0.3 stores these metrics both as columns and in latest_json. Accept only
+    // that exact layout; retained columns still undergo the full schema check.
+    let legacy_latest_state = table == "server_latest_state"
+        && header.columns.len() == 12
+        && header.columns[2..10]
+            .iter()
+            .map(|column| (column.name.as_str(), column.kind))
+            .eq([
+                ("cpu", BackupKind::Double),
+                ("mem_used", BackupKind::BigInt),
+                ("mem_total", BackupKind::BigInt),
+                ("disk_used", BackupKind::BigInt),
+                ("disk_total", BackupKind::BigInt),
+                ("net_in", BackupKind::Double),
+                ("net_out", BackupKind::Double),
+                ("uptime", BackupKind::BigInt),
+            ]);
+    if legacy_latest_state {
+        header.columns.drain(2..10);
+    }
     if header.table != table || header.columns != columns {
         bail!("{table} 备份结构与当前数据库不兼容");
     }
@@ -802,7 +822,14 @@ async fn restore_table<R: Read + Seek + Send>(
         if trimmed.is_empty() {
             continue;
         }
-        batch.push(serde_json::from_str::<Vec<Value>>(trimmed)?);
+        let mut row = serde_json::from_str::<Vec<Value>>(trimmed)?;
+        if legacy_latest_state {
+            if row.len() != 12 {
+                bail!("{table} 备份行字段数量不匹配");
+            }
+            row.drain(2..10);
+        }
+        batch.push(row);
         batch_bytes = batch_bytes.saturating_add(read);
         if batch.len() >= INSERT_BATCH_ROWS || batch_bytes >= MAX_NDJSON_LINE_BYTES {
             insert_rows(db, transaction, table, columns, &batch).await?;
@@ -922,6 +949,202 @@ pub async fn copy_database(source: &Database, target: &Database) -> Result<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const V1_0_3_BACKUP: &[u8] = include_bytes!("../tests/fixtures/v1.0.3-backup.zip");
+
+    fn edit_v1_0_3_latest_state(edit: impl FnOnce(&mut Vec<Value>)) -> Vec<u8> {
+        let mut archive = ZipArchive::new(Cursor::new(V1_0_3_BACKUP)).unwrap();
+        let entry_name = table_entry_name("server_latest_state");
+        let mut lines = BufReader::new(archive.by_name(&entry_name).unwrap())
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        edit(&mut lines);
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        for index in 0..archive.len() {
+            let entry = archive.by_index(index).unwrap();
+            if entry.name() == entry_name {
+                writer
+                    .start_file(&entry_name, SimpleFileOptions::default())
+                    .unwrap();
+                for line in &lines {
+                    serde_json::to_writer(&mut writer, line).unwrap();
+                    writer.write_all(b"\n").unwrap();
+                }
+            } else {
+                writer.raw_copy_file(entry).unwrap();
+            }
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_v1_0_3_layouts_and_rows_without_changing_the_target() {
+        type FixtureEdit = fn(&mut Vec<Value>);
+        let cases: [(&str, FixtureEdit); 7] = [
+            ("unknown metric column", |lines| {
+                lines[0]["columns"][2]["name"] = Value::from("unknown_metric");
+            }),
+            ("wrong metric type", |lines| {
+                lines[0]["columns"][2]["kind"] = Value::from("text");
+            }),
+            ("wrong retained column", |lines| {
+                lines[0]["columns"][10]["name"] = Value::from("unknown_json");
+            }),
+            ("extra column", |lines| {
+                lines[0]["columns"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"name": "extra", "kind": "text"}));
+            }),
+            ("missing value", |lines| {
+                lines[1].as_array_mut().unwrap().pop();
+            }),
+            ("extra value", |lines| {
+                lines[1].as_array_mut().unwrap().push(Value::Null);
+            }),
+            ("invalid timestamp", |lines| {
+                lines[1][1] = Value::from("invalid");
+            }),
+        ];
+        for (name, edit) in cases {
+            let db = crate::db::connect("sqlite::memory:").await.unwrap();
+            db.migrate().await.unwrap();
+            crate::db::set_setting(&db, "site_name", "Preserved")
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('preserved','Preserved','hash',1,1)")
+                .execute(db.pool()).await.unwrap();
+            sqlx::query("INSERT INTO sessions(id,token_hash,username,ip_address,user_agent,created_at,last_seen_at,expires_at) VALUES ('session','hash','admin','127.0.0.1','test',1,1,9999999999)")
+                .execute(db.pool()).await.unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let themes = directory.path().join("themes");
+            fs::create_dir(&themes).unwrap();
+            fs::write(themes.join("current.txt"), "Preserved").unwrap();
+
+            assert!(
+                restore_archive(&db, &themes, &edit_v1_0_3_latest_state(edit))
+                    .await
+                    .is_err(),
+                "{name} was accepted"
+            );
+            assert_eq!(
+                crate::db::get_setting(&db, "site_name")
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("Preserved"),
+                "{name} changed settings"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT id FROM servers")
+                    .fetch_all(db.pool())
+                    .await
+                    .unwrap(),
+                ["preserved"],
+                "{name} changed servers"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SELECT id FROM sessions")
+                    .fetch_all(db.pool())
+                    .await
+                    .unwrap(),
+                ["session"],
+                "{name} changed sessions"
+            );
+            assert_eq!(
+                fs::read_to_string(themes.join("current.txt")).unwrap(),
+                "Preserved"
+            );
+            assert_eq!(fs::read_dir(&themes).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn restores_v1_0_3_backup_without_legacy_migrations() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let themes = directory.path().join("themes");
+        restore_archive(&db, &themes, V1_0_3_BACKUP).await.unwrap();
+
+        let servers = crate::db::queries::list_servers(&db, true).await.unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].cpu, Some(42.5));
+        assert_eq!(servers[0].mem_used, Some(512));
+        let latest = sqlx::query("SELECT * FROM server_latest_state")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(latest.columns().len(), 4);
+        assert_eq!(latest.get::<String, _>("last_batch_id"), "fixture-batch");
+        let report: crate::models::AgentReport =
+            serde_json::from_str(&latest.get::<String, _>("latest_json")).unwrap();
+        assert_eq!(report.gpu_usage, 32.5);
+        assert_eq!(latest.get::<i64, _>("latest_timestamp"), report.timestamp);
+        let history = sqlx::query("SELECT * FROM metric_history ORDER BY timestamp")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].get::<f64, _>("cpu_min"), 75.0);
+        assert_eq!(history[0].get::<f64, _>("memory_avg"), 50.0);
+        assert_eq!(history[1].get::<i64, _>("sample_count"), 4);
+        assert_eq!(history[1].get::<f64, _>("cpu_min"), 10.0);
+        assert_eq!(history[1].get::<f64, _>("cpu_max"), 90.0);
+        assert_eq!(history[1].get::<f64, _>("memory_min"), 10.0);
+        assert_eq!(
+            crate::db::get_setting(&db, "site_name")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("v1.0.3 fixture")
+        );
+        assert!(
+            crate::db::queries::agent_identity(&db, "fixture-primary-token")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            crate::db::queries::agent_identity(&db, "fixture-install-token")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT totp_secret FROM admin_2fa WHERE enabled=1")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            "JBSWY3DPEHPK3PXP"
+        );
+        assert_eq!(
+            crate::db::queries::remote_task(&db, "fixture-task")
+                .await
+                .unwrap()
+                .unwrap()
+                .result,
+            "fixture"
+        );
+        assert_eq!(
+            fs::read_to_string(themes.join("theme-12345678/index.html")).unwrap(),
+            "<main>v1.0.3 fixture</main>"
+        );
+        assert_eq!(
+            fs::read_to_string(themes.join("theme-12345678/assets/app.css")).unwrap(),
+            "main { color: red; }"
+        );
+        db.migrate().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations")
+                .fetch_all(db.pool())
+                .await
+                .unwrap(),
+            [1]
+        );
+    }
 
     #[test]
     fn exported_archives_must_fit_both_restore_limits() {
