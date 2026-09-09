@@ -4,8 +4,13 @@ import {
   createRefreshQueue,
   hasActiveRemoteTasks,
   isRemoteTaskActive,
+  LIVE_CARD_REFRESH_INTERVAL_MS,
   shouldSyncBootstrap,
 } from "./refresh";
+
+test("keeps server card refreshes at one second", () => {
+  expect(LIVE_CARD_REFRESH_INTERVAL_MS).toBe(1_000);
+});
 
 describe("createRefreshQueue", () => {
   test("serializes requests and collapses overlap into one trailing refresh", async () => {

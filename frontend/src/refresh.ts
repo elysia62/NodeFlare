@@ -2,6 +2,7 @@ import type { RemoteTask } from "./types";
 
 export const BOOTSTRAP_POLL_INTERVAL_MS = 15_000;
 export const BOOTSTRAP_LIVE_SYNC_INTERVAL_MS = 5 * 60_000;
+export const LIVE_CARD_REFRESH_INTERVAL_MS = 1_000;
 export const REMOTE_TASK_POLL_INTERVAL_MS = 2_000;
 export const REMOTE_TASK_POLL_TIMEOUT_MS = 60_000;
 

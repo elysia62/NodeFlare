@@ -76,6 +76,8 @@ const PUBLIC_IP_V6_URL: &str = "https://ipv6.icanhazip.com/";
 const RUNTIME_STATS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CLOCK_CALIBRATION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOCK_CALIBRATION_MIN_CHANGE_MS: i64 = 20_000;
+const AGENT_PROTOCOL_VERSION: &str = "1";
+const AGENT_CAPABILITIES: &str = "metrics-v1,config-v1,remote-exec-v1,task-ack-v1";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -1672,6 +1674,14 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
         request
             .headers_mut()
             .insert("User-Agent", format!("nodeflare-agent/{VERSION}").parse()?);
+        request.headers_mut().insert(
+            "X-NodeFlare-Agent-Protocol",
+            AGENT_PROTOCOL_VERSION.parse()?,
+        );
+        request.headers_mut().insert(
+            "X-NodeFlare-Agent-Capabilities",
+            AGENT_CAPABILITIES.parse()?,
+        );
         let stream = connect_live_stream(&url, deadline)?;
         match client_tls(request, stream) {
             Ok(connected) => break connected,
@@ -1700,6 +1710,16 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
         .get("date")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| clock_offset_from_http_date(value, started_ms, ended_ms));
+    if !response
+        .headers()
+        .get("x-nodeflare-agent-protocol")
+        .is_some_and(|value| value == AGENT_PROTOCOL_VERSION)
+    {
+        return Err(format!(
+            "backend protocol mismatch; update the backend to protocol {AGENT_PROTOCOL_VERSION}"
+        )
+        .into());
+    }
     Ok((socket, clock_offset_ms))
 }
 

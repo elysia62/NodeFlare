@@ -356,6 +356,8 @@ if [ -n "${MONITOR_MIGRATION_URL:-}" ]; then
   [ "$frozen_delete_status" = "503" ]
   frozen_agent_status=$(monitor_curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
     -H "Authorization: Bearer $agent_token" \
+    -H 'X-NodeFlare-Agent-Protocol: 1' \
+    -H 'X-NodeFlare-Agent-Capabilities: metrics-v1,config-v1,remote-exec-v1,task-ack-v1' \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
     -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$MONITOR_BASE_URL/api/agent/ws")
   [ "$frozen_agent_status" = "503" ]

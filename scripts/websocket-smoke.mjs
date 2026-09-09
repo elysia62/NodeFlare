@@ -27,6 +27,11 @@ const serverId = process.env.MONITOR_SERVER_ID;
 const latencyTaskId = process.env.MONITOR_LATENCY_TASK_ID;
 const expectTaskAssigned = process.env.MONITOR_EXPECT_TASK_ASSIGNED !== "0";
 const configOnly = process.env.MONITOR_CONFIG_ONLY === "1";
+const agentProtocolHeaders = {
+  "X-NodeFlare-Agent-Protocol": "1",
+  "X-NodeFlare-Agent-Capabilities":
+    "metrics-v1,config-v1,remote-exec-v1,task-ack-v1",
+};
 
 if (!baseUrl || !adminToken || !agentToken || !serverId || !latencyTaskId) {
   throw new Error("MONITOR_BASE_URL, MONITOR_ADMIN_TOKEN, MONITOR_AGENT_TOKEN, MONITOR_SERVER_ID and MONITOR_LATENCY_TASK_ID are required");
@@ -115,25 +120,35 @@ async function waitForRemoteTask(taskId, expectedStatus) {
   throw new Error(`Remote task ${taskId} did not reach ${expectedStatus}`);
 }
 
-function socketHeaders(token, headers = {}) {
+function socketHeaders(path, token, headers = {}, includeAgentProtocol = true) {
   return {
     Authorization: `Bearer ${token}`,
+    ...(includeAgentProtocol && path === "/api/agent/ws" ? agentProtocolHeaders : {}),
     ...headers,
   };
 }
 
 function openSocket(path, token, headers = {}, observeMessage) {
   return new Promise((resolve, reject) => {
+    let serverProtocol;
     const socket = new WebSocket(websocketUrl(path), {
-      headers: socketHeaders(token, headers),
+      headers: socketHeaders(path, token, headers),
     });
     if (observeMessage) socket.on("message", observeMessage);
     const timer = setTimeout(() => {
       socket.terminate();
       reject(new Error(`${path} WebSocket handshake timed out`));
     }, 5_000);
+    socket.once("upgrade", (response) => {
+      serverProtocol = response.headers["x-nodeflare-agent-protocol"];
+    });
     socket.once("open", () => {
       clearTimeout(timer);
+      if (path === "/api/agent/ws" && serverProtocol !== "1") {
+        socket.terminate();
+        reject(new Error(`Invalid backend Agent protocol: ${serverProtocol}`));
+        return;
+      }
       resolve(socket);
     });
     socket.once("unexpected-response", (_request, response) => {
@@ -147,10 +162,10 @@ function openSocket(path, token, headers = {}, observeMessage) {
   });
 }
 
-function expectSocketStatus(path, token, statusCode, headers = {}) {
+function expectSocketStatus(path, token, statusCode, headers = {}, includeAgentProtocol = true) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(websocketUrl(path), {
-      headers: socketHeaders(token, headers),
+      headers: socketHeaders(path, token, headers, includeAgentProtocol),
     });
     const timer = setTimeout(() => {
       socket.terminate();
@@ -286,6 +301,22 @@ function waitForSocketClose(socket, expected, timeoutMs = 5_000) {
   });
 }
 
+await expectSocketStatus("/api/agent/ws", "invalid-agent-token", 426, {}, false);
+await expectSocketStatus(
+  "/api/agent/ws",
+  "invalid-agent-token",
+  426,
+  { "X-NodeFlare-Agent-Protocol": "0" },
+);
+await expectSocketStatus(
+  "/api/agent/ws",
+  "invalid-agent-token",
+  426,
+  {
+    "X-NodeFlare-Agent-Capabilities":
+      "metrics-v1,config-v1,remote-exec-v1",
+  },
+);
 await expectSocketStatus("/api/agent/ws", "invalid-agent-token", 401);
 await expectSocketStatus("/api/agent/ws", "", 401);
 await expectSocketStatus("/api/agent/ws", "x".repeat(513), 401);

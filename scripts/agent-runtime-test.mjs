@@ -16,6 +16,11 @@ const directory = mkdtempSync(join(tmpdir(), "nodeflare-agent-runtime-"));
 const agents = [];
 const sockets = new Set();
 const releaseRequests = [];
+const agentProtocolHeaders = {
+  "x-nodeflare-agent-protocol": "1",
+  "x-nodeflare-agent-capabilities":
+    "metrics-v1,config-v1,remote-exec-v1,task-ack-v1",
+};
 const proxy = createHttpServer((_request, response) => {
   response.writeHead(502);
   response.end();
@@ -70,9 +75,15 @@ try {
 
   console.log("agent runtime: automatic update during three-second sampling");
   websocketServer = new WebSocketServer({ noServer: true });
+  websocketServer.on("headers", (headers) => {
+    headers.push("X-NodeFlare-Agent-Protocol: 1");
+  });
   upgradeServer = createHttpServer();
   let redirected = false;
   upgradeServer.on("upgrade", (request, socket, head) => {
+    for (const [name, expected] of Object.entries(agentProtocolHeaders)) {
+      assert.equal(request.headers[name], expected, `Agent must send ${name}`);
+    }
     if (request.url === "/api/agent/ws") {
       redirected = true;
       socket.end("HTTP/1.1 307 Temporary Redirect\r\nLocation: /live\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");

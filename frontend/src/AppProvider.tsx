@@ -14,6 +14,7 @@ import { resolveBackground, themeToggle } from "./theme";
 import {
   BOOTSTRAP_POLL_INTERVAL_MS,
   createRefreshQueue,
+  LIVE_CARD_REFRESH_INTERVAL_MS,
   shouldSyncBootstrap,
 } from "./refresh";
 import { connectLive } from "./transport";
@@ -231,7 +232,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       timer = undefined;
       if (document.hidden || navigator.onLine === false) return;
       tick();
-      timer = window.setInterval(tick, 1_000);
+      timer = window.setInterval(tick, LIVE_CARD_REFRESH_INTERVAL_MS);
     };
     sync();
     document.addEventListener("visibilitychange", sync);
