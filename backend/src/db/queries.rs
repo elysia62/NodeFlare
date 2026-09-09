@@ -346,7 +346,7 @@ pub async fn list_servers_with_live(
                 report_interval: row.try_get("report_interval")?,
                 collect_interval: row
                     .try_get::<i64, _>("collect_interval")?
-                    .max(nodeflare_telemetry::MIN_COLLECT_INTERVAL as i64),
+                    .max(nodeflare_telemetry::MIN_UPLOAD_INTERVAL as i64),
                 rx_correction: row.try_get("rx_correction")?,
                 tx_correction: row.try_get("tx_correction")?,
                 agent_mirror: row.try_get("agent_mirror")?,
@@ -599,7 +599,7 @@ pub async fn agent_config(db: &Database, id: &str) -> Result<Option<serde_json::
     let tasks = tasks_for_server(db, id).await?;
     Ok(Some(serde_json::json!({
         "report_interval": row.try_get::<i64, _>("report_interval")?,
-        "collect_interval": row.try_get::<i64, _>("collect_interval")?.max(nodeflare_telemetry::MIN_COLLECT_INTERVAL as i64),
+        "collect_interval": row.try_get::<i64, _>("collect_interval")?.max(nodeflare_telemetry::MIN_UPLOAD_INTERVAL as i64),
         "network_interface": row.try_get::<String, _>("network_interface")?,
         "agent_mirror": row.try_get::<String, _>("agent_mirror")?,
         "auto_update": row.try_get::<i64, _>("auto_update")? != 0,
@@ -2815,6 +2815,36 @@ mod tests {
             .remove(0);
         assert_eq!(latest.latency[0].timestamp, 0);
         assert_eq!(latest.latency[0].latency_ms, -1.0);
+    }
+
+    #[tokio::test]
+    async fn live_buffer_preserves_each_one_second_sample_for_dashboard_playback() {
+        use crate::websocket::ingest::AgentBuffer;
+        let (db, identity) = test_server().await;
+        let start = now() - 10;
+        let mut buffer = AgentBuffer::new(&db, &identity.server_id).await.unwrap();
+        let reports = (0..3)
+            .map(|index| sample(start + index, 10.0 + index as f64))
+            .collect::<Vec<_>>();
+        let result = buffer
+            .receive(&db, &identity, "", reports.clone(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .samples
+                .iter()
+                .map(|report| (report.timestamp, report.cpu))
+                .collect::<Vec<_>>(),
+            vec![(start, 10.0), (start + 1, 11.0), (start + 2, 12.0)]
+        );
+        assert_eq!(result.latest.unwrap().timestamp, start + 2);
+        assert!(result.acknowledgement.is_none());
+        let duplicate = buffer
+            .receive(&db, &identity, "", reports, false)
+            .await
+            .unwrap();
+        assert!(duplicate.samples.is_empty());
     }
 
     #[tokio::test]

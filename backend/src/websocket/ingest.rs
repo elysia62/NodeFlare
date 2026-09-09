@@ -16,6 +16,7 @@ pub struct AgentBuffer {
 
 pub struct IngestResult {
     pub latest: Option<AgentReport>,
+    pub samples: Vec<AgentReport>,
     pub acknowledgement: Option<PersistResult>,
 }
 
@@ -62,15 +63,16 @@ impl AgentBuffer {
         {
             acknowledgement = Some(self.flush(db, identity, remote_ip).await?);
         }
-        let mut latest = None;
+        let mut samples = Vec::with_capacity(reports.len());
         let mut latency = Vec::new();
         for report in &reports {
             let mut live = report.clone();
             queries::apply_traffic(&mut live, &mut self.traffic, identity);
             self.received_through = live.timestamp;
-            latency.append(&mut live.latency_results);
-            latest = Some(live);
+            latency.extend(live.latency_results.iter().cloned());
+            samples.push(live);
         }
+        let mut latest = samples.last().cloned();
         if let Some(latest) = &mut latest {
             latest.latency_results = latency;
         }
@@ -81,6 +83,7 @@ impl AgentBuffer {
         }
         Ok(IngestResult {
             latest,
+            samples,
             acknowledgement,
         })
     }

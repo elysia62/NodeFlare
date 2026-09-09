@@ -211,7 +211,7 @@ async fn run(
                             .get(&identity.server_id)
                             .is_none_or(|current| current.timestamp < report.timestamp)
                         {
-                            broadcast_report(&state, &identity, &report);
+                            broadcast_reports(&state, &identity, &result.samples);
                             let mut cached = report;
                             if let Some(previous) = live.get(&identity.server_id) {
                                 cached
@@ -398,31 +398,37 @@ fn send_persistence_error(outbound: &mpsc::Sender<AgentCommand>, persisted: i64)
     ));
 }
 
-fn broadcast_report(state: &AppState, identity: &AgentIdentity, report: &AgentReport) {
+fn broadcast_reports(state: &AppState, identity: &AgentIdentity, reports: &[AgentReport]) {
     if identity.hidden || state.dashboard_tx.receiver_count() == 0 {
         return;
     }
-    let mut data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
-    if let Some(object) = data.as_object_mut() {
-        for key in [
-            "timestamp",
-            "cpu_model",
-            "os",
-            "kernel",
-            "arch",
-            "virtualization",
-            "gpu_model",
-            "agent_version",
-            "ip_v4",
-            "ip_v6",
-        ] {
-            object.remove(key);
-        }
-    }
+    let samples = reports
+        .iter()
+        .map(|report| {
+            let mut data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(object) = data.as_object_mut() {
+                for key in [
+                    "timestamp",
+                    "cpu_model",
+                    "os",
+                    "kernel",
+                    "arch",
+                    "virtualization",
+                    "gpu_model",
+                    "agent_version",
+                    "ip_v4",
+                    "ip_v6",
+                ] {
+                    object.remove(key);
+                }
+            }
+            serde_json::json!({"ts": report.timestamp, "data": data})
+        })
+        .collect::<Vec<_>>();
     let payload = telemetry::encode(&serde_json::json!({
         "type": "batchUpdate",
         "ts": crate::db::now(),
-        "updates": [{"serverId": identity.server_id, "samples": [{"ts": report.timestamp, "data": data}]}],
+        "updates": [{"serverId": identity.server_id, "samples": samples}],
     }));
     if let Ok(payload) = payload {
         let _ = state.dashboard_tx.send(DashboardEvent {

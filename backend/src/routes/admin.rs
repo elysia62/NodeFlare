@@ -872,8 +872,7 @@ fn validate_server(input: &ServerInput) -> Result<(), &'static str> {
     }
     if !(1..=31).contains(&input.reset_day)
         || !(15..=3600).contains(&input.report_interval)
-        || !(nodeflare_telemetry::MIN_COLLECT_INTERVAL as i64..=60)
-            .contains(&input.collect_interval)
+        || !(nodeflare_telemetry::MIN_UPLOAD_INTERVAL as i64..=60).contains(&input.collect_interval)
         || input.collect_interval > input.report_interval
         || (input.report_interval + input.collect_interval - 1) / input.collect_interval > 720
     {

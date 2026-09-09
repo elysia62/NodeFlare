@@ -19,6 +19,74 @@ export interface BatchUpdate {
 }
 
 const MAX_LIVE_LATENCY_RESULTS = 4096;
+const MAX_PLAYBACK_SAMPLES = 3;
+
+// Keep a short queue of real samples so a three-second upload can drive
+// one-second card updates. Long reconnect backlogs must not delay the live view.
+export function createLivePlayback() {
+  const queues = new Map<string, {
+    samples: LiveSample[];
+    playedThrough: number;
+    latencyResults: LiveLatencyResult[];
+    receivedAt: number;
+  }>();
+  return {
+    enqueue(updates: readonly BatchUpdate[], servers: readonly Server[], now = Date.now()) {
+      const known = new Map(servers.map((server) => [server.id, server]));
+      for (const update of updates) {
+        if (!update?.serverId || !Array.isArray(update.samples)) continue;
+        const server = known.get(update.serverId);
+        if (!server) continue;
+        const incoming = validSamples(update.samples);
+        if (!incoming.length) continue;
+        const queue = queues.get(server.id) ?? {
+          samples: [], playedThrough: 0, latencyResults: [], receivedAt: now,
+        };
+        const floor = Math.max(queue.playedThrough, server.timestamp ?? 0);
+        const samples = new Map(queue.samples.map((sample) => [sample.ts, sample]));
+        for (const sample of incoming) {
+          if (sample.ts > floor) samples.set(sample.ts, sample);
+        }
+        queue.samples = [...samples.values()]
+          .filter((sample) => sample.ts > floor)
+          .sort((left, right) => left.ts - right.ts)
+          .slice(-MAX_PLAYBACK_SAMPLES);
+        queue.latencyResults = mergeLiveResults(queue.latencyResults,
+          incoming.flatMap((sample) => Array.isArray(sample.data.latency_results)
+            ? sample.data.latency_results : []));
+        queue.receivedAt = now;
+        queues.set(server.id, queue);
+      }
+    },
+    take(servers: readonly Server[], now = Date.now()): BatchUpdate[] {
+      const known = new Map(servers.map((server) => [server.id, server]));
+      const updates: BatchUpdate[] = [];
+      for (const [serverId, queue] of queues) {
+        const server = known.get(serverId);
+        if (!server) {
+          queues.delete(serverId);
+          continue;
+        }
+        const floor = Math.max(queue.playedThrough, server.timestamp ?? 0);
+        queue.samples = now - queue.receivedAt > 5_000
+          ? [] : queue.samples.filter((sample) => sample.ts > floor);
+        const sample = queue.samples.shift();
+        if (!sample && !queue.latencyResults.length) continue;
+        if (sample) queue.playedThrough = sample.ts;
+        updates.push({
+          serverId,
+          samples: [{
+            ts: sample?.ts ?? Math.max(floor, 1),
+            data: { ...sample?.data, latency_results: queue.latencyResults },
+          }],
+        });
+        queue.latencyResults = [];
+      }
+      return updates;
+    },
+    clear() { queues.clear(); },
+  };
+}
 
 export function mergeLiveResults(
   previous: LiveLatencyResult[] | undefined,
@@ -79,6 +147,11 @@ function sampleMetrics(sample: LiveSample) {
   return metrics;
 }
 
+function validSamples(samples: readonly LiveSample[]) {
+  return samples.filter((sample) => sample && Number.isFinite(sample.ts) && sample.ts > 0
+    && sample.data && typeof sample.data === "object" && !Array.isArray(sample.data));
+}
+
 export function applyBatch(
   current: LiveMetricsMap,
   updates: readonly BatchUpdate[],
@@ -90,9 +163,7 @@ export function applyBatch(
     if (!update?.serverId || !Array.isArray(update.samples) || !update.samples.length) continue;
     const server = knownServers.get(update.serverId);
     if (!server) continue;
-    const samples = update.samples
-      .filter((sample) => sample && Number.isFinite(sample.ts) && sample.ts > 0
-        && sample.data && typeof sample.data === "object" && !Array.isArray(sample.data))
+    const samples = validSamples(update.samples)
       .sort((left, right) => left.ts - right.ts);
     if (!samples.length) continue;
     const previous = next[update.serverId];

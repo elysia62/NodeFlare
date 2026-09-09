@@ -710,8 +710,10 @@ try {
   ) {
     throw new Error(`Invalid Agent metric ACK: ${JSON.stringify(ack)}`);
   }
-  assert.equal(update.updates[0].samples.length, 1, "Browser receives only the latest metric snapshot");
-  assert.equal(update.updates[0].samples[0].data.latency_results.length, 2, "All new latency results are retained");
+  assert.deepEqual(update.updates[0].samples.map((sample) => sample.ts),
+    samples.map((sample) => sample.timestamp), "Browser receives every real sample in order");
+  assert.equal(update.updates[0].samples.flatMap((sample) => sample.data.latency_results).length,
+    2, "All new latency results are retained");
 
   const publicIdentityFields = [
     "cpu_model",

@@ -67,6 +67,8 @@ const LIVE_ACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const LIVE_HINT_READ_TIMEOUT: Duration = Duration::from_millis(10);
 const BASIC_INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SLOW_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const GPU_METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const PUBLIC_IP_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const PUBLIC_IP_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 const PUBLIC_IP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -87,6 +89,7 @@ struct RuntimeConfig {
     token: String,
     endpoint: String,
     report_interval: u64,
+    // Wire/config field name; controls upload batching, not the one-second sampler.
     collect_interval: u64,
     network_interface: String,
     agent_mirror: String,
@@ -445,7 +448,7 @@ impl LiveSender {
 }
 
 fn live_batch_interval(collect_interval: u64) -> Duration {
-    Duration::from_secs(collect_interval.clamp(telemetry::MIN_COLLECT_INTERVAL, 60))
+    Duration::from_secs(collect_interval.clamp(telemetry::MIN_UPLOAD_INTERVAL, 60))
 }
 
 #[derive(Debug, Default, Clone)]
@@ -520,11 +523,67 @@ fn cpu_sample() -> CpuSample {
 }
 
 fn selected_interface(name: &str, filter: &str) -> bool {
-    if filter.trim().is_empty() {
-        name != "lo" && !name.to_ascii_lowercase().contains("loopback")
-    } else {
-        filter.split(',').any(|value| value.trim() == name)
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
     }
+    let mut has_include = false;
+    let mut included = false;
+    for pattern in filter
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(pattern) = pattern
+            .strip_prefix('!')
+            .or_else(|| pattern.strip_prefix('-'))
+        {
+            if !pattern.is_empty() && wildcard_match(pattern, name) {
+                return false;
+            }
+        } else {
+            has_include = true;
+            included |= wildcard_match(pattern, name);
+        }
+    }
+    // Explicit includes can select a bridge; automatic selection avoids double counting.
+    if has_include {
+        return included;
+    }
+    let lower = name.to_ascii_lowercase();
+    !lower.contains("loopback")
+        && ![
+            "lo", "br", "cni", "docker", "podman", "flannel", "veth", "virbr", "vmbr", "tap",
+            "fwbr", "fwpr",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut p, mut v, mut star, mut star_value) = (0, 0, None, 0);
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            star_value = v;
+            p += 1;
+        } else if let Some(star_position) = star {
+            p = star_position + 1;
+            star_value += 1;
+            v = star_value;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 #[cfg(target_os = "linux")]
@@ -638,35 +697,95 @@ fn connection_counts() -> (i64, i64) {
 fn disk_usage() -> Vec<DiskMetric> {
     let output = command(
         "df",
-        &[
-            "-B1",
-            "-l",
-            "--output=source,target,size,used",
-            "-x",
-            "tmpfs",
-            "-x",
-            "devtmpfs",
-        ],
+        &["-B1", "-l", "--output=source,target,fstype,size,used"],
     );
     output
         .lines()
         .skip(1)
         .filter_map(|line| {
             let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 4 {
+            if fields.len() < 5 {
                 return None;
             }
-            let total = fields[2].parse::<i64>().ok()?;
-            let used = fields[3].parse::<i64>().ok()?;
+            let source = fields[0];
+            let mount_point = fields[1..fields.len() - 3].join(" ");
+            let filesystem = fields[fields.len() - 3];
+            if excluded_filesystem(filesystem, &mount_point) {
+                return None;
+            }
+            let total = fields[fields.len() - 2].parse::<i64>().ok()?;
+            let used = fields[fields.len() - 1].parse::<i64>().ok()?;
             (total > 0).then(|| DiskMetric {
-                name: fields[0].to_string(),
-                mount_point: fields[1].to_string(),
+                name: source.to_string(),
+                mount_point,
                 used,
                 total,
                 ..DiskMetric::default()
             })
         })
-        .collect()
+        .collect::<Vec<_>>()
+}
+
+#[cfg(target_os = "linux")]
+fn excluded_filesystem(filesystem: &str, mount_point: &str) -> bool {
+    let mount_point = mount_point.to_ascii_lowercase();
+    // Keep the root filesystem visible even when a container reports it as overlay.
+    if mount_point == "/" {
+        return false;
+    }
+    let filesystem = filesystem.to_ascii_lowercase();
+    [
+        "tmpfs",
+        "devtmpfs",
+        "devpts",
+        "proc",
+        "sysfs",
+        "cgroup",
+        "cgroup2",
+        "overlay",
+        "squashfs",
+        "efivarfs",
+        "pstore",
+        "mqueue",
+        "hugetlbfs",
+        "debugfs",
+        "fusectl",
+    ]
+    .iter()
+    .any(|value| filesystem == *value || filesystem.starts_with(&format!("{value}.")))
+        || ["/proc", "/sys", "/run", "/dev"]
+            .iter()
+            .any(|prefix| mount_point == *prefix || mount_point.starts_with(&format!("{prefix}/")))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn disk_identity(name: &str) -> String {
+    let name = name.trim();
+    // ZFS reports datasets as pool/dataset. Keep ordinary absolute paths and
+    // remote sources separate because their slash is part of the path.
+    if !name.starts_with('/') && !name.contains(':') && name.contains('/') {
+        return name.split('/').next().unwrap_or(name).to_string();
+    }
+    name.to_string()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn dedupe_disks(disks: impl IntoIterator<Item = DiskMetric>) -> Vec<DiskMetric> {
+    let mut unique = HashMap::<String, DiskMetric>::new();
+    for disk in disks {
+        let key = disk_identity(&disk.name);
+        let replace = unique.get(&key).is_none_or(|current| {
+            disk.total > current.total
+                || (disk.total == current.total
+                    && disk.mount_point.len() < current.mount_point.len())
+        });
+        if replace {
+            unique.insert(key, disk);
+        }
+    }
+    let mut disks = unique.into_values().collect::<Vec<_>>();
+    disks.sort_by(|left, right| left.mount_point.cmp(&right.mount_point));
+    disks
 }
 
 #[cfg(target_os = "linux")]
@@ -1238,6 +1357,7 @@ struct Collector {
     network_interface: String,
     basic: BasicMetrics,
     basic_at: Instant,
+    gpu_at: Instant,
     slow: SlowMetrics,
     slow_at: Instant,
     public_ip: PublicIpProbe,
@@ -1253,6 +1373,7 @@ impl Collector {
             network_interface: config.network_interface.clone(),
             basic: BasicMetrics::default(),
             basic_at: Instant::now(),
+            gpu_at: Instant::now(),
             slow: SlowMetrics::default(),
             slow_at: Instant::now(),
             public_ip: PublicIpProbe::default(),
@@ -1280,6 +1401,7 @@ impl Collector {
             gpus,
         };
         self.basic_at = Instant::now();
+        self.gpu_at = Instant::now();
     }
 
     fn refresh_slow(&mut self) {
@@ -1295,7 +1417,7 @@ impl Collector {
                 .count() as i64
         });
         self.slow = SlowMetrics {
-            disks: disk_usage(),
+            disks: dedupe_disks(disk_usage()),
             processes,
             tcp_connections: file_line_count("/proc/net/tcp") + file_line_count("/proc/net/tcp6"),
             udp_connections: file_line_count("/proc/net/udp") + file_line_count("/proc/net/udp6"),
@@ -1336,6 +1458,9 @@ impl Collector {
 
         if self.basic_at.elapsed() >= BASIC_INFO_REFRESH_INTERVAL {
             self.refresh_basic();
+        }
+        if self.gpu_at.elapsed() >= GPU_METRICS_REFRESH_INTERVAL {
+            self.refresh_gpu_metrics();
         }
         if self.slow_at.elapsed() >= SLOW_METRICS_REFRESH_INTERVAL {
             self.refresh_slow();
@@ -1445,6 +1570,7 @@ struct Collector {
     previous_at: Instant,
     basic: BasicMetrics,
     basic_at: Instant,
+    gpu_at: Instant,
     slow: SlowMetrics,
     slow_at: Instant,
     public_ip: PublicIpProbe,
@@ -1460,6 +1586,7 @@ impl Collector {
             previous_at: Instant::now(),
             basic: BasicMetrics::default(),
             basic_at: Instant::now(),
+            gpu_at: Instant::now(),
             slow: SlowMetrics::default(),
             slow_at: Instant::now(),
             public_ip: PublicIpProbe::default(),
@@ -1492,6 +1619,7 @@ impl Collector {
             gpus,
         };
         self.basic_at = Instant::now();
+        self.gpu_at = Instant::now();
     }
 
     fn refresh_slow(&mut self) {
@@ -1551,6 +1679,9 @@ impl Collector {
         self.previous_at = sampled_at;
         if self.basic_at.elapsed() >= BASIC_INFO_REFRESH_INTERVAL {
             self.refresh_basic();
+        }
+        if self.gpu_at.elapsed() >= GPU_METRICS_REFRESH_INTERVAL {
+            self.refresh_gpu_metrics();
         }
         if self.slow_at.elapsed() >= SLOW_METRICS_REFRESH_INTERVAL {
             self.refresh_slow();
@@ -1619,6 +1750,32 @@ impl Collector {
     }
 }
 
+impl Collector {
+    fn refresh_gpu_metrics(&mut self) {
+        self.gpu_at = Instant::now();
+        // Unsupported devices are rediscovered with basic info, not every sample.
+        if !self
+            .basic
+            .gpus
+            .iter()
+            .any(|gpu| gpu.usage.is_some() || gpu.memory_total > 0)
+        {
+            return;
+        }
+        let detailed = nvidia_gpu_info();
+        if detailed.is_empty() {
+            return;
+        }
+        self.basic.gpu_usage = average_gpu_usage(&detailed);
+        self.basic.gpu_model = detailed
+            .iter()
+            .map(|gpu| gpu.model.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        self.basic.gpus = detailed;
+    }
+}
+
 fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
     let interval = options.interval;
     if !(15..=3600).contains(&interval) {
@@ -1642,7 +1799,7 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
         token,
         endpoint: endpoint.trim_end_matches('/').to_string(),
         report_interval: interval,
-        collect_interval: telemetry::MIN_COLLECT_INTERVAL,
+        collect_interval: telemetry::MIN_UPLOAD_INTERVAL,
         network_interface: String::new(),
         agent_mirror: String::new(),
         auto_update: true,
@@ -2579,7 +2736,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
     } = worker;
     let mut socket: Option<LiveSocket> = None;
     let mut wss_interval = configured_interval.lock().map_or(
-        Duration::from_secs(telemetry::MIN_COLLECT_INTERVAL),
+        Duration::from_secs(telemetry::MIN_UPLOAD_INTERVAL),
         |interval| *interval,
     );
     let mut info = None;
@@ -2720,7 +2877,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
 
         if let Ok(interval) = configured_interval.lock() {
             wss_interval = (*interval).clamp(
-                Duration::from_secs(telemetry::MIN_COLLECT_INTERVAL),
+                Duration::from_secs(telemetry::MIN_UPLOAD_INTERVAL),
                 Duration::from_secs(60),
             );
         }
@@ -2806,7 +2963,7 @@ fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWorker) {
 fn apply_remote(config: &mut RuntimeConfig, remote: &RemoteConfig) -> bool {
     if valid_sample_schedule(remote.report_interval, remote.collect_interval) {
         config.report_interval = remote.report_interval;
-        config.collect_interval = remote.collect_interval.max(telemetry::MIN_COLLECT_INTERVAL);
+        config.collect_interval = remote.collect_interval.max(telemetry::MIN_UPLOAD_INTERVAL);
     }
     config
         .network_interface
@@ -3242,7 +3399,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
     if once || print_only {
         collector.public_ip.wait_initial();
     }
-    let mut next_collect = Instant::now() + Duration::from_secs(config.collect_interval);
+    let mut next_collect = Instant::now() + SAMPLE_INTERVAL;
     let mut next_latency: HashMap<String, Instant> = HashMap::new();
     let stats = Arc::new(runtime_stats::RuntimeStats::default());
     let mut latency_executor = LatencyExecutor::new(Arc::clone(&stats))?;
@@ -3274,6 +3431,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         .max()
         .unwrap_or(0);
     let mut next_update_check = Instant::now() + update_check_jitter(&config.token);
+    let mut update_checkpoint = None;
     let mut next_stats_log = Instant::now() + RUNTIME_STATS_INTERVAL;
     let clock = Arc::new(Mutex::new(ClockCalibration::default()));
     let live = (!print_only)
@@ -3306,9 +3464,6 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
                 if apply_remote(&mut config, &remote) {
                     next_latency.clear();
                 }
-                if config.collect_interval != previous_collect_interval {
-                    next_collect = Instant::now() + Duration::from_secs(config.collect_interval);
-                }
                 if config.collect_interval != previous_collect_interval
                     || config.report_interval != previous_report_interval
                 {
@@ -3322,14 +3477,23 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             return Err("WSS report persistence acknowledgement timed out".into());
         }
 
-        // Check after ACK pruning, before the next sample refills the pending queue.
+        // Continuous sampling need not leave the queue empty. Wait for the samples
+        // present when the check became due, and preserve newer ones across restart.
+        if config.auto_update && Instant::now() >= next_update_check {
+            update_checkpoint.get_or_insert(last_emitted_timestamp);
+        }
         if !once
             && !print_only
             && config.auto_update
-            && pending_samples.is_empty()
-            && Instant::now() >= next_update_check
+            && update_checkpoint.is_some_and(|timestamp| {
+                live.as_ref()
+                    .is_some_and(|sender| sender.persisted_through() >= timestamp)
+            })
         {
-            match update(&agent, &config.agent_mirror) {
+            update_checkpoint = None;
+            match rewrite_pending_spool(&spool_path, &pending_samples)
+                .and_then(|()| update(&agent, &config.agent_mirror))
+            {
                 Ok(true) => return Ok(()),
                 Ok(false) => next_update_check = Instant::now() + UPDATE_CHECK_INTERVAL,
                 Err(error) => {
@@ -3415,11 +3579,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             {
                 eprintln!("pending report spool compaction failed: {error}");
             }
-            next_collect = advance_deadline(
-                next_collect,
-                Duration::from_secs(config.collect_interval),
-                Instant::now(),
-            );
+            next_collect = advance_deadline(next_collect, SAMPLE_INTERVAL, Instant::now());
         }
 
         if Instant::now() >= next_stats_log {
@@ -3432,7 +3592,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         } else {
             next_collect
         };
-        let maintenance_wake_at = if config.auto_update && pending_samples.is_empty() {
+        let maintenance_wake_at = if config.auto_update && update_checkpoint.is_none() {
             next_stats_log.min(next_update_check)
         } else {
             next_stats_log
@@ -3469,18 +3629,19 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        CLOCK_CALIBRATION_MAX_AGE, CapturedOutput, CliOptions, ClockCalibration,
+        CLOCK_CALIBRATION_MAX_AGE, CapturedOutput, CliOptions, ClockCalibration, DiskMetric,
         GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, MAX_PENDING_LATENCY_RESULTS,
         PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES,
         REMOTE_STREAM_OUTPUT_BYTES, RemoteExecutor, RemoteTaskJournalEntry, RemoteTaskMessage,
         Report, TaskResultMessage, UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval,
-        advance_deadline, clock_offset_from_http_date, corrected_timestamp,
+        advance_deadline, clock_offset_from_http_date, corrected_timestamp, dedupe_disks,
         execute_remote_task_with_timeout, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
         live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
         parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
         parse_system_profiler_gpu_names, ping_latencies, ping_latency, prune_report_samples,
-        release_asset_sha256, remote_result_text, sanitize_latency_tasks, update_check_jitter,
-        valid_endpoint, version_triplet, write_remote_task_journal,
+        release_asset_sha256, remote_result_text, sanitize_latency_tasks, selected_interface,
+        update_check_jitter, valid_endpoint, version_triplet, wildcard_match,
+        write_remote_task_journal,
     };
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
@@ -3563,6 +3724,80 @@ mod tests {
         assert!(disk_device("nvme0n1"));
         assert!(!disk_device("sda1"));
         assert!(!disk_device("nvme0n1p1"));
+    }
+
+    #[test]
+    fn filters_virtual_interfaces_and_supports_include_exclude_patterns() {
+        assert!(!selected_interface("lo", ""));
+        assert!(!selected_interface("docker0", ""));
+        assert!(!selected_interface("veth123", ""));
+        assert!(!selected_interface("br0", "!eth*"));
+        assert!(selected_interface("br0", "br0"));
+        assert!(!selected_interface("br0", "br*,!br0"));
+        assert!(!selected_interface("br0", "!br0,br*"));
+        assert!(!selected_interface("Software Loopback Interface 1", ""));
+        assert!(selected_interface("eth0", ""));
+        assert!(selected_interface("ens3", "eth*,ens*"));
+        assert!(!selected_interface("wlan0", "eth*,ens*"));
+        assert!(!selected_interface("eth0", "eth*,!eth0"));
+        assert!(selected_interface("ens3", "!eth*"));
+        assert!(wildcard_match("en?3", "ens3"));
+        assert!(!wildcard_match("en?3", "enp4s0"));
+    }
+
+    #[test]
+    fn deduplicates_mounts_for_the_same_device() {
+        let disks = dedupe_disks([
+            DiskMetric {
+                name: "/dev/vg/root".into(),
+                mount_point: "/var".into(),
+                total: 10,
+                used: 4,
+                ..DiskMetric::default()
+            },
+            DiskMetric {
+                name: "/dev/vg/root".into(),
+                mount_point: "/".into(),
+                total: 20,
+                used: 8,
+                ..DiskMetric::default()
+            },
+            DiskMetric {
+                name: "tank/data".into(),
+                mount_point: "/data".into(),
+                total: 30,
+                used: 9,
+                ..DiskMetric::default()
+            },
+            DiskMetric {
+                name: "tank/archive".into(),
+                mount_point: "/archive".into(),
+                total: 25,
+                used: 7,
+                ..DiskMetric::default()
+            },
+            DiskMetric {
+                name: "/var/lib/data".into(),
+                mount_point: "/var/lib/data".into(),
+                total: 40,
+                used: 12,
+                ..DiskMetric::default()
+            },
+        ]);
+        assert_eq!(disks.len(), 3);
+        assert_eq!(disks[0].mount_point, "/");
+        assert_eq!(disks[0].total, 20);
+        assert_eq!(disks[1].name, "tank/data");
+        assert_eq!(disks[2].name, "/var/lib/data");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keeps_root_filesystem_but_filters_virtual_mounts() {
+        assert!(!super::excluded_filesystem("overlay", "/"));
+        assert!(super::excluded_filesystem("tmpfs", "/tmp"));
+        assert!(super::excluded_filesystem("proc", "/proc"));
+        assert!(!super::excluded_filesystem("btrfs", "/var"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read};
 
-pub const MIN_COLLECT_INTERVAL: u64 = 3;
+pub const MIN_UPLOAD_INTERVAL: u64 = 3;
 pub const MAX_BATCH_BYTES: usize = 768 * 1024;
 pub const MAX_DECODED_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_SAMPLES: usize = 720;

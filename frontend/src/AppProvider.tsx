@@ -3,9 +3,9 @@ import { api, ApiError } from "./api";
 import { demoConfig, demoExchangeRates, demoServers } from "./demo";
 import {
   applyBatch,
+  createLivePlayback,
   mergeServerLive,
   pruneLiveMetrics,
-  type BatchUpdate,
   type LiveMetricsMap,
 } from "./live";
 import { ui } from "./locale";
@@ -74,7 +74,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [servers, setServers] = useState<Server[]>([]);
   const [liveMetrics, setLiveMetrics] = useState<LiveMetricsMap>({});
   const [liveConnected, setLiveConnected] = useState(false);
-  const pendingLive = useRef<BatchUpdate[]>([]);
+  const livePlayback = useRef(createLivePlayback());
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [loading, setLoading] = useState(true);
@@ -222,15 +222,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let timer: number | undefined;
     const tick = () => {
       setClockNow(Date.now());
-      if (!pendingLive.current.length) return;
-      const batch = pendingLive.current;
-      pendingLive.current = [];
+      const batch = livePlayback.current.take(serversRef.current);
+      if (!batch.length) return;
       setLiveMetrics((current) => applyBatch(current, batch, serversRef.current));
     };
     const sync = () => {
       window.clearInterval(timer);
       timer = undefined;
-      if (document.hidden || navigator.onLine === false) return;
+      if (document.hidden || navigator.onLine === false) {
+        livePlayback.current.clear();
+        return;
+      }
       tick();
       timer = window.setInterval(tick, LIVE_CARD_REFRESH_INTERVAL_MS);
     };
@@ -251,13 +253,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let active = true;
     const disconnect = connectLive({ serverId: selectedId }, {
       onBatch: (updates) => {
-        pendingLive.current.push(...updates);
+        livePlayback.current.enqueue(updates, serversRef.current);
       },
       onConnectedChange: (connected) => {
         liveConnectedRef.current = connected;
         setLiveConnected(connected);
         if (!connected) {
-          pendingLive.current = [];
+          livePlayback.current.clear();
         }
         if (active && !connected && !document.hidden && navigator.onLine !== false) {
           void reload(true);
@@ -266,7 +268,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
     return () => {
       active = false;
-      pendingLive.current = [];
+      livePlayback.current.clear();
       disconnect();
     };
   }, [access, configReady, reload, selectedId]);

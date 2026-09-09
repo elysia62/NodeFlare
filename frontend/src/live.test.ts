@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyBatch,
+  createLivePlayback,
   liveLatencySamples,
   mergeLiveLatency,
   mergeLiveResults,
@@ -127,6 +128,90 @@ describe("applyBatch", () => {
       { serverId: "removed", samples: [{ ts: 1_010, data: { cpu: 10 } }] },
       { serverId: "s1", samples: [{ ts: NaN, data: {} }, { ts: -1, data: {} }] },
     ], [server()])).toBe(current);
+  });
+});
+
+describe("one-second card playback", () => {
+  test("renders every real CPU and network sample from successive three-second uploads", () => {
+    const queue = createLivePlayback();
+    const servers = [server()];
+    let current: LiveMetricsMap = {};
+    const displayed = [];
+    for (let tick = 0; tick < 9; tick++) {
+      const now = (1_003 + tick) * 1_000;
+      if (tick % 3 === 0) {
+        queue.enqueue([{
+          serverId: "s1",
+          samples: [1, 2, 3].map((offset) => ({
+            ts: 1_000 + tick + offset,
+            data: { cpu: tick + offset, net_in: (tick + offset) * 100, net_out: (tick + offset) * 200 },
+          })),
+        }], servers, now);
+      }
+      current = applyBatch(current, queue.take(servers, now), servers);
+      const card = mergeServerLive(servers[0], current.s1, now, 180);
+      displayed.push([card.cpu, card.net_in, card.net_out]);
+    }
+    expect(displayed).toEqual(Array.from({ length: 9 }, (_, index) => [
+      index + 1, (index + 1) * 100, (index + 1) * 200,
+    ]));
+    expect(queue.take(servers, 1_012_000)).toEqual([]);
+  });
+
+  test("deduplicates overlapping batches and never plays samples backwards", () => {
+    const queue = createLivePlayback();
+    const servers = [server()];
+    const updates = [{ serverId: "s1", samples: [1_003, 1_001, 1_002, 1_002].map((ts) => ({ ts, data: { cpu: ts } })) }];
+    queue.enqueue(updates, servers, 0);
+    expect(queue.take(servers, 0)[0].samples?.[0].ts).toBe(1_001);
+    queue.enqueue(updates, servers, 1_000);
+    expect(queue.take(servers, 1_000)[0].samples?.[0].ts).toBe(1_002);
+    expect(queue.take(servers, 2_000)[0].samples?.[0].ts).toBe(1_003);
+    queue.enqueue(updates, servers, 3_000);
+    expect(queue.take(servers, 3_000)).toEqual([]);
+  });
+
+  test("bounds replay delay after an outage while retaining latency results", () => {
+    const queue = createLivePlayback();
+    const servers = [server()];
+    queue.enqueue([{
+      serverId: "s1",
+      samples: Array.from({ length: 100 }, (_, index) => ({
+        ts: 1_001 + index,
+        data: { cpu: index, latency_results: [{ task_id: "t1", timestamp: 1_001 + index, latency_ms: index, packet_loss: 0 }] },
+      })),
+    }], servers, 0);
+    const next = queue.take(servers, 0)[0].samples![0];
+    expect(next.ts).toBe(1_098);
+    expect(next.data.latency_results).toHaveLength(100);
+    expect(queue.take(servers, 1_000)[0].samples?.[0].ts).toBe(1_099);
+    expect(queue.take(servers, 2_000)[0].samples?.[0].ts).toBe(1_100);
+    expect(queue.take(servers, 3_000)).toEqual([]);
+  });
+
+  test("skips samples superseded by bootstrap without dropping latency", () => {
+    const queue = createLivePlayback();
+    queue.enqueue([{ serverId: "s1", samples: [{
+      ts: 1_001, data: { cpu: 99, latency_results: [{ task_id: "t1", timestamp: 1_001, latency_ms: 20, packet_loss: 0 }] },
+    }] }], [server()], 0);
+    const servers = [server({ timestamp: 1_005, cpu: 10 })];
+    const state = applyBatch({}, queue.take(servers, 0), servers);
+    expect(mergeServerLive(servers[0], state.s1, 0, 180).cpu).toBe(10);
+    expect(state.s1.latencyResults).toHaveLength(1);
+  });
+
+  test("clears suspended queues, removes deleted nodes and drops stale metrics", () => {
+    const queue = createLivePlayback();
+    const servers = [server()];
+    const updates = [{ serverId: "s1", samples: [{ ts: 1_001, data: { cpu: 20 } }] }];
+    queue.enqueue(updates, servers, 0);
+    queue.clear();
+    expect(queue.take(servers, 0)).toEqual([]);
+    queue.enqueue(updates, servers, 0);
+    expect(queue.take([], 0)).toEqual([]);
+    expect(queue.take(servers, 0)).toEqual([]);
+    queue.enqueue(updates, servers, 0);
+    expect(queue.take(servers, 6_000)).toEqual([]);
   });
 });
 

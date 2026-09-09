@@ -73,7 +73,7 @@ try {
   proxy.listen(0, "127.0.0.1");
   await once(proxy, "listening");
 
-  console.log("agent runtime: automatic update during three-second sampling");
+  console.log("agent runtime: automatic update during one-second sampling");
   websocketServer = new WebSocketServer({ noServer: true });
   websocketServer.on("headers", (headers) => {
     headers.push("X-NodeFlare-Agent-Protocol: 1");
@@ -131,7 +131,7 @@ try {
   }
   assert(token, "Unable to create deterministic update jitter");
   const updating = startAgent(upgradeServer.address().port, token, "update");
-  await waitUntil(() => releaseRequests.length > 0, 12_000, "Automatic update was starved by sampling");
+  await waitUntil(() => releaseRequests.length > 0, 22_000, "Automatic update was starved by sampling");
   assert(samples > 0, "Update check must follow acknowledged samples");
   assert(redirected, "Same-origin WebSocket redirects must remain supported");
   await stopAgent(updating);
@@ -139,11 +139,12 @@ try {
   console.log("agent runtime: three-second uploads are unique and reconnect replays unconfirmed samples");
   const telemetryConnections = [];
   const trackTelemetry = (socket) => {
-    const connection = { timestamps: [], durable: 0, firstInfo: false, infoCount: 0, commits: 0 };
+    const connection = { timestamps: [], frames: [], durable: 0, firstInfo: false, infoCount: 0, commits: 0 };
     telemetryConnections.push(connection);
     socket.on("message", (raw, binary) => {
       if (!binary) return;
       const message = JSON.parse(gunzipSync(raw).toString());
+      if (message.samples.length) connection.frames.push({ at: Date.now(), count: message.samples.length });
       for (const sample of message.samples) {
         if (!connection.timestamps.length) connection.firstInfo = Boolean(sample.info);
         connection.infoCount += Number(Boolean(sample.info));
@@ -154,7 +155,7 @@ try {
         connection.durable = connection.timestamps.at(-1);
         connection.commits++;
       }
-      if (telemetryConnections.length === 1 && connection.timestamps.length === 3) socket.terminate();
+      if (telemetryConnections.length === 1 && connection.frames.length >= 3) socket.terminate();
     });
   };
   websocketServer.on("connection", trackTelemetry);
@@ -168,7 +169,11 @@ try {
   assert.equal(before.infoCount, 1, "Unchanged static info must not be uploaded repeatedly");
   assert(before.timestamps.slice(1).every((timestamp) => after.timestamps.includes(timestamp)), "Unconfirmed samples were lost");
   assert(!after.timestamps.includes(before.durable), "Durable samples must not be replayed");
-  assert(before.timestamps.slice(1).every((timestamp, index) => timestamp - before.timestamps[index] >= 3), "Sampling interval is shorter than three seconds");
+  assert(before.timestamps.slice(1).every((timestamp, index) => timestamp - before.timestamps[index] === 1),
+    "CPU/network samples must be one second apart");
+  assert(before.frames.slice(1).every((frame, index) => frame.at - before.frames[index].at >= 2_800),
+    "Sampling every second must not cause per-second uploads");
+  assert(before.frames.some((frame) => frame.count >= 3), "Uploads must batch the one-second samples");
 
   console.log("agent runtime: remote command survives disconnect and returns its result");
   const taskId = randomUUID();
