@@ -249,6 +249,8 @@
 .latency-editor { display: flex; width: min(620px, 100%); max-height: calc(100dvh - 48px); overflow: auto; flex-direction: column; gap: 16px; border: 1px solid var(--admin-border); border-radius: 8px; padding: 22px; color: var(--admin-text); background: var(--admin-surface); }
 .latency-editor > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .latency-editor > * { flex-shrink: 0; }
+.latency-target-row { grid-template-columns: minmax(0, 1fr) 140px; }
+.latency-target-row > label { min-width: 0; }
 .password-field { position: relative; min-width: 0; }
 .password-field input { padding-right: 44px; }
 .password-field .icon-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px; }

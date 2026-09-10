@@ -5,11 +5,12 @@ import type { AdminServer, LatencyTask, LatencyTaskInput } from "../types";
 import { Checkbox } from "./Checkbox";
 import { useDialog } from "./useDialog";
 
-const emptyTask: LatencyTaskInput = {
+type TaskForm = Omit<LatencyTaskInput, "port">;
+
+const emptyTask: TaskForm = {
   name: "",
   task_type: "icmp",
   target: "",
-  port: null,
   interval_seconds: 60,
   default_enabled: false,
   server_ids: [],
@@ -35,6 +36,15 @@ function validHost(value: string) {
   return labels.every((part) => /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(part));
 }
 
+function parseTarget(value: string, type: LatencyTask["task_type"]): Pick<LatencyTaskInput, "target" | "port"> | null {
+  const target = value.trim();
+  if (type === "icmp") return validHost(target) ? { target, port: null } : null;
+  const match = /^([^:\s]+)(?::(\d{1,5}))?$/.exec(target);
+  if (!match || !validHost(match[1])) return null;
+  const port = Number(match[2] ?? 80);
+  return port >= 1 && port <= 65535 ? { target: match[1], port } : null;
+}
+
 export function LatencyManager({
   servers,
   onError,
@@ -47,7 +57,7 @@ export function LatencyManager({
   const [tasks, setTasks] = useState<LatencyTask[]>([]);
   const [busy, setBusy] = useState(true);
   const [editing, setEditing] = useState<LatencyTask | "new" | null>(null);
-  const [form, setForm] = useState<LatencyTaskInput>(emptyTask);
+  const [form, setForm] = useState<TaskForm>(emptyTask);
   const [query, setQuery] = useState("");
   const editorDialog = useDialog<HTMLFormElement>(editing !== null, () => setEditing(null));
 
@@ -76,8 +86,7 @@ export function LatencyManager({
     setForm(task ? {
       name: task.name,
       task_type: task.task_type,
-      target: task.target,
-      port: task.port,
+      target: task.task_type === "tcp" ? `${task.target}:${task.port ?? 80}` : task.target,
       interval_seconds: task.interval_seconds,
       default_enabled: task.default_enabled,
       server_ids: [...task.server_ids],
@@ -97,15 +106,17 @@ export function LatencyManager({
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (!validHost(form.target) || (form.task_type === "tcp" && (!form.port || form.port < 1 || form.port > 65535)) || (form.task_type === "icmp" && form.port !== null)) {
-      onError(form.task_type === "icmp" ? "ICMP 节点应为公网域名或公网 IPv4，不使用端口" : "TCP 节点应为公网域名或公网 IPv4，并填写 1 至 65535 的端口");
+    const target = parseTarget(form.target, form.task_type);
+    if (!target) {
+      onError(form.task_type === "icmp" ? "ICMP 节点应为公网域名或公网 IPv4，不使用端口" : "TCP 节点格式应为域名:端口或公网 IPv4:端口，端口范围为 1 至 65535");
       return;
     }
+    const input: LatencyTaskInput = { ...form, ...target };
     setBusy(true);
     onError("");
     try {
-      if (editing === "new") await api.createLatencyTask(form);
-      else if (editing) await api.updateLatencyTask(editing.id, form);
+      if (editing === "new") await api.createLatencyTask(input);
+      else if (editing) await api.updateLatencyTask(editing.id, input);
       setEditing(null);
       await load();
       onNotice(editing === "new" ? "延迟任务已添加" : "延迟任务已更新");
@@ -143,7 +154,7 @@ export function LatencyManager({
         <span className={`latency-type ${task.task_type}`}><RadioTower size={13} />{task.task_type.toUpperCase()}</span>
         <div className="latency-task-name"><strong>{task.name}</strong><small>{task.target}{task.port ? `:${task.port}` : ""}</small></div>
         <span className="latency-task-meta">{task.interval_seconds}s</span>
-        <span className="latency-task-meta">{task.server_ids.length} 个节点{task.default_enabled ? " · 默认" : ""}</span>
+        <span className="latency-task-meta">{task.server_ids.length} 个节点</span>
         <div className="row-actions"><button className="icon-btn" type="button" onClick={() => open(task)} title="编辑延迟任务"><Pencil size={15} /></button><button className="icon-btn danger" type="button" onClick={() => void remove(task)} title="删除延迟任务"><Trash2 size={15} /></button></div>
       </div>)}
       {!tasks.length && !busy ? <div className="list-empty">暂无延迟任务</div> : null}
@@ -152,9 +163,8 @@ export function LatencyManager({
 
     {editing ? <div className="submodal-backdrop" role="presentation" onMouseDown={editorDialog.onBackdropMouseDown}><form ref={editorDialog.dialogRef} className="latency-editor glass-panel" role="dialog" aria-modal="true" aria-labelledby="latency-editor-title" tabIndex={-1} onSubmit={save}>
       <header><div><span className="eyebrow">延迟检测</span><h3 id="latency-editor-title">{editing === "new" ? "添加任务" : `编辑 · ${editing.name}`}</h3></div></header>
-      <div className="form-grid"><label><span>名称</span><input autoFocus required maxLength={80} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} /></label><label><span>类型</span><div className="segmented task-type-control"><button type="button" className={form.task_type === "icmp" ? "active" : ""} onClick={() => setForm((current) => ({ ...current, task_type: "icmp", port: null }))}>ICMP</button><button type="button" className={form.task_type === "tcp" ? "active" : ""} onClick={() => setForm((current) => ({ ...current, task_type: "tcp", port: current.port ?? 80 }))}>TCP</button></div></label></div>
-      <div className="form-grid"><label><span>节点</span><input required maxLength={50} value={form.target} onChange={(event) => setForm((current) => ({ ...current, target: event.target.value }))} placeholder={form.task_type === "tcp" ? "example.com" : "1.1.1.1"} /></label>{form.task_type === "tcp" ? <label><span>端口</span><input type="number" min="1" max="65535" required value={form.port ?? ""} onChange={(event) => setForm((current) => ({ ...current, port: event.target.value ? Number(event.target.value) : null }))} placeholder="80" /></label> : <div />}</div>
-      <label><span>检测间隔（秒）</span><input type="number" min="30" max="3600" required value={form.interval_seconds} onChange={(event) => setForm((current) => ({ ...current, interval_seconds: Number(event.target.value) }))} /></label>
+      <div className="form-grid"><label><span>名称</span><input autoFocus required maxLength={80} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} /></label><label><span>类型</span><div className="segmented task-type-control"><button type="button" className={form.task_type === "icmp" ? "active" : ""} onClick={() => setForm((current) => ({ ...current, task_type: "icmp", target: parseTarget(current.target, current.task_type)?.target ?? current.target }))}>ICMP</button><button type="button" className={form.task_type === "tcp" ? "active" : ""} onClick={() => setForm((current) => ({ ...current, task_type: "tcp" }))}>TCP</button></div></label></div>
+      <div className="form-grid latency-target-row"><label><span>节点</span><input required maxLength={form.task_type === "tcp" ? 56 : 50} value={form.target} onChange={(event) => setForm((current) => ({ ...current, target: event.target.value }))} placeholder={form.task_type === "tcp" ? "hb-cm-dualstack.ip.zstaticcdn.com:80" : "1.1.1.1"} /></label><label><span>检测间隔（秒）</span><input type="number" min="30" max="3600" required value={form.interval_seconds} onChange={(event) => setForm((current) => ({ ...current, interval_seconds: Number(event.target.value) }))} /></label></div>
       <div className="server-picker">
         <div className="server-picker-head"><strong>服务器</strong><span>已选 {form.server_ids.length} / 共 {servers.length}</span><button type="button" onClick={() => setForm((current) => ({ ...current, server_ids: allSelected ? [] : servers.map((server) => server.id) }))}>{allSelected ? "取消全选" : "全选"}</button></div>
         <div className="server-picker-search"><Search size={16} /><input aria-label="搜索服务器" placeholder="搜索" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
