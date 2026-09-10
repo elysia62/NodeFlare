@@ -12,15 +12,14 @@ use nodeflare_telemetry as telemetry;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use telemetry::{
+    AGENT_CAPABILITIES_HEADER, AGENT_PROTOCOL_HEADER, AGENT_PROTOCOL_VERSION,
+    REQUIRED_AGENT_CAPABILITIES,
+};
 use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TASK_RESULT_BYTES: usize = 1024 * 1024;
-const AGENT_PROTOCOL_VERSION: &str = "1";
-const AGENT_PROTOCOL_HEADER: &str = "x-nodeflare-agent-protocol";
-const AGENT_CAPABILITIES_HEADER: &str = "x-nodeflare-agent-capabilities";
-const REQUIRED_AGENT_CAPABILITIES: [&str; 4] =
-    ["metrics-v1", "config-v1", "remote-exec-v1", "task-ack-v1"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

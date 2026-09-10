@@ -476,6 +476,7 @@ version = "1.0.0"
 dependencies = [
  "clap",
  "httpdate",
+ "libc",
  "nodeflare-telemetry",
  "serde",
  "serde_json",

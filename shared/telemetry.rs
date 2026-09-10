@@ -2,6 +2,11 @@ use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read};
 
+pub const AGENT_PROTOCOL_VERSION: &str = "1";
+pub const AGENT_PROTOCOL_HEADER: &str = "x-nodeflare-agent-protocol";
+pub const AGENT_CAPABILITIES_HEADER: &str = "x-nodeflare-agent-capabilities";
+pub const REQUIRED_AGENT_CAPABILITIES: [&str; 4] =
+    ["metrics-v1", "config-v1", "remote-exec-v1", "task-ack-v1"];
 pub const MIN_UPLOAD_INTERVAL: u64 = 3;
 pub const MAX_BATCH_BYTES: usize = 768 * 1024;
 pub const MAX_DECODED_BYTES: usize = 2 * 1024 * 1024;

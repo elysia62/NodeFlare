@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer } from "ws";
 import { gunzipSync } from "node:zlib";
@@ -41,7 +41,7 @@ async function waitUntil(predicate, timeout, message) {
   }
 }
 
-function startAgent(port, token, name) {
+function startAgent(port, token, name, extraEnv = {}) {
   const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
   const child = spawn(binary, ["-e", `http://127.0.0.1:${port}`, "-t", token], {
     env: {
@@ -51,6 +51,7 @@ function startAgent(port, token, name) {
       HTTPS_PROXY: proxyUrl, https_proxy: proxyUrl,
       ALL_PROXY: proxyUrl, all_proxy: proxyUrl,
       NO_PROXY: "", no_proxy: "",
+      ...extraEnv,
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -159,7 +160,23 @@ try {
     });
   };
   websocketServer.on("connection", trackTelemetry);
-  const telemetry = startAgent(upgradeServer.address().port, "runtime-telemetry", "telemetry");
+  const telemetryEnv = {};
+  if (process.platform === "linux") {
+    const tools = join(directory, "slow-gpu");
+    mkdirSync(tools);
+    // Align startup near a second boundary, then make a cached GPU refresh cross it.
+    // CPU/network samples must retain the time at which their counters were read.
+    writeFileSync(join(tools, "nvidia-smi"), `#!${process.execPath}
+const { existsSync, writeFileSync } = require("node:fs");
+const marker = ${JSON.stringify(join(directory, "gpu-initialized"))};
+const initial = !existsSync(marker);
+if (initial) writeFileSync(marker, "ready");
+const wait = initial ? (750 - Date.now() % 1000 + 1000) % 1000 : 350;
+setTimeout(() => process.stdout.write("10, Runtime test GPU, 256, 1024\\n"), wait);
+`, { mode: 0o755 });
+    telemetryEnv.PATH = `${tools}${delimiter}${process.env.PATH ?? ""}`;
+  }
+  const telemetry = startAgent(upgradeServer.address().port, "runtime-telemetry", "telemetry", telemetryEnv);
   await waitUntil(() => telemetryConnections.length >= 2 && telemetryConnections[1].commits >= 2,
     40_000, "Telemetry reconnect or commit did not complete");
   await stopAgent(telemetry);
@@ -170,7 +187,7 @@ try {
   assert(before.timestamps.slice(1).every((timestamp) => after.timestamps.includes(timestamp)), "Unconfirmed samples were lost");
   assert(!after.timestamps.includes(before.durable), "Durable samples must not be replayed");
   assert(before.timestamps.slice(1).every((timestamp, index) => timestamp - before.timestamps[index] === 1),
-    "CPU/network samples must be one second apart");
+    `CPU/network samples must be one second apart: ${JSON.stringify({ timestamps: before.timestamps, frames: before.frames })}`);
   assert(before.frames.slice(1).every((frame, index) => frame.at - before.frames[index].at >= 2_800),
     "Sampling every second must not cause per-second uploads");
   assert(before.frames.some((frame) => frame.count >= 3), "Uploads must batch the one-second samples");

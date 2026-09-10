@@ -1,7 +1,10 @@
 mod live_batch;
 mod runtime_stats;
 use nodeflare_telemetry as telemetry;
-use telemetry::{DiskMetric, GpuMetric, LatencyResult, Report};
+use telemetry::{
+    AGENT_CAPABILITIES_HEADER, AGENT_PROTOCOL_HEADER, AGENT_PROTOCOL_VERSION, DiskMetric,
+    GpuMetric, LatencyResult, REQUIRED_AGENT_CAPABILITIES, Report,
+};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -78,8 +81,6 @@ const PUBLIC_IP_V6_URL: &str = "https://ipv6.icanhazip.com/";
 const RUNTIME_STATS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CLOCK_CALIBRATION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOCK_CALIBRATION_MIN_CHANGE_MS: i64 = 20_000;
-const AGENT_PROTOCOL_VERSION: &str = "1";
-const AGENT_CAPABILITIES: &str = "metrics-v1,config-v1,remote-exec-v1,task-ack-v1";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -195,6 +196,30 @@ impl LatencyExecutor {
             self.in_flight.remove(&result.task_id);
         }
         results
+    }
+
+    fn schedule(
+        &mut self,
+        tasks: &[LatencyTask],
+        deadlines: &mut HashMap<String, Instant>,
+        now: Instant,
+    ) {
+        for task in tasks {
+            if deadlines
+                .get(&task.id)
+                .is_some_and(|deadline| *deadline > now)
+            {
+                continue;
+            }
+            let delay = if self.enqueue(task.clone()) {
+                Duration::from_secs(task.interval_seconds.clamp(30, 3600))
+            } else {
+                // A queued/running task can outlive its interval. Never leave an
+                // expired deadline behind for the main loop to spin on.
+                SAMPLE_INTERVAL
+            };
+            deadlines.insert(task.id.clone(), now + delay);
+        }
     }
 }
 
@@ -695,39 +720,90 @@ fn connection_counts() -> (i64, i64) {
 
 #[cfg(target_os = "linux")]
 fn disk_usage() -> Vec<DiskMetric> {
-    let output = command(
-        "df",
-        &["-B1", "-l", "--output=source,target,fstype,size,used"],
-    );
-    output
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 5 {
+    disk_mounts(&text("/proc/self/mounts"))
+        .filter_map(|(name, mount_point)| {
+            // Ignore file bind mounts such as a container's /etc/hosts.
+            if !Path::new(&mount_point).is_dir() {
                 return None;
             }
-            let source = fields[0];
-            let mount_point = fields[1..fields.len() - 3].join(" ");
-            let filesystem = fields[fields.len() - 3];
-            if excluded_filesystem(filesystem, &mount_point) {
-                return None;
-            }
-            let total = fields[fields.len() - 2].parse::<i64>().ok()?;
-            let used = fields[fields.len() - 1].parse::<i64>().ok()?;
-            (total > 0).then(|| DiskMetric {
-                name: source.to_string(),
+            let (total, used) = filesystem_space(&mount_point)?;
+            Some(DiskMetric {
+                name,
                 mount_point,
                 used,
                 total,
                 ..DiskMetric::default()
             })
         })
-        .collect::<Vec<_>>()
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn disk_mounts(contents: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    fn unescape(value: &str) -> String {
+        value
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\")
+    }
+    contents.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let source = unescape(fields.next()?);
+        let mount_point = unescape(fields.next()?);
+        let filesystem = fields.next()?;
+        if (!source.starts_with('/') && source.contains(':'))
+            || source.starts_with("//")
+            || excluded_filesystem(filesystem, &mount_point)
+        {
+            return None;
+        }
+        Some((source, mount_point))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_space(mount_point: &str) -> Option<(i64, i64)> {
+    let path = std::ffi::CString::new(mount_point).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: path is NUL-terminated and stat points to writable storage of the
+    // platform's statvfs type, including both glibc and musl layouts.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statvfs returned success and initialized stat.
+    let stat = unsafe { stat.assume_init() };
+    let block_size = u128::from(if stat.f_frsize == 0 {
+        stat.f_bsize
+    } else {
+        stat.f_frsize
+    });
+    let total = (u128::from(stat.f_blocks) * block_size).min(i64::MAX as u128) as i64;
+    let used = (u128::from(stat.f_blocks.saturating_sub(stat.f_bfree)) * block_size)
+        .min(i64::MAX as u128) as i64;
+    (total > 0).then_some((total, used))
 }
 
 #[cfg(target_os = "linux")]
 fn excluded_filesystem(filesystem: &str, mount_point: &str) -> bool {
+    // Remote/autofs mounts can block indefinitely while their server is down.
+    if matches!(
+        filesystem,
+        "nfs"
+            | "nfs4"
+            | "cifs"
+            | "smb3"
+            | "autofs"
+            | "9p"
+            | "ceph"
+            | "afs"
+            | "fuse.sshfs"
+            | "fuse.glusterfs"
+            | "fuse.rclone"
+            | "fuse.s3fs"
+    ) {
+        return true;
+    }
     let mount_point = mount_point.to_ascii_lowercase();
     // Keep the root filesystem visible even when a container reports it as overlay.
     if mount_point == "/" {
@@ -1831,13 +1907,12 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
         request
             .headers_mut()
             .insert("User-Agent", format!("nodeflare-agent/{VERSION}").parse()?);
+        request
+            .headers_mut()
+            .insert(AGENT_PROTOCOL_HEADER, AGENT_PROTOCOL_VERSION.parse()?);
         request.headers_mut().insert(
-            "X-NodeFlare-Agent-Protocol",
-            AGENT_PROTOCOL_VERSION.parse()?,
-        );
-        request.headers_mut().insert(
-            "X-NodeFlare-Agent-Capabilities",
-            AGENT_CAPABILITIES.parse()?,
+            AGENT_CAPABILITIES_HEADER,
+            REQUIRED_AGENT_CAPABILITIES.join(",").parse()?,
         );
         let stream = connect_live_stream(&url, deadline)?;
         match client_tls(request, stream) {
@@ -1869,7 +1944,7 @@ fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)
         .and_then(|value| clock_offset_from_http_date(value, started_ms, ended_ms));
     if !response
         .headers()
-        .get("x-nodeflare-agent-protocol")
+        .get(AGENT_PROTOCOL_HEADER)
         .is_some_and(|value| value == AGENT_PROTOCOL_VERSION)
     {
         return Err(format!(
@@ -3503,27 +3578,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             }
         }
         pending_results.extend(latency_executor.drain());
-        let current = Instant::now();
-        let due = config
-            .latency_tasks
-            .iter()
-            .filter(|task| {
-                next_latency
-                    .get(&task.id)
-                    .is_none_or(|deadline| *deadline <= current)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if !due.is_empty() {
-            let scheduled_at = Instant::now();
-            for task in due {
-                let task_id = task.id.clone();
-                let interval = task.interval_seconds.clamp(30, 3600);
-                if latency_executor.enqueue(task) {
-                    next_latency.insert(task_id, scheduled_at + Duration::from_secs(interval));
-                }
-            }
-        }
+        latency_executor.schedule(&config.latency_tasks, &mut next_latency, Instant::now());
 
         if Instant::now() >= next_collect && (!once || once_target_timestamp.is_none()) {
             let offset_ms = shared_clock_offset(&clock);
@@ -3532,15 +3587,17 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
                 result.timestamp = corrected_timestamp(result.timestamp, offset_ms);
                 latest_results.insert(result.task_id.clone(), result);
             }
-            let collection_started = Instant::now();
-            let mut report = collector.collect(&config, latest_results.into_values().collect(), 0);
-            stats.collection_finished(collection_started.elapsed());
-            let persisted_through = live.as_ref().map_or(0, LiveSender::persisted_through);
-            report.timestamp = monotonic_report_timestamp(
+            // CPU and network counters are read at the beginning of collect.
+            // A slow GPU/disk refresh must not shift their timestamp to a later second.
+            let timestamp = monotonic_report_timestamp(
                 corrected_timestamp(unix_timestamp(), offset_ms),
                 last_emitted_timestamp,
-                persisted_through,
+                live.as_ref().map_or(0, LiveSender::persisted_through),
             );
+            let collection_started = Instant::now();
+            let report =
+                collector.collect(&config, latest_results.into_values().collect(), timestamp);
+            stats.collection_finished(collection_started.elapsed());
             last_emitted_timestamp = report.timestamp;
             if print_only {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3798,6 +3855,98 @@ mod tests {
         assert!(super::excluded_filesystem("tmpfs", "/tmp"));
         assert!(super::excluded_filesystem("proc", "/proc"));
         assert!(!super::excluded_filesystem("btrfs", "/var"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reads_local_mounts_and_decodes_escaped_paths_once() {
+        let mounts = super::disk_mounts(
+            r"overlay / overlay rw 0 0
+proc /proc proc rw 0 0
+tmpfs /run tmpfs rw 0 0
+/dev/vda1 /data\040volume ext4 rw 0 0
+/dev/vda2 /literal\134040path ext4 rw 0 0
+/dev/vda3 /tab\011dir ext4 rw 0 0
+server:/export /remote nfs4 rw 0 0
+//server/share /remote-share cifs rw 0 0
+none /auto autofs rw 0 0
+invalid",
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(
+            mounts,
+            vec![
+                ("overlay".into(), "/".into()),
+                ("/dev/vda1".into(), "/data volume".into()),
+                ("/dev/vda2".into(), "/literal\\040path".into()),
+                ("/dev/vda3".into(), "/tab\tdir".into()),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reads_root_disk_capacity_without_external_commands() {
+        let (total, used) = super::filesystem_space("/").unwrap();
+        assert!(total > 0);
+        assert!((0..=total).contains(&used));
+        assert!(
+            super::disk_usage()
+                .iter()
+                .any(|disk| disk.mount_point == "/")
+        );
+        assert!(super::filesystem_space("/proc/self/not-a-mount").is_none());
+        assert!(super::filesystem_space("/nul\0path").is_none());
+    }
+
+    #[test]
+    fn overdue_latency_tasks_wait_and_resume_without_duplicate_probes() {
+        let (task_tx, task_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let mut executor = super::LatencyExecutor {
+            task_tx,
+            result_rx,
+            in_flight: Default::default(),
+            stats: Default::default(),
+        };
+        let task = LatencyTask {
+            id: "queued-probe".into(),
+            name: "probe".into(),
+            task_type: "tcp".into(),
+            target: "example.com".into(),
+            port: Some(443),
+            interval_seconds: 30,
+        };
+        let mut deadlines = std::collections::HashMap::new();
+        let started = Instant::now();
+        executor.schedule(std::slice::from_ref(&task), &mut deadlines, started);
+        assert_eq!(task_rx.try_recv().unwrap().id, task.id);
+        assert_eq!(deadlines[&task.id], started + Duration::from_secs(30));
+
+        let overdue = started + Duration::from_secs(30);
+        executor.schedule(std::slice::from_ref(&task), &mut deadlines, overdue);
+        assert!(task_rx.try_recv().is_err());
+        assert_eq!(deadlines[&task.id], overdue + Duration::from_secs(1));
+
+        result_tx
+            .send(LatencyResult {
+                task_id: task.id.clone(),
+                ..LatencyResult::default()
+            })
+            .unwrap();
+        assert_eq!(executor.drain().len(), 1);
+        let retry_at = deadlines[&task.id];
+        executor.schedule(std::slice::from_ref(&task), &mut deadlines, retry_at);
+        executor.schedule(std::slice::from_ref(&task), &mut deadlines, retry_at);
+        assert_eq!(task_rx.try_recv().unwrap().id, task.id);
+        assert!(task_rx.try_recv().is_err());
+        assert_eq!(deadlines[&task.id], retry_at + Duration::from_secs(30));
+
+        drop(task_rx);
+        executor.in_flight.clear();
+        let retry_at = deadlines[&task.id];
+        executor.schedule(std::slice::from_ref(&task), &mut deadlines, retry_at);
+        assert_eq!(deadlines[&task.id], retry_at + Duration::from_secs(1));
     }
 
     #[test]
