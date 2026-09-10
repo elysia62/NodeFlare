@@ -146,7 +146,10 @@ restore_tty() {
 cleanup() {
   restore_tty
   if [ "$rollback_ready" = true ]; then
-    rollback_install
+    if ! rollback_install; then
+      printf '错误：自动回滚未完成，备份已保留在 %s\n' "$backup_dir" >&2
+      download_dir=""
+    fi
   fi
   [ -z "$config_temp" ] || rm -f "$config_temp"
   [ -z "$download_dir" ] || rm -rf "$download_dir"
@@ -484,11 +487,27 @@ EOF
 }
 
 stop_server() {
+  [ -f "$(service_definition)" ] || return 0
   case "$init_system" in
-    systemd) systemctl stop nodeflare.service >/dev/null 2>&1 || true ;;
-    openrc) rc-service nodeflare stop >/dev/null 2>&1 || true ;;
-    launchd) launchctl bootout system "$launchd_file" >/dev/null 2>&1 || true ;;
-    freebsd) service nodeflare stop >/dev/null 2>&1 || true ;;
+    systemd)
+      systemctl stop nodeflare.service || return 1
+      stopped_pid=$(systemctl show -p MainPID --value nodeflare.service) || return 1
+      [ "$stopped_pid" = 0 ]
+      ;;
+    openrc)
+      rc-service nodeflare stop || return 1
+      ! rc-service nodeflare status >/dev/null 2>&1
+      ;;
+    launchd)
+      launchctl print system/nodeflare >/dev/null 2>&1 || return 0
+      launchctl bootout system "$launchd_file" || return 1
+      ! launchctl print system/nodeflare >/dev/null 2>&1
+      ;;
+    freebsd)
+      service nodeflare onestatus >/dev/null 2>&1 || return 0
+      service nodeflare onestop || return 1
+      ! service nodeflare onestatus >/dev/null 2>&1
+      ;;
   esac
 }
 
@@ -504,11 +523,11 @@ service_definition() {
 snapshot_install() {
   backup_dir=$download_dir/previous
   mkdir -p "$backup_dir"
-  if [ -d "$install_dir" ]; then
-    cp -Rp "$install_dir" "$backup_dir/install"
+  if [ -f "$server_binary" ]; then
+    cp -p "$server_binary" "$backup_dir/nodeflare"
     previous_install=true
   fi
-  if [ "$share_dir" != "$install_dir/share" ] && [ -d "$share_dir" ]; then
+  if [ -d "$share_dir" ]; then
     cp -Rp "$share_dir" "$backup_dir/share"
     previous_share=true
   fi
@@ -517,7 +536,6 @@ snapshot_install() {
     cp -p "$service_path" "$backup_dir/service"
     previous_service=true
   fi
-  rollback_ready=true
 }
 
 rollback_install() {
@@ -527,29 +545,30 @@ rollback_install() {
   else
     log "安装未完成，正在回滚本次更改"
   fi
-  stop_server
-  rm -rf "$install_dir"
+  stop_server || return 1
+  rm -f "$server_binary" || return 1
+  rm -rf "$share_dir" || return 1
   if [ "$previous_install" = true ]; then
-    cp -Rp "$backup_dir/install" "$install_dir"
+    mkdir -p "$install_dir" || return 1
+    cp -p "$backup_dir/nodeflare" "$server_binary" || return 1
   fi
-  if [ "$share_dir" != "$install_dir/share" ]; then
-    rm -rf "$share_dir"
-    if [ "$previous_share" = true ]; then
-      cp -Rp "$backup_dir/share" "$share_dir"
-    fi
+  if [ "$previous_share" = true ]; then
+    cp -Rp "$backup_dir/share" "$share_dir" || return 1
   fi
   service_path=$(service_definition)
-  rm -f "$service_path"
+  rm -f "$service_path" || return 1
   if [ "$previous_service" = true ]; then
-    cp -p "$backup_dir/service" "$service_path"
+    cp -p "$backup_dir/service" "$service_path" || return 1
   fi
   if [ "$previous_install" = true ] && [ -f "$config_file" ]; then
     if start_server; then
       log "已恢复并重新启动上一版本"
     else
       printf '警告：上一版本已恢复，但服务未能自动启动\n' >&2
+      return 1
     fi
   fi
+  return 0
 }
 
 install_service() {
@@ -621,7 +640,7 @@ status_server() {
 restart_server() {
   [ -x "$server_binary" ] && [ -f "$config_file" ] && [ -f "$(service_definition)" ] \
     || fail "未检测到完整安装，请先选择安装 / 更新"
-  stop_server
+  stop_server || fail "无法停止已有面板服务，已取消重启"
   start_server || fail "服务重启失败，请检查日志"
   log "服务已重启"
 }
@@ -629,7 +648,7 @@ restart_server() {
 uninstall_server() {
   purge=$1
   log "停止并移除面板服务"
-  stop_server
+  stop_server || fail "无法停止已有面板服务，已取消卸载"
   case "$init_system" in
     systemd)
       systemctl disable nodeflare.service >/dev/null 2>&1 || true
@@ -738,7 +757,8 @@ else
   log "正在更新至 v$release_version"
 fi
 snapshot_install
-stop_server
+stop_server || fail "无法停止已有面板服务，未替换程序"
+rollback_ready=true
 install -d -m 0700 "$config_dir" "$theme_dir"
 install -d -m 0755 "$install_dir"
 rm -rf "$share_dir"

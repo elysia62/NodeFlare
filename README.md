@@ -4,6 +4,8 @@ NodeFlare 是一款轻量级的自托管服务器监控面板，通过 Web 界�
 
 CPU、内存和网速每秒采样，默认每 3 秒压缩批量上传。服务器卡片每秒显示一个真实采样值，正常连接下有约 2～3 秒的显示延迟；断线重连后跳过积压的旧数据。磁盘容量、GPU 等较慢指标单独缓存，历史数据按节点设置的保存间隔聚合。增大实时上传间隔会降低卡片连续更新的频率。
 
+Linux 内存统计与 Komari 默认口径一致：已用内存为 `MemTotal - MemFree - Cached - SReclaimable - Buffers + Shmem`，Swap 已用量扣除 `SwapCached`。文件缓存不计入已用内存，共享内存计入；面板显示的是整机内存，不是 NodeFlare 进程本身的占用。
+
 ## 安装服务端
 
 支持 Linux x64/ARM64、Windows x64、macOS ARM64、FreeBSD 13+ x64/ARM64。安装脚本自动下载最新 Release 并注册系统服务。

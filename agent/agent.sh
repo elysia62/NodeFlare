@@ -62,28 +62,25 @@ cleanup_agent_install() {
   if [ "$rollback_agent" = true ]; then
     rollback_agent=false
     log "安装未完成，正在恢复上一版本"
-    case "$init_system" in
-      systemd) systemctl stop "$SERVICE_NAME" 2>/dev/null || true ;;
-      openrc) rc-service "$SERVICE_NAME" stop 2>/dev/null || true ;;
-    esac
+    stop_agent || { printf '错误：旧服务未停止，回滚备份已保留在 %s\n' "$STATE_DIR" >&2; return 1; }
     if [ "$had_agent" = true ]; then
-      cp -p "$backup_agent" "$AGENT_FILE" 2>/dev/null || true
+      cp -p "$backup_agent" "$AGENT_FILE" || return 1
     else
-      rm -f "$AGENT_FILE"
+      rm -f "$AGENT_FILE" || return 1
     fi
     service_path=$SERVICE_FILE
     [ "$init_system" != openrc ] || service_path=$OPENRC_FILE
     if [ "$had_service" = true ]; then
-      cp -p "$backup_service" "$service_path" 2>/dev/null || true
+      cp -p "$backup_service" "$service_path" || return 1
     else
-      rm -f "$service_path"
+      rm -f "$service_path" || return 1
     fi
     case "$init_system" in
       systemd)
-        systemctl daemon-reload 2>/dev/null || true
-        [ "$had_agent" != true ] || systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+        systemctl daemon-reload || return 1
+        [ "$had_service" != true ] || systemctl restart "$SERVICE_NAME" || return 1
         ;;
-      openrc) [ "$had_agent" != true ] || rc-service "$SERVICE_NAME" restart 2>/dev/null || true ;;
+      openrc) [ "$had_service" != true ] || rc-service "$SERVICE_NAME" restart || return 1 ;;
     esac
   fi
   [ -z "$temporary" ] || rm -f "$temporary"
@@ -141,6 +138,22 @@ ensure_not_agent_service() {
         ;;
     esac
   done < "/proc/$$/cgroup"
+}
+
+stop_agent() {
+  case "$init_system" in
+    systemd)
+      [ -f "$SERVICE_FILE" ] || return 0
+      systemctl stop "$SERVICE_NAME" || return 1
+      stopped_pid=$(systemctl show -p MainPID --value "$SERVICE_NAME") || return 1
+      [ "$stopped_pid" = 0 ]
+      ;;
+    openrc)
+      [ -f "$OPENRC_FILE" ] || return 0
+      rc-service "$SERVICE_NAME" stop || return 1
+      ! rc-service "$SERVICE_NAME" status >/dev/null 2>&1
+      ;;
+  esac
 }
 
 verify_agent_started() {
@@ -329,19 +342,8 @@ install_agent() {
     cp -p "$service_path" "$backup_service"
     had_service=true
   fi
+  stop_agent || fail "无法停止已有 Agent 服务，未替换程序"
   rollback_agent=true
-  case "$init_system" in
-    systemd)
-      systemctl stop "$SERVICE_NAME" 2>/dev/null || {
-        [ "$had_service" = false ] || fail "无法停止已有 Agent 服务，未替换程序"
-      }
-      ;;
-    openrc)
-      rc-service "$SERVICE_NAME" stop 2>/dev/null || {
-        [ "$had_service" = false ] || fail "无法停止已有 Agent 服务，未替换程序"
-      }
-      ;;
-  esac
   mv "$temporary" "$AGENT_FILE"
   log "正在启动 $init_system 服务"
   if [ "$init_system" = "systemd" ]; then
@@ -467,6 +469,7 @@ uninstall_agent() {
   log "正在停止并移除 Agent 服务"
   init_system=$(detect_init_system)
   ensure_not_agent_service
+  stop_agent || fail "无法停止已有 Agent 服务，已取消卸载"
   case "$init_system" in
     systemd) systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true ;;
     openrc)

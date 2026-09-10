@@ -38,22 +38,28 @@ cleanup_agent_install() {
   if [ "$rollback_agent" = true ]; then
     rollback_agent=false
     log "安装未完成，正在恢复上一版本"
-    launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
+    stop_agent || { printf '错误：旧服务未停止，回滚备份已保留在 %s\n' "$STATE_DIR" >&2; return 1; }
     if [ "$had_agent" = true ]; then
-      cp -p "$backup_agent" "$AGENT_FILE" 2>/dev/null || true
+      cp -p "$backup_agent" "$AGENT_FILE" || return 1
     else
-      rm -f "$AGENT_FILE"
+      rm -f "$AGENT_FILE" || return 1
     fi
     if [ "$had_service" = true ]; then
-      cp -p "$backup_service" "$PLIST_FILE" 2>/dev/null || true
-      launchctl bootstrap system "$PLIST_FILE" 2>/dev/null || true
+      cp -p "$backup_service" "$PLIST_FILE" || return 1
+      launchctl bootstrap system "$PLIST_FILE" || return 1
     else
-      rm -f "$PLIST_FILE"
+      rm -f "$PLIST_FILE" || return 1
     fi
   fi
   [ -z "$temporary" ] || rm -f "$temporary"
   [ -z "$backup_agent" ] || rm -f "$backup_agent"
   [ -z "$backup_service" ] || rm -f "$backup_service"
+}
+
+stop_agent() {
+  launchctl print "system/$LABEL" >/dev/null 2>&1 || return 0
+  launchctl bootout system "$PLIST_FILE" || return 1
+  ! launchctl print "system/$LABEL" >/dev/null 2>&1
 }
 
 usage() {
@@ -247,9 +253,9 @@ if [ -f "$PLIST_FILE" ]; then
   cp -p "$PLIST_FILE" "$backup_service"
   had_service=true
 fi
-rollback_agent=true
 log "正在启动 macOS LaunchDaemon 服务"
-launchctl bootout system "$PLIST_FILE" 2>/dev/null || true
+stop_agent || fail "无法停止已有 Agent 服务，未替换程序"
+rollback_agent=true
 mv "$temporary" "$AGENT_FILE"
 cat > "$PLIST_FILE" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

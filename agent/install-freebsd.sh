@@ -39,22 +39,29 @@ cleanup_agent_install() {
   if [ "$rollback_agent" = true ]; then
     rollback_agent=false
     log "安装未完成，正在恢复上一版本"
-    service "$SERVICE_NAME" stop 2>/dev/null || true
+    stop_agent || { printf '错误：旧服务未停止，回滚备份已保留在 %s\n' "$STATE_DIR" >&2; return 1; }
     if [ "$had_agent" = true ]; then
-      cp -p "$backup_agent" "$AGENT_FILE" 2>/dev/null || true
+      cp -p "$backup_agent" "$AGENT_FILE" || return 1
     else
-      rm -f "$AGENT_FILE"
+      rm -f "$AGENT_FILE" || return 1
     fi
     if [ "$had_service" = true ]; then
-      cp -p "$backup_service" "$SERVICE_FILE" 2>/dev/null || true
-      service "$SERVICE_NAME" start 2>/dev/null || true
+      cp -p "$backup_service" "$SERVICE_FILE" || return 1
+      service "$SERVICE_NAME" start || return 1
     else
-      rm -f "$SERVICE_FILE"
+      rm -f "$SERVICE_FILE" || return 1
     fi
   fi
   [ -z "$temporary" ] || rm -f "$temporary"
   [ -z "$backup_agent" ] || rm -f "$backup_agent"
   [ -z "$backup_service" ] || rm -f "$backup_service"
+}
+
+stop_agent() {
+  [ -f "$SERVICE_FILE" ] || return 0
+  service "$SERVICE_NAME" onestatus >/dev/null 2>&1 || return 0
+  service "$SERVICE_NAME" onestop || return 1
+  ! service "$SERVICE_NAME" onestatus >/dev/null 2>&1
 }
 
 usage() {
@@ -269,10 +276,9 @@ if [ -f "$SERVICE_FILE" ]; then
   cp -p "$SERVICE_FILE" "$backup_service"
   had_service=true
 fi
-rollback_agent=true
-
 log "正在启动 FreeBSD rc.d 服务"
-service "$SERVICE_NAME" stop 2>/dev/null || true
+stop_agent || fail "无法停止已有 Agent 服务，未替换程序"
+rollback_agent=true
 mv "$temporary" "$AGENT_FILE"
 cat > "$SERVICE_FILE" <<EOF
 #!/bin/sh

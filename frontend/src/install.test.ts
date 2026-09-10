@@ -98,6 +98,8 @@ describe("Windows uninstall ownership", () => {
           $ErrorActionPreference = "Stop"
           function Write-Step { }
           function Stop-ScheduledTask { }
+          function Stop-Server { }
+          function Stop-Agent { }
           function Unregister-ScheduledTask { }
           $Mode = "Uninstall"
           $Uninstall = $true
@@ -466,11 +468,12 @@ describe("agent installer manual update", () => {
 
 describe("agent installer service safety", () => {
   test("a failed stop of an existing service prevents replacement", () => {
-    const stop = agentInstaller.slice(agentInstaller.indexOf("  rollback_agent=true\n"), agentInstaller.indexOf('  mv "$temporary" "$AGENT_FILE"'));
-    expect(stop).toContain("systemctl stop");
+    const stop = agentInstaller.slice(agentInstaller.indexOf("  stop_agent || fail"), agentInstaller.indexOf('  mv "$temporary" "$AGENT_FILE"'));
+    expect(stop).toContain("stop_agent");
     const directory = mkdtempSync(join(tmpdir(), "nodeflare-agent-stop-"));
     const log = join(directory, "stop.log");
     try {
+      writeFileSync(log, "existing-service");
       // Dash rejects hyphenated function names, so mock the external commands.
       for (const command of ["systemctl", "rc-service"]) {
         writeFileSync(join(directory, command), '#!/bin/sh\nprintf \'%s\\n\' "$*" > "$TEST_STOP_LOG"\nexit 1\n', { mode: 0o755 });
@@ -478,10 +481,12 @@ describe("agent installer service safety", () => {
       for (const init of ["systemd", "openrc"]) {
         const result = spawnSync("sh", ["-c", `
           set -eu
-          ${agentShellFunctions("fail")}
+          ${agentShellFunctions("fail", "stop_agent")}
           init_system=$TEST_INIT
           had_service=true
           SERVICE_NAME=nodeflare-agent
+          SERVICE_FILE=$TEST_STOP_LOG
+          OPENRC_FILE=$TEST_STOP_LOG
           ${stop}
           printf 'replaced'
         `], { env: { ...process.env, PATH: `${directory}${delimiter}${process.env.PATH ?? ""}`, TEST_INIT: init, TEST_STOP_LOG: log }, encoding: "utf8" });

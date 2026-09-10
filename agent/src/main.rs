@@ -679,9 +679,52 @@ fn mem_value(contents: &str, key: &str) -> i64 {
         .lines()
         .find(|line| line.starts_with(key))
         .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(0)
-        .saturating_mul(1024)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(0, |value| u64_to_i64(value.saturating_mul(1024)))
+}
+
+#[cfg(target_os = "linux")]
+struct MemorySample {
+    total: i64,
+    used: i64,
+    swap_total: i64,
+    swap_used: i64,
+}
+
+#[cfg(target_os = "linux")]
+fn memory_sample(contents: &str) -> MemorySample {
+    let total = mem_value(contents, "MemTotal:");
+    let free = mem_value(contents, "MemFree:");
+    let reclaimable = free
+        .saturating_add(mem_value(contents, "Cached:"))
+        .saturating_add(mem_value(contents, "SReclaimable:"))
+        .saturating_add(mem_value(contents, "Buffers:"));
+    // Komari's default Linux/htop calculation excludes reclaimable caches but
+    // includes shared memory. MemAvailable uses a different kernel estimate.
+    let used = total
+        .saturating_sub(if reclaimable <= total {
+            reclaimable
+        } else {
+            free
+        })
+        .saturating_add(mem_value(contents, "Shmem:"))
+        .clamp(0, total);
+    let swap_total = mem_value(contents, "SwapTotal:");
+    let swap_free = mem_value(contents, "SwapFree:");
+    let swap_deductions = swap_free.saturating_add(mem_value(contents, "SwapCached:"));
+    let swap_used = swap_total
+        .saturating_sub(if swap_deductions <= swap_total {
+            swap_deductions
+        } else {
+            swap_free
+        })
+        .clamp(0, swap_total);
+    MemorySample {
+        total,
+        used,
+        swap_total,
+        swap_used,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1402,7 +1445,6 @@ fn average_gpu_usage(gpus: &[GpuMetric]) -> f64 {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 fn u64_to_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
@@ -1543,11 +1585,7 @@ impl Collector {
         }
         self.public_ip.refresh();
 
-        let mem = text("/proc/meminfo");
-        let mem_total = mem_value(&mem, "MemTotal:");
-        let mem_used = mem_total.saturating_sub(mem_value(&mem, "MemAvailable:"));
-        let swap_total = mem_value(&mem, "SwapTotal:");
-        let swap_used = swap_total.saturating_sub(mem_value(&mem, "SwapFree:"));
+        let memory = memory_sample(&text("/proc/meminfo"));
         let loads = text("/proc/loadavg")
             .split_whitespace()
             .take(3)
@@ -1579,10 +1617,10 @@ impl Collector {
             load1: loads.first().copied().unwrap_or(0.0),
             load5: loads.get(1).copied().unwrap_or(0.0),
             load15: loads.get(2).copied().unwrap_or(0.0),
-            mem_used,
-            mem_total,
-            swap_used,
-            swap_total,
+            mem_used: memory.used,
+            mem_total: memory.total,
+            swap_used: memory.swap_used,
+            swap_total: memory.swap_total,
             disk_used,
             disk_total,
             net_in: per_second(io_now.rx.saturating_sub(io_before.rx), elapsed),
@@ -1788,7 +1826,11 @@ impl Collector {
             load1: load.one,
             load5: load.five,
             load15: load.fifteen,
-            mem_used: u64_to_i64(self.system.used_memory()),
+            mem_used: u64_to_i64(
+                self.system
+                    .total_memory()
+                    .saturating_sub(self.system.available_memory()),
+            ),
             mem_total: u64_to_i64(self.system.total_memory()),
             swap_used: u64_to_i64(self.system.used_swap()),
             swap_total: u64_to_i64(self.system.total_swap()),
@@ -3855,6 +3897,62 @@ mod tests {
         assert!(super::excluded_filesystem("tmpfs", "/tmp"));
         assert!(super::excluded_filesystem("proc", "/proc"));
         assert!(!super::excluded_filesystem("btrfs", "/var"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn memory_matches_komari_default_including_shared_memory_and_swap_cache() {
+        let memory = super::memory_sample(
+            "MemTotal: 1000000 kB\nMemFree: 100000 kB\nMemAvailable: 750000 kB\n\
+             Cached: 300000 kB\nSReclaimable: 50000 kB\nBuffers: 25000 kB\n\
+             Shmem: 25000 kB\nSwapTotal: 100000 kB\nSwapFree: 60000 kB\nSwapCached: 20000 kB\n",
+        );
+        assert_eq!(memory.total, 1_000_000 * 1024);
+        assert_eq!(memory.used, 550_000 * 1024);
+        assert_eq!(memory.swap_total, 100_000 * 1024);
+        assert_eq!(memory.swap_used, 20_000 * 1024);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filling_file_cache_does_not_inflate_reported_memory() {
+        let before = super::memory_sample(
+            "MemTotal: 1000 kB\nMemFree: 400 kB\nCached: 300 kB\n\
+             Buffers: 50 kB\nSReclaimable: 50 kB\nShmem: 100 kB\n",
+        );
+        let after = super::memory_sample(
+            "MemTotal: 1000 kB\nMemFree: 200 kB\nCached: 500 kB\n\
+             Buffers: 50 kB\nSReclaimable: 50 kB\nShmem: 100 kB\n",
+        );
+        assert_eq!(before.used, 300 * 1024);
+        assert_eq!(after.used, before.used);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn memory_handles_missing_and_inconsistent_kernel_counters() {
+        let memory = super::memory_sample(
+            "MemTotal: 1000 kB\nMemFree: 200 kB\nCached: 1000 kB\n\
+             Shmem: 100 kB\nSwapTotal: 100 kB\nSwapFree: 20 kB\nSwapCached: 100 kB\n",
+        );
+        assert_eq!(memory.used, 900 * 1024);
+        assert_eq!(memory.swap_used, 80 * 1024);
+        for contents in ["", "MemTotal: invalid kB\n", "MemTotal: -1 kB\n"] {
+            let memory = super::memory_sample(contents);
+            assert_eq!(
+                (
+                    memory.total,
+                    memory.used,
+                    memory.swap_total,
+                    memory.swap_used
+                ),
+                (0, 0, 0, 0)
+            );
+        }
+        let memory = super::memory_sample(
+            "MemTotal: 100 kB\nMemFree: 1000 kB\nSwapTotal: 100 kB\nSwapFree: 1000 kB\n",
+        );
+        assert_eq!((memory.used, memory.swap_used), (0, 0));
     }
 
     #[cfg(target_os = "linux")]

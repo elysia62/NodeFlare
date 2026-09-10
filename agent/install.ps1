@@ -32,6 +32,7 @@ $HadPreviousConfig = $false
 $HadPreviousLauncher = $false
 $PreviousTaskXml = $null
 $InstallChanged = $false
+$KeepBackup = $false
 
 function Write-Step([string]$Message) {
   Write-Host $Message
@@ -39,6 +40,19 @@ function Write-Step([string]$Message) {
 
 function Write-InstallError([string]$Message) {
   throw "错误：$Message"
+}
+
+function Stop-Agent {
+  $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if ($null -ne $Task) { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop }
+  for ($Attempt = 0; $Attempt -lt 30; $Attempt++) {
+    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $Running = @(Get-CimInstance Win32_Process -Filter "Name = 'agent.exe'" -ErrorAction Stop |
+      Where-Object { $_.ExecutablePath -eq $AgentFile })
+    if (($null -eq $Task -or $Task.State -ne "Running") -and $Running.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 500
+  }
+  Write-InstallError "旧 Agent 进程未退出，已停止操作，未替换程序"
 }
 
 function Show-InstallResult {
@@ -116,7 +130,7 @@ function Assert-Mirror([string]$Value) {
 
 if ($Uninstall) {
   Write-Step "正在停止并移除 Agent 服务"
-  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  Stop-Agent
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $AgentFile -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $LauncherFile -Force -ErrorAction SilentlyContinue
@@ -214,8 +228,8 @@ try {
   if ($HadPreviousLauncher) { Copy-Item -LiteralPath $LauncherFile -Destination $PreviousLauncher -Force }
   $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($null -ne $ExistingTask) { $PreviousTaskXml = Export-ScheduledTask -TaskName $TaskName }
+  Stop-Agent
   $InstallChanged = $true
-  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Move-Item -LiteralPath $Temporary -Destination $AgentFile -Force
 
   $AgentConfig = [ordered]@{
@@ -245,7 +259,7 @@ exit $LASTEXITCODE
   Write-Step "正在注册并启动 Windows 计划任务"
   $TaskAction = New-ScheduledTaskAction -Execute $PowerShell -Argument $TaskArguments
   $Trigger = New-ScheduledTaskTrigger -AtStartup
-  $Settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+  $Settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
   $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
   Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $Trigger -Settings $Settings -Principal $Principal -Force | Out-Null
   Start-ScheduledTask -TaskName $TaskName
@@ -261,34 +275,42 @@ exit $LASTEXITCODE
   $InstallChanged = $false
   Show-InstallResult
 } catch {
+  $InstallError = $_
   if ($InstallChanged) {
     Write-Warning "安装未完成，正在恢复上一版本"
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    if ($HadPreviousAgent) {
-      Copy-Item -LiteralPath $PreviousAgent -Destination $AgentFile -Force
-    } else {
-      Remove-Item -LiteralPath $AgentFile -Force -ErrorAction SilentlyContinue
-    }
-    if ($HadPreviousConfig) {
-      Copy-Item -LiteralPath $PreviousConfig -Destination $ConfigFile -Force
-    } else {
-      Remove-Item -LiteralPath $ConfigFile -Force -ErrorAction SilentlyContinue
-    }
-    if ($HadPreviousLauncher) {
-      Copy-Item -LiteralPath $PreviousLauncher -Destination $LauncherFile -Force
-    } else {
-      Remove-Item -LiteralPath $LauncherFile -Force -ErrorAction SilentlyContinue
-    }
-    if ($null -ne $PreviousTaskXml) {
-      Register-ScheduledTask -TaskName $TaskName -Xml $PreviousTaskXml -Force | Out-Null
-      Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    try {
+      Stop-Agent
+      Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+      if ($HadPreviousAgent) {
+        Copy-Item -LiteralPath $PreviousAgent -Destination $AgentFile -Force
+      } else {
+        Remove-Item -LiteralPath $AgentFile -Force -ErrorAction SilentlyContinue
+      }
+      if ($HadPreviousConfig) {
+        Copy-Item -LiteralPath $PreviousConfig -Destination $ConfigFile -Force
+      } else {
+        Remove-Item -LiteralPath $ConfigFile -Force -ErrorAction SilentlyContinue
+      }
+      if ($HadPreviousLauncher) {
+        Copy-Item -LiteralPath $PreviousLauncher -Destination $LauncherFile -Force
+      } else {
+        Remove-Item -LiteralPath $LauncherFile -Force -ErrorAction SilentlyContinue
+      }
+      if ($null -ne $PreviousTaskXml) {
+        Register-ScheduledTask -TaskName $TaskName -Xml $PreviousTaskXml -Force | Out-Null
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+      }
+    } catch {
+      $KeepBackup = $true
+      Write-Warning "自动回滚未完成，备份已保留：$PreviousAgent，$PreviousConfig，$PreviousLauncher；$_"
     }
   }
-  throw
+  throw $InstallError
 } finally {
   Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $PreviousAgent -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $PreviousConfig -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $PreviousLauncher -Force -ErrorAction SilentlyContinue
+  if (-not $KeepBackup) {
+    Remove-Item -LiteralPath $PreviousAgent -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $PreviousConfig -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $PreviousLauncher -Force -ErrorAction SilentlyContinue
+  }
 }

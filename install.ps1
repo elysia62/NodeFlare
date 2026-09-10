@@ -104,6 +104,30 @@ function Read-Port {
   }
 }
 
+function Stop-Server {
+  $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if ($null -ne $Task) { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop }
+  for ($Attempt = 0; $Attempt -lt 30; $Attempt++) {
+    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $Running = @(Get-CimInstance Win32_Process -Filter "Name = 'nodeflare.exe'" -ErrorAction Stop |
+      Where-Object { $_.ExecutablePath -eq $ServerFile })
+    if (($null -eq $Task -or $Task.State -ne "Running") -and $Running.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 500
+  }
+  Stop-Install "旧面板进程未退出，已停止操作，未替换程序"
+}
+
+function Restore-ServerFiles {
+  if (Test-Path -LiteralPath $ServerFile) { Remove-Item -LiteralPath $ServerFile -Force -ErrorAction Stop }
+  if (Test-Path -LiteralPath $ShareDir) { Remove-Item -LiteralPath $ShareDir -Recurse -Force -ErrorAction Stop }
+  if ($HadPreviousInstall) {
+    Copy-Item -LiteralPath (Join-Path $PreviousInstall "nodeflare.exe") -Destination $ServerFile -Force
+  }
+  if ($HadPreviousShare) {
+    Copy-Item -LiteralPath (Join-Path $PreviousInstall "share") -Destination $ShareDir -Recurse -Force
+  }
+}
+
 function Wait-Server {
   $Task = $null
   for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
@@ -164,7 +188,7 @@ if ($Mode -eq "Restart") {
   if ($null -eq $Task -or -not (Test-Path -LiteralPath $ServerFile) -or -not (Test-Path -LiteralPath $ConfigFile)) {
     Stop-Install "未检测到完整安装，请先选择安装 / 更新"
   }
-  Stop-ScheduledTask -TaskName $TaskName
+  Stop-Server
   Start-ScheduledTask -TaskName $TaskName
   Wait-Server
   Write-Step "服务已重启"
@@ -178,7 +202,7 @@ if ($Mode -eq "Uninstall") {
     }
   }
   Write-Step "停止并移除面板服务"
-  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  Stop-Server
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $ServerFile -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $ShareDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -206,7 +230,9 @@ $PackageDir = Join-Path $TemporaryDir "package"
 $PreviousInstall = Join-Path $TemporaryDir "previous-install"
 $InstallChanged = $false
 $HadPreviousInstall = $false
+$HadPreviousShare = $false
 $PreviousTaskXml = $null
+$KeepBackup = $false
 
 try {
   New-Item -ItemType Directory -Path $TemporaryDir -Force | Out-Null
@@ -279,16 +305,21 @@ try {
   } else {
     Write-Step "正在更新至 v$Version"
   }
-  $HadPreviousInstall = Test-Path -LiteralPath $InstallDir -PathType Container
+  $HadPreviousInstall = Test-Path -LiteralPath $ServerFile -PathType Leaf
+  $HadPreviousShare = Test-Path -LiteralPath $ShareDir -PathType Container
+  New-Item -ItemType Directory -Path $PreviousInstall -Force | Out-Null
   if ($HadPreviousInstall) {
-    Copy-Item -LiteralPath $InstallDir -Destination $PreviousInstall -Recurse -Force
+    Copy-Item -LiteralPath $ServerFile -Destination (Join-Path $PreviousInstall "nodeflare.exe") -Force
+  }
+  if ($HadPreviousShare) {
+    Copy-Item -LiteralPath $ShareDir -Destination (Join-Path $PreviousInstall "share") -Recurse -Force
   }
   $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($null -ne $ExistingTask) {
     $PreviousTaskXml = Export-ScheduledTask -TaskName $TaskName
   }
+  Stop-Server
   $InstallChanged = $true
-  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Path $InstallDir, $DataDir, $ThemeDir -Force | Out-Null
   Remove-Item -LiteralPath $ShareDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -302,7 +333,7 @@ try {
 
   $Action = New-ScheduledTaskAction -Execute $ServerFile -Argument "--config `"$ConfigFile`"" -WorkingDirectory $DataDir
   $Trigger = New-ScheduledTaskTrigger -AtStartup
-  $Settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+  $Settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
   $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
   Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal -Force | Out-Null
   Write-Step "正在启动服务"
@@ -313,21 +344,26 @@ try {
   $InstallChanged = $false
   Show-InstallResult
 } catch {
+  $InstallError = $_
   if ($InstallChanged) {
     if ($HadPreviousInstall) { Write-Warning "安装未完成，正在恢复上一版本" }
     else { Write-Warning "安装未完成，正在回滚本次更改" }
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-    if ($HadPreviousInstall) {
-      Copy-Item -LiteralPath $PreviousInstall -Destination $InstallDir -Recurse -Force
-    }
-    if ($null -ne $PreviousTaskXml) {
-      Register-ScheduledTask -TaskName $TaskName -Xml $PreviousTaskXml -Force | Out-Null
-      Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    try {
+      Stop-Server
+      Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+      Restore-ServerFiles
+      if ($null -ne $PreviousTaskXml) {
+        Register-ScheduledTask -TaskName $TaskName -Xml $PreviousTaskXml -Force | Out-Null
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+      }
+    } catch {
+      $KeepBackup = $true
+      Write-Warning "自动回滚未完成，备份已保留在 ${PreviousInstall}：$_"
     }
   }
-  throw
+  throw $InstallError
 } finally {
-  Remove-Item -LiteralPath $TemporaryDir -Recurse -Force -ErrorAction SilentlyContinue
+  if (-not $KeepBackup) {
+    Remove-Item -LiteralPath $TemporaryDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
