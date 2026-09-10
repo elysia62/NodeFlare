@@ -5,7 +5,7 @@ use crate::models::PublicConfig;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -113,6 +113,21 @@ pub async fn bootstrap(
         servers,
         exchange_rates: Some(exchange_rates),
     }))
+}
+
+pub async fn favicon(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+    let settings = crate::db::load_settings(&state.db)
+        .await
+        .map_err(ApiResponse::internal)?;
+    let logo_url = settings.logo_url.trim();
+    let target = if logo_url.is_empty() {
+        "/logo.svg".to_string()
+    } else {
+        url::Url::parse(logo_url)
+            .map_err(ApiResponse::internal)?
+            .to_string()
+    };
+    Ok(Redirect::temporary(&target).into_response())
 }
 
 pub async fn history(

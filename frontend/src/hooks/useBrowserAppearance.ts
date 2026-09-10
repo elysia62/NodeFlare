@@ -32,6 +32,8 @@ export function useSystemDark() {
 
 export function useFavicon(logoUrl: string | null | undefined) {
   useEffect(() => {
+    // Keep the server-resolved icon while the site configuration is loading.
+    if (logoUrl == null) return;
     let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
     if (!link) {
       link = document.createElement("link");
@@ -39,6 +41,6 @@ export function useFavicon(logoUrl: string | null | undefined) {
       document.head.append(link);
     }
     link.removeAttribute("type");
-    link.href = logoUrl || "/logo.svg";
+    link.href = logoUrl.trim() || "/logo.svg";
   }, [logoUrl]);
 }

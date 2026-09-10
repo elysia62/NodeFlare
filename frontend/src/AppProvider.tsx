@@ -94,7 +94,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const background = resolveBackground(config.background_url, dark);
   const blur = themeToggle(config, "enableBlur");
   const carrierLatency = config.show_latency && themeToggle(config, "showCarrierLatency", false);
-  useFavicon(config.logo_url);
+  useFavicon(configReady ? config.logo_url : undefined);
 
   if (!reloadQueueRef.current) {
     reloadQueueRef.current = createRefreshQueue(async (quiet) => {
