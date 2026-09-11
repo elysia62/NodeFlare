@@ -40,12 +40,12 @@ export function reconnectDelay(attempt: number, randomValue = Math.random()) {
   return Math.min(RECONNECT_MAX_DELAY, Math.round(jitteredDelay));
 }
 
-export interface LiveTransportHandlers {
+interface LiveTransportHandlers {
   onBatch: (updates: BatchUpdate[]) => void;
   onConnectedChange: (connected: boolean) => void;
 }
 
-export interface LiveTransportOptions {
+interface LiveTransportOptions {
   serverId: string | null;
 }
 

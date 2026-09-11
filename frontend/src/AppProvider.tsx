@@ -32,7 +32,7 @@ const defaultConfig: Config = { ...demoViewConfig, site_description: "", site_na
 
 type Access = "ok" | "login" | "turnstile";
 
-export interface AppState {
+interface AppState {
   config: Config;
   configReady: boolean;
   servers: Server[];

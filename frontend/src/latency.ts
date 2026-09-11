@@ -24,7 +24,7 @@ export const CARRIER_SLOTS = [
   { key: "unicom" as const, label: "联通", labelEn: "Unicom", color: "#60a5fa", aliases: ["联通", "chinaunicom", "unicom", "cucc", "cu"] },
 ] as const;
 
-export type CarrierSlot = typeof CARRIER_SLOTS[number];
+type CarrierSlot = typeof CARRIER_SLOTS[number];
 
 function latencyTone(value: number): LatencyTone {
   if (value <= 60) return "good";
@@ -97,7 +97,7 @@ export function selectCarrierTasks(
   return selected;
 }
 
-export interface LatencyBucket {
+interface LatencyBucket {
   timestamp: number;
   latency: number | null;
   loss: number | null;

@@ -29,7 +29,7 @@ export interface CarrierLatencyRow {
   lossBars: LatencyBar[];
 }
 
-export interface NodeLatencyStats {
+interface NodeLatencyStats {
   latencyDisplay: string;
   lossDisplay: string;
   latencyBars: LatencyBar[];

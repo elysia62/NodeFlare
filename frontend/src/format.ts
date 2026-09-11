@@ -10,7 +10,7 @@ export function percent(used: number | null, total: number | null) {
   return safeTotal > 0 ? Math.min(100, Math.max(0, (number(used) / safeTotal) * 100)) : 0;
 }
 
-export interface FormattedBytes {
+interface FormattedBytes {
   value: string;
   unit: string;
 }
