@@ -307,7 +307,9 @@ async fn send(
             .and_then(Value::as_str)
             .unwrap_or("no description");
         match value.get("error_code").and_then(Value::as_i64) {
-            Some(code) => anyhow::bail!("Telegram rejected the message (error {code}): {description}"),
+            Some(code) => {
+                anyhow::bail!("Telegram rejected the message (error {code}): {description}")
+            }
             None => anyhow::bail!("Telegram rejected the message: {description}"),
         }
     }

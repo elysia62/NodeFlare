@@ -542,7 +542,10 @@ pub(crate) fn load_remote_task_journal(path: &Path) -> Result<RemoteTaskJournal>
     Ok(journal)
 }
 
-pub(crate) fn write_remote_task_journal(path: &Path, entries: Vec<RemoteTaskJournalEntry>) -> Result<()> {
+pub(crate) fn write_remote_task_journal(
+    path: &Path,
+    entries: Vec<RemoteTaskJournalEntry>,
+) -> Result<()> {
     if entries.is_empty() {
         return match fs::remove_file(path) {
             Ok(()) => Ok(()),

@@ -194,15 +194,10 @@ pub async fn settings_patch(
     }
     // The TOTP rename is folded into the same transaction as the settings
     // update so a mid-way failure cannot leave 2FA looking up a stale username.
-    let totp_rename = username_changed.then(|| (user.username.as_str(), next_username.as_str()));
-    crate::db::update_settings(
-        &state.db,
-        &input,
-        password_hash.as_deref(),
-        totp_rename,
-    )
-    .await
-    .map_err(ApiResponse::internal)?;
+    let totp_rename = username_changed.then_some((user.username.as_str(), next_username.as_str()));
+    crate::db::update_settings(&state.db, &input, password_hash.as_deref(), totp_rename)
+        .await
+        .map_err(ApiResponse::internal)?;
     let credentials_changed = password_hash.is_some() || username_changed;
     let token = if credentials_changed {
         Some(

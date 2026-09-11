@@ -207,7 +207,10 @@ pub(crate) fn connect_live_stream(url: &url::Url, deadline: Instant) -> Result<T
     Ok(stream)
 }
 
-pub(crate) fn set_live_read_timeout(socket: &mut LiveSocket, timeout: Option<Duration>) -> io::Result<()> {
+pub(crate) fn set_live_read_timeout(
+    socket: &mut LiveSocket,
+    timeout: Option<Duration>,
+) -> io::Result<()> {
     match socket.get_mut() {
         tungstenite::stream::MaybeTlsStream::Plain(stream) => stream.set_read_timeout(timeout),
         tungstenite::stream::MaybeTlsStream::Rustls(stream) => {
@@ -400,7 +403,10 @@ pub(crate) fn observe_persisted_through(target: &AtomicI64, ack: &LiveAck) {
     }
 }
 
-pub(crate) fn prune_live_queue(pending: &Arc<(Mutex<VecDeque<Report>>, Condvar)>, persisted_through: i64) {
+pub(crate) fn prune_live_queue(
+    pending: &Arc<(Mutex<VecDeque<Report>>, Condvar)>,
+    persisted_through: i64,
+) {
     if persisted_through <= 0 {
         return;
     }
@@ -520,7 +526,9 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
         let (batch, persist, more_pending) = loop {
             let now = Instant::now();
             let persisted = persisted_through.load(Ordering::Acquire);
-            let has_unsent = queue.iter().any(|report| report.timestamp > accepted_through);
+            let has_unsent = queue
+                .iter()
+                .any(|report| report.timestamp > accepted_through);
             let persist =
                 now >= next_probe_at && queue.iter().any(|report| report.timestamp > persisted);
             if persist || (has_unsent && now >= next_send_at) {
@@ -695,4 +703,3 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
         }
     }
 }
-

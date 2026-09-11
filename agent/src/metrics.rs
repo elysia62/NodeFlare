@@ -53,7 +53,10 @@ pub(crate) fn text(path: impl AsRef<Path>) -> String {
 /// exceeds the pipe buffer is not mistaken for a hang. Without the timeout a
 /// wedged child (a stuck GPU driver, an unresponsive netstat) would block the
 /// sampler thread forever and silently stop telemetry.
-pub(crate) fn output_with_timeout(mut process: Command, timeout: Duration) -> Option<std::process::Output> {
+pub(crate) fn output_with_timeout(
+    mut process: Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
     let mut child = process
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1395,4 +1398,3 @@ impl Collector {
         self.basic.gpus = detailed;
     }
 }
-

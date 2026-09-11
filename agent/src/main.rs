@@ -496,7 +496,6 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
     })
 }
 
-
 fn flush_remote_results(socket: &mut LiveSocket, executor: &mut RemoteExecutor) -> Result<()> {
     for result in executor.due_results() {
         socket.send(Message::Text(serde_json::to_string(&result)?.into()))?;
@@ -721,7 +720,6 @@ fn rewrite_spool_if_due(path: &Path, samples: &[Report], last: &mut Option<Insta
     }
 }
 
-
 fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
     let mut config = runtime_config(options)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -941,4 +939,3 @@ fn main() {
 
 #[cfg(test)]
 mod tests;
-

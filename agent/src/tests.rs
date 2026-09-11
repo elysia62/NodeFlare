@@ -1,5 +1,3 @@
-use super::*;
-
 use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
@@ -8,17 +6,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{
     CLOCK_CALIBRATION_MAX_AGE, CapturedOutput, CliOptions, ClockCalibration, DiskMetric,
     GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, MAX_PENDING_LATENCY_RESULTS,
-    PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES,
-    REMOTE_STREAM_OUTPUT_BYTES, RemoteExecutor, RemoteTaskJournalEntry, RemoteTaskMessage,
-    Report, TaskResultMessage, UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval,
-    advance_deadline, clock_offset_from_http_date, corrected_timestamp, dedupe_disks,
+    PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES, REMOTE_STREAM_OUTPUT_BYTES,
+    RemoteExecutor, RemoteTaskJournalEntry, RemoteTaskMessage, Report, TaskResultMessage,
+    UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval, advance_deadline,
+    clock_offset_from_http_date, corrected_timestamp, dedupe_disks,
     execute_remote_task_with_timeout, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
     live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
-    parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
-    parse_system_profiler_gpu_names, ping_latencies, ping_latency, prune_report_samples,
-    release_asset_sha256, remote_result_text, sanitize_latency_tasks, selected_interface,
-    update_check_jitter, valid_endpoint, version_triplet, wildcard_match,
-    write_remote_task_journal,
+    parse_pciconf_gpu_names, parse_probe_target, parse_public_ip, parse_system_profiler_gpu_names,
+    ping_latencies, ping_latency, prune_report_samples, release_asset_sha256, remote_result_text,
+    sanitize_latency_tasks, selected_interface, update_check_jitter, valid_endpoint,
+    version_triplet, wildcard_match, write_remote_task_journal,
 };
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
@@ -737,7 +734,8 @@ fn bounds_pending_latency_results() {
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn parses_netstat_connection_counts() {
-    let output = "tcp4 0 0 host.443 peer.1 ESTABLISHED\nudp4 0 0 *.5353 *.*\nTCP host peer ESTABLISHED\n";
+    let output =
+        "tcp4 0 0 host.443 peer.1 ESTABLISHED\nudp4 0 0 *.5353 *.*\nTCP host peer ESTABLISHED\n";
     assert_eq!(connection_counts_from_netstat(output), (2, 1));
 }
 
