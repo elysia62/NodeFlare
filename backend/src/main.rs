@@ -45,6 +45,7 @@ pub struct AppState {
     pub restart_tx: watch::Sender<bool>,
     pub login_attempts: security::AttemptLimiter,
     pub sensitive_attempts: security::AttemptLimiter,
+    pub turnstile_attempts: security::AttemptLimiter,
     pub password_verifications: Arc<Semaphore>,
 }
 
@@ -185,6 +186,11 @@ async fn main() -> Result<()> {
             5,
             std::time::Duration::from_secs(5 * 60),
             std::time::Duration::from_secs(10 * 60),
+        ),
+        turnstile_attempts: security::AttemptLimiter::new(
+            10,
+            std::time::Duration::from_secs(5 * 60),
+            std::time::Duration::from_secs(5 * 60),
         ),
         password_verifications: Arc::new(Semaphore::new(4)),
     });

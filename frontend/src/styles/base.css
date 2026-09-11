@@ -97,7 +97,12 @@ html[data-blur="off"] .glass-panel { background: color-mix(in srgb, var(--card-s
 
 label { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
 label > span { color: var(--muted-foreground); font-size: 11px; }
-.form-error { margin: 0; color: var(--danger); font-size: 11px; }
+.form-error { display: flex; margin: 0; align-items: flex-start; gap: 6px; color: var(--danger); font-size: 11px; line-height: 1.5; }
+.form-error svg { flex: 0 0 auto; margin-top: 1px; }
+
+.password-field { position: relative; min-width: 0; }
+.password-field input { padding-right: 44px; }
+.password-field .icon-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px; }
 
 .segmented { display: inline-flex; min-width: 0; min-height: 36px; align-items: center; gap: 3px; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; padding: 3px; background: color-mix(in srgb, var(--card-solid) 78%, transparent); }
 .segmented button { display: inline-flex; min-height: 29px; flex: 0 0 auto; align-items: center; justify-content: center; gap: 5px; border-radius: 6px; padding: 4px 10px; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; }

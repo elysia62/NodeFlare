@@ -1,4 +1,4 @@
-<#
+﻿<#
 .EXAMPLE
   .\install.ps1 -Update
   Update using the saved endpoint, token and history interval.

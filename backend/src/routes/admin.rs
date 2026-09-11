@@ -192,12 +192,17 @@ pub async fn settings_patch(
     if !username_changed {
         input.admin_username = None;
     }
-    crate::db::update_settings(&state.db, &input, password_hash.as_deref())
-        .await
-        .map_err(ApiResponse::internal)?;
-    crate::db::queries::rename_totp_user(&state.db, &user.username, &next_username)
-        .await
-        .map_err(ApiResponse::internal)?;
+    // The TOTP rename is folded into the same transaction as the settings
+    // update so a mid-way failure cannot leave 2FA looking up a stale username.
+    let totp_rename = username_changed.then(|| (user.username.as_str(), next_username.as_str()));
+    crate::db::update_settings(
+        &state.db,
+        &input,
+        password_hash.as_deref(),
+        totp_rename,
+    )
+    .await
+    .map_err(ApiResponse::internal)?;
     let credentials_changed = password_hash.is_some() || username_changed;
     let token = if credentials_changed {
         Some(
@@ -707,8 +712,17 @@ pub async fn database_migrate(
         .await
         .map_err(|error| ApiResponse::unprocessable(format!("迁移失败：{error}")))?;
     let database = target.stats().await.map_err(ApiResponse::internal)?;
-    crate::config::update_database_url(&state.config_path, &target_url)
-        .map_err(ApiResponse::internal)?;
+    crate::config::update_database_url(&state.config_path, &target_url).map_err(|error| {
+        // The copy already succeeded, so a bare 500 would make the admin think
+        // nothing happened and possibly retry against a half-switched setup.
+        tracing::error!(%error, "database migration copied data but the configuration update failed");
+        ApiResponse::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "目标数据库已写入数据，但配置更新失败（{error}）；请手动修改 database_url 后重启面板"
+            ),
+        )
+    })?;
     state.database_activity.require_restart();
 
     Ok(Json(serde_json::json!({

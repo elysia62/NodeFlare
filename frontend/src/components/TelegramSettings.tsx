@@ -1,6 +1,7 @@
 import { CheckCircle2, Send, Save } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { ui, type UiLocale } from "../locale";
 import type { TelegramSettingsInput } from "../types";
 
 const defaultTemplate = "{{title}}\n\n服务器：{{server}}\n{{message}}\n时间：{{time}}";
@@ -11,7 +12,8 @@ const emptySettings: TelegramSettingsInput = {
   template: defaultTemplate,
 };
 
-export function TelegramSettings({ onError, onNotice }: {
+export function TelegramSettings({ locale, onError, onNotice }: {
+  locale: UiLocale | string | undefined;
   onError: (message: string) => void;
   onNotice: (message: string) => void;
 }) {
@@ -35,7 +37,7 @@ export function TelegramSettings({ onError, onNotice }: {
         setConfigured(false);
       }
     } catch (reason) {
-      onError(reason instanceof Error ? reason.message : "读取 Telegram 配置失败");
+      onError(reason instanceof Error ? reason.message : ui(locale, "读取 Telegram 配置失败", "Failed to load Telegram settings"));
     }
   }, [onError]);
 
@@ -56,9 +58,9 @@ export function TelegramSettings({ onError, onNotice }: {
         template: settings.template.trim(),
       });
       await load();
-      onNotice("Telegram 配置已保存");
+      onNotice(ui(locale, "Telegram 配置已保存", "Telegram settings saved"));
     } catch (reason) {
-      onError(reason instanceof Error ? reason.message : "保存 Telegram 配置失败");
+      onError(reason instanceof Error ? reason.message : ui(locale, "保存 Telegram 配置失败", "Failed to save Telegram settings"));
     } finally {
       setBusy(false);
     }
@@ -69,9 +71,9 @@ export function TelegramSettings({ onError, onNotice }: {
     onError("");
     try {
       await api.testTelegram();
-      onNotice("Telegram 测试消息已发送");
+      onNotice(ui(locale, "Telegram 测试消息已发送", "Telegram test message sent"));
     } catch (reason) {
-      onError(reason instanceof Error ? reason.message : "Telegram 测试消息发送失败");
+      onError(reason instanceof Error ? reason.message : ui(locale, "Telegram 测试消息发送失败", "Failed to send the Telegram test message"));
     } finally {
       setBusy(false);
     }
@@ -83,18 +85,18 @@ export function TelegramSettings({ onError, onNotice }: {
     <header className="telegram-settings-header">
       <div className="telegram-settings-title">
         <span className="telegram-mark"><Send size={18} /></span>
-        <div><h3 id="telegram-settings-title">Telegram</h3><span className={`telegram-state ${configured ? "configured" : ""}`}>{configured ? <CheckCircle2 size={13} /> : null}{configured ? "已配置" : "未配置"}</span></div>
+        <div><h3 id="telegram-settings-title">Telegram</h3><span className={`telegram-state ${configured ? "configured" : ""}`}>{configured ? <CheckCircle2 size={13} /> : null}{configured ? ui(locale, "已配置", "Configured") : ui(locale, "未配置", "Not configured")}</span></div>
       </div>
     </header>
     <div className="telegram-fields">
       <label className="telegram-token-field"><span>Bot Token</span><input type="password" autoComplete="off" value={settings.bot_token} onChange={(event) => update("bot_token", event.target.value)} placeholder="123456789:AA..." /></label>
       <label><span>Chat ID</span><input type="password" autoComplete="off" value={settings.chat_id} onChange={(event) => update("chat_id", event.target.value)} placeholder="-1001234567890" /></label>
-      <label><span>话题 ID（可选）</span><input type="number" min="1" value={settings.message_thread_id ?? ""} onChange={(event) => update("message_thread_id", event.target.value ? Number(event.target.value) : null)} /></label>
+      <label><span>{ui(locale, "话题 ID（可选）", "Topic ID (optional)")}</span><input type="number" min="1" value={settings.message_thread_id ?? ""} onChange={(event) => update("message_thread_id", event.target.value ? Number(event.target.value) : null)} /></label>
     </div>
-    <label className="telegram-template"><span>消息模板</span><textarea rows={5} maxLength={4000} value={settings.template} onChange={(event) => update("template", event.target.value)} /></label>
+    <label className="telegram-template"><span>{ui(locale, "消息模板", "Message template")}</span><textarea rows={5} maxLength={4000} value={settings.template} onChange={(event) => update("template", event.target.value)} /></label>
     <div className="telegram-actions">
-      <button type="button" className="secondary-btn" disabled={busy || !configured} onClick={() => void test()}><Send size={15} />发送测试</button>
-      <button type="button" className="primary-btn" disabled={busy || !ready} onClick={() => void save()}><Save size={15} />保存 Telegram</button>
+      <button type="button" className="secondary-btn" disabled={busy || !configured} onClick={() => void test()}><Send size={15} />{ui(locale, "发送测试", "Send test")}</button>
+      <button type="button" className="primary-btn" disabled={busy || !ready} onClick={() => void save()}><Save size={15} />{ui(locale, "保存 Telegram", "Save Telegram")}</button>
     </div>
   </section>;
 }

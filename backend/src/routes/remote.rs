@@ -139,6 +139,11 @@ pub async fn get_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiResponse> {
+    // Remote task IDs are UUIDs; validate the path parameter for consistency
+    // with the other ID endpoints instead of sending arbitrary input to the DB.
+    if id.len() > 80 || uuid::Uuid::parse_str(&id).is_err() {
+        return Err(ApiResponse::bad_request("任务 ID 无效"));
+    }
     let task = crate::db::queries::remote_task(&state.db, &id)
         .await
         .map_err(ApiResponse::internal)?

@@ -13,9 +13,17 @@ monitor_curl() {
   esac
 }
 
+# --fail-with-body was added in curl 7.76; older builds (e.g. CentOS 7 ships
+# 7.29) would abort with an unknown-option error, so fall back to --fail.
+if curl --help 2>&1 | grep -q -- '--fail-with-body'; then
+  CURL_FAIL_FLAG=--fail-with-body
+else
+  CURL_FAIL_FLAG=--fail
+fi
+
 request() {
   response_file=$(mktemp /tmp/nodeflare-response.XXXXXX)
-  if monitor_curl --fail-with-body --location --silent --show-error \
+  if monitor_curl "$CURL_FAIL_FLAG" --location --silent --show-error \
     --output "$response_file" "$@"; then
     cat "$response_file"
     rm -f -- "$response_file"

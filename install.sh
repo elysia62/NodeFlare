@@ -17,6 +17,7 @@ backup_dir=""
 previous_install=false
 previous_share=false
 previous_service=false
+config_created=false
 server_port=2206
 
 case "$(uname -s)" in
@@ -316,6 +317,7 @@ write_config() {
   } > "$config_temp"
   chown root "$config_temp"
   chmod 0600 "$config_temp"
+  [ -f "$config_file" ] || config_created=true
   mv -f "$config_temp" "$config_file"
   config_temp=""
   admin_password=""
@@ -559,6 +561,13 @@ rollback_install() {
   rm -f "$service_path" || return 1
   if [ "$previous_service" = true ]; then
     cp -p "$backup_dir/service" "$service_path" || return 1
+  fi
+  if [ "$config_created" = true ]; then
+    # A failed first install would otherwise leave a config file holding the
+    # plaintext admin password; it also makes the next run look like an update
+    # and skip credential setup.
+    rm -f "$config_file" || return 1
+    log "安装未完成，已删除本次写入的配置文件（$config_file）"
   fi
   if [ "$previous_install" = true ] && [ -f "$config_file" ]; then
     if start_server; then

@@ -1,4 +1,4 @@
-[CmdletBinding(DefaultParameterSetName = "Menu")]
+﻿[CmdletBinding(DefaultParameterSetName = "Menu")]
 param(
   [Parameter(ParameterSetName = "Menu")][switch]$Menu,
   [Parameter(ParameterSetName = "Install", Mandatory = $true)][switch]$Install,

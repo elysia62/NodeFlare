@@ -54,6 +54,15 @@ function fetchHistory(id: string, signature: string) {
   return request;
 }
 
+// Stale entries are never reused (load only reads a hit while it is fresher than
+// CACHE_TTL), so dropping expired ones keeps the shared map bounded and stops
+// deleted servers from lingering for the lifetime of the page.
+function pruneCache(now: number) {
+  for (const [key, entry] of cache) {
+    if (now - entry.at >= CACHE_TTL) cache.delete(key);
+  }
+}
+
 function mergePoints(...sources: LatencySample[][]): LatencySample[] {
   const points = new Map<string, LatencySample>();
   for (const source of sources) {
@@ -127,7 +136,9 @@ export function useNodeLatency(
         const result = await fetchHistory(server.id, taskSignature);
         loaded = true;
         if (!stopped) {
-          cache.set(server.id, { at: Date.now(), signature: taskSignature, points: result.points });
+          const now = Date.now();
+          pruneCache(now);
+          cache.set(server.id, { at: now, signature: taskSignature, points: result.points });
           setFetched(result.points);
         }
       } catch {} finally {

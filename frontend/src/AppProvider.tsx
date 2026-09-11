@@ -6,8 +6,10 @@ import {
   createLivePlayback,
   mergeServerLive,
   pruneLiveMetrics,
+  type LiveMetrics,
   type LiveMetricsMap,
 } from "./live";
+import { isOnline } from "./format";
 import { ui } from "./locale";
 import { useFavicon, useStoredAppearance, useSystemDark } from "./hooks/useBrowserAppearance";
 import { resolveBackground, themeToggle } from "./theme";
@@ -85,6 +87,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const systemDark = useSystemDark();
   const liveConnectedRef = useRef(false);
   const serversRef = useRef<Server[]>([]);
+  const cardCacheRef = useRef(new Map<string, {
+    server: Server;
+    live: LiveMetrics | undefined;
+    online: boolean;
+    result: Server;
+  }>());
+  const liveServersRef = useRef<Server[]>([]);
   const localeRef = useRef(config.locale);
   const reloadQueueRef = useRef<ReturnType<typeof createRefreshQueue> | null>(null);
 
@@ -142,7 +151,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async (username: string, password: string, turnstileToken: string, totpCode: string) => {
-    const derived = await derivePassword(password, config.password_client_salt);
+    const derived = await derivePassword(password, config.password_client_salt, config.locale);
     await api.login(username.trim(), derived, turnstileToken, totpCode);
     setAccess("ok");
     await reload();
@@ -286,14 +295,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const metricServers = useMemo(
-    () => servers.map((server) => mergeServerLive(server, liveMetrics[server.id], 0, config.offline_threshold_seconds)),
-    [config.offline_threshold_seconds, liveMetrics, servers],
-  );
-  const liveServers = useMemo(
-    () => metricServers.map((server) => mergeServerLive(server, undefined, clockNow, config.offline_threshold_seconds)),
-    [clockNow, config.offline_threshold_seconds, metricServers],
-  );
+  // Merge live metrics into servers with identity preservation: a server's object
+  // only changes when its own data or online status changes, and the array itself
+  // stays referentially stable on quiet ticks. Memoized cards then skip re-renders
+  // for nodes that reported nothing new, while a silent node still flips to
+  // offline within a second of crossing the threshold.
+  const liveServers = useMemo(() => {
+    const nowSec = clockNow / 1000;
+    const cache = cardCacheRef.current;
+    const next = servers.map((server) => {
+      const live = liveMetrics[server.id];
+      const merged = mergeServerLive(server, live);
+      const online = isOnline(merged, config.offline_threshold_seconds, nowSec);
+      const cached = cache.get(server.id);
+      if (cached && cached.server === server && cached.live === live) {
+        if (cached.online === online) return cached.result;
+        // Online status flipped without new data: mint a fresh object so the
+        // card re-renders into the offline/online state.
+        const result = { ...merged };
+        cache.set(server.id, { server, live, online, result });
+        return result;
+      }
+      cache.set(server.id, { server, live, online, result: merged });
+      return merged;
+    });
+    if (cache.size > next.length) {
+      const ids = new Set(next.map((server) => server.id));
+      for (const id of cache.keys()) {
+        if (!ids.has(id)) cache.delete(id);
+      }
+    }
+    const previous = liveServersRef.current;
+    const stable = previous.length === next.length
+      && next.every((server, index) => server === previous[index]);
+    liveServersRef.current = stable ? previous : next;
+    return liveServersRef.current;
+  }, [clockNow, config.offline_threshold_seconds, liveMetrics, servers]);
 
   useEffect(() => {
     if (!configReady) return;

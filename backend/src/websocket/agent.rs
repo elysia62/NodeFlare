@@ -20,6 +20,24 @@ use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TASK_RESULT_BYTES: usize = 1024 * 1024;
+/// Static identity fields the public dashboard already receives through
+/// `/api/bootstrap`, so the live stream omits them.
+///
+/// This is a deny list, so a new `Report` field is broadcast until added here;
+/// prefer inverting it into an explicit allow list when the sample shape is next
+/// reworked (verify the frontend's usage first).
+const LIVE_SAMPLE_PRIVATE_FIELDS: [&str; 10] = [
+    "timestamp",
+    "cpu_model",
+    "os",
+    "kernel",
+    "arch",
+    "virtualization",
+    "gpu_model",
+    "agent_version",
+    "ip_v4",
+    "ip_v6",
+];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -406,18 +424,7 @@ fn broadcast_reports(state: &AppState, identity: &AgentIdentity, reports: &[Agen
         .map(|report| {
             let mut data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
             if let Some(object) = data.as_object_mut() {
-                for key in [
-                    "timestamp",
-                    "cpu_model",
-                    "os",
-                    "kernel",
-                    "arch",
-                    "virtualization",
-                    "gpu_model",
-                    "agent_version",
-                    "ip_v4",
-                    "ip_v6",
-                ] {
+                for key in LIVE_SAMPLE_PRIVATE_FIELDS {
                     object.remove(key);
                 }
             }

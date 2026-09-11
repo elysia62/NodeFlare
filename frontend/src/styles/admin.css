@@ -251,9 +251,7 @@
 .latency-editor > * { flex-shrink: 0; }
 .latency-target-row { grid-template-columns: minmax(0, 1fr) 140px; }
 .latency-target-row > label { min-width: 0; }
-.password-field { position: relative; min-width: 0; }
-.password-field input { padding-right: 44px; }
-.password-field .icon-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px; }
+/* .password-field 样式已上移到 base.css，登录页与后台共用 */
 .submodal-backdrop.verification-backdrop { z-index: 100; align-items: center; padding: 16px; }
 .verification-backdrop .verification-modal { width: min(400px, 100%); max-height: calc(100dvh - 32px); border: 1px solid var(--admin-border); border-radius: 8px; }
 .task-type-control { height: 36px; }

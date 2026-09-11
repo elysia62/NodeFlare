@@ -764,7 +764,7 @@ jobs:
           tar -xzf "inputs/frontend/nodeflare-frontend-$VERSION.tar.gz" -C inputs/frontend/unpacked
           cp -a inputs/frontend/unpacked/dist/. package/share/frontend/
           cp -a inputs/frontend/unpacked/admin-dist/. package/share/admin/
-          cp deploy/nodeflare.service package/nodeflare.service
+          cp docs/nodeflare.service package/nodeflare.service
           cp LICENSE package/LICENSE
           chmod 0755 "package/$PACKAGE_BINARY"
           chmod 0644 package/LICENSE package/nodeflare.service

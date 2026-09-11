@@ -6,6 +6,7 @@ import {
   Download,
   Upload,
 } from "lucide-react";
+import { memo } from "react";
 import {
   formatBytes,
   formatCurrency,
@@ -94,12 +95,12 @@ function CarrierPanel({ label, rows, kind, empty }: {
   );
 }
 
-export function NodeCard({ server, config, liveLatencyResults, liveConnected, onOpen }: {
+export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResults, liveConnected, onOpen }: {
   server: Server;
   config: Config;
   liveLatencyResults?: LiveLatencyResult[];
   liveConnected: boolean;
-  onOpen: () => void;
+  onOpen: (server: Server) => void;
 }) {
   const threshold = config.offline_threshold_seconds;
   const online = isOnline(server, threshold);
@@ -119,7 +120,7 @@ export function NodeCard({ server, config, liveLatencyResults, liveConnected, on
   const lastUpdated = new Date(number(server.timestamp) * 1000).toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
   return (
-    <button className={`node-card glass-panel ${online ? "" : "offline"}`} onClick={onOpen} type="button" aria-label={ui(locale, `${server.name}，${online ? "在线" : "离线"}，查看详情`, `${server.name}, ${online ? "online" : "offline"}, view details`)}>
+    <button className={`node-card glass-panel ${online ? "" : "offline"}`} onClick={() => onOpen(server)} type="button" aria-label={ui(locale, `${server.name}，${online ? "在线" : "离线"}，查看详情`, `${server.name}, ${online ? "online" : "offline"}, view details`)}>
       <header className="node-header">
         <span className={`status-dot ${online ? "online" : ""}`} />
         <strong title={server.name}>{server.name}</strong>
@@ -176,4 +177,4 @@ export function NodeCard({ server, config, liveLatencyResults, liveConnected, on
       </div>
     </button>
   );
-}
+});

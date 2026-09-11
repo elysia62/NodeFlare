@@ -1,13 +1,17 @@
-use std::collections::VecDeque;
-
 use super::Report;
 
 pub(crate) const MAX_LIVE_BATCH_BYTES: usize = nodeflare_telemetry::MAX_BATCH_BYTES;
 
-pub(crate) fn batch_len(queue: &VecDeque<Report>) -> usize {
+/// Collects the longest prefix of `queue` that fits one live batch, cloning only
+/// the reports that are actually selected and serializing each candidate once
+/// (the size check needs the encoded length).
+pub(crate) fn batch_from<'a>(queue: impl Iterator<Item = &'a Report>) -> Vec<Report> {
     let mut encoded_bytes = 192_usize;
-    let mut count = 0_usize;
+    let mut batch = Vec::new();
     for report in queue {
+        if batch.len() >= super::LIVE_QUEUE_CAPACITY {
+            break;
+        }
         let Ok(report_bytes) = serde_json::to_vec(report) else {
             break;
         };
@@ -18,19 +22,19 @@ pub(crate) fn batch_len(queue: &VecDeque<Report>) -> usize {
             break;
         }
         encoded_bytes = next_bytes;
-        count += 1;
+        batch.push(report.clone());
         if encoded_bytes >= MAX_LIVE_BATCH_BYTES {
             break;
         }
     }
-    count.min(super::LIVE_QUEUE_CAPACITY)
+    batch
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{MAX_LIVE_BATCH_BYTES, batch_len};
+    use super::{MAX_LIVE_BATCH_BYTES, batch_from};
     use crate::Report;
 
     #[test]
@@ -40,7 +44,7 @@ mod tests {
             ..Report::default()
         };
         let queue = std::iter::repeat_n(report, 10).collect::<VecDeque<_>>();
-        let count = batch_len(&queue);
+        let count = batch_from(queue.iter()).len();
         assert!((1..10).contains(&count));
         let payload = crate::live_update_payload(
             queue.iter().take(count).cloned().collect::<Vec<_>>(),
@@ -92,7 +96,7 @@ mod tests {
                 ..Report::default()
             })
             .collect::<VecDeque<_>>();
-        assert!(batch_len(&queue) <= crate::LIVE_QUEUE_CAPACITY);
+        assert!(batch_from(queue.iter()).len() <= crate::LIVE_QUEUE_CAPACITY);
         let reports = crate::live_batch_after(&queue, 100);
         assert_eq!(reports.first().unwrap().timestamp, 101);
         for persist in [true, false] {

@@ -1,47 +1,18 @@
-import { KeyRound, Megaphone, Moon, Search, Sun, UserCircle } from "lucide-react";
-import { lazy, Suspense, useMemo, useState, type FormEvent } from "react";
+import { Megaphone, Moon, Search, Sun, UserCircle } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { demoMode, useApp } from "./AppProvider";
+import { LoginForm } from "./components/LoginForm";
 import { NodeCard } from "./components/NodeCard";
 import { SiteLogo } from "./components/SiteLogo";
 import { StatsBar } from "./components/StatsBar";
 import { TurnstileWidget } from "./components/TurnstileWidget";
-import { ApiError } from "./api";
 import { ui } from "./locale";
 
 const NodeDetails = lazy(() => import("./components/NodeDetails").then((module) => ({ default: module.NodeDetails })));
 
 function LoginGate() {
   const { config, dark, error, setError, login } = useApp();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [turnstileToken, setTurnstileToken] = useState("");
-  const [turnstileReset, setTurnstileReset] = useState(0);
-  const [totpCode, setTotpCode] = useState("");
-  const [totpChallenge, setTotpChallenge] = useState(false);
-  const [busy, setBusy] = useState(false);
   const locale = config.locale;
-  const totpRequired = config.totp_login_enabled || totpChallenge;
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      await login(username, password, turnstileToken, totpCode);
-      setPassword("");
-      setTurnstileToken("");
-      setTotpCode("");
-      setTotpChallenge(false);
-    } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 428) setTotpChallenge(true);
-      setError(reason instanceof Error ? reason.message : ui(locale, "登录失败", "Unable to sign in"));
-      setTurnstileToken("");
-      setTurnstileReset((value) => value + 1);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <section className="dashboard-login-gate glass-panel">
@@ -50,14 +21,17 @@ function LoginGate() {
         <h1>{ui(locale, "登录仪表盘", "Sign in to dashboard")}</h1>
         <p>{ui(locale, "此仪表盘仅限登录后访问", "This dashboard requires an administrator sign-in")}</p>
       </div>
-      <form className="dashboard-login-form" onSubmit={(event) => void submit(event)}>
-        <label><span>{ui(locale, "用户名", "Username")}</span><input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
-        <label><span>{ui(locale, "密码", "Password")}</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
-        {totpRequired ? <label><span>{ui(locale, "两步验证码", "Two-factor code")}</span><input autoFocus inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} required /></label> : null}
-        {config.turnstile_login_enabled ? <div className="dashboard-login-turnstile"><TurnstileWidget siteKey={config.turnstile_site_key} action="admin_login" theme={dark ? "dark" : "light"} resetKey={turnstileReset} onVerify={setTurnstileToken} onError={setError} /></div> : null}
-        {error ? <p className="form-error">{error}</p> : null}
-        <button className="primary-btn dashboard-login-submit" disabled={busy || (totpRequired && !/^\d{6}$/.test(totpCode)) || (config.turnstile_login_enabled && !turnstileToken)} type="submit"><KeyRound size={16} />{busy ? ui(locale, "登录中", "Signing in") : ui(locale, "登录", "Sign in")}</button>
-      </form>
+      <LoginForm
+        config={config}
+        dark={dark}
+        error={error}
+        setError={setError}
+        onSubmit={login}
+        className="dashboard-login-form"
+        turnstileClassName="dashboard-login-turnstile"
+        errorClassName="form-error"
+        submitClassName="primary-btn dashboard-login-submit"
+      />
     </section>
   );
 }
@@ -86,7 +60,7 @@ function VerificationGate() {
       <SiteLogo src={config.logo_url} alt="" width="52" height="52" />
       <div><h1>{ui(locale, "访问验证", "Access verification")}</h1><p>{config.site_name}</p></div>
       {config.turnstile_site_key
-        ? <TurnstileWidget siteKey={config.turnstile_site_key} action="public_dashboard" theme={dark ? "dark" : "light"} resetKey={resetKey} onVerify={(token) => void run(token)} onError={setError} />
+        ? <TurnstileWidget siteKey={config.turnstile_site_key} action="public_dashboard" theme={dark ? "dark" : "light"} resetKey={resetKey} onVerify={(token) => void run(token)} onError={setError} locale={locale} />
         : <p className="form-error">{ui(locale, "Turnstile 尚未正确配置", "Turnstile is not configured")}</p>}
       {busy ? <span className="verification-status">{ui(locale, "正在验证", "Verifying")}</span> : null}
       {error ? <p className="form-error">{error}</p> : null}
@@ -100,17 +74,21 @@ function HomeView() {
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("__all__");
   const locale = config.locale;
+  const fallbackGroup = ui(locale, "默认", "Default");
 
   const groups = useMemo(
-    () => ["__all__", ...Array.from(new Set(servers.map((server) => server.group_name || "默认")))],
-    [servers],
+    () => ["__all__", ...Array.from(new Set(servers.map((server) => server.group_name || fallbackGroup)))],
+    [fallbackGroup, servers],
   );
   const visible = useMemo(() => servers.filter((server) => {
     const text = `${server.name} ${server.region} ${server.tags} ${server.group_name}`.toLowerCase();
-    const groupMatches = !config.show_groups || group === "__all__" || (server.group_name || "默认") === group;
+    const groupMatches = !config.show_groups || group === "__all__" || (server.group_name || fallbackGroup) === group;
     const queryMatches = !config.show_search || text.includes(query.trim().toLowerCase());
     return groupMatches && queryMatches;
-  }), [config.show_groups, config.show_search, group, query, servers]);
+  }), [config.show_groups, config.show_search, fallbackGroup, group, query, servers]);
+
+  // A locale change renames the fallback group; drop the stale selection.
+  useEffect(() => setGroup("__all__"), [fallbackGroup]);
 
   return (
     <div className="home-content">
@@ -125,7 +103,7 @@ function HomeView() {
         <div className="dashboard-loading"><span className="loading-ring" aria-hidden="true" /><p>{ui(locale, "加载中…", "Loading…")}</p></div>
       ) : visible.length ? (
         <section className={`node-grid ${carrierLatency ? "carrier-latency" : ""}`}>
-          {visible.map((server) => <NodeCard key={server.id} server={server} config={config} liveConnected={liveConnected} liveLatencyResults={liveMetrics[server.id]?.latencyResults} onOpen={() => openServer(server)} />)}
+          {visible.map((server) => <NodeCard key={server.id} server={server} config={config} liveConnected={liveConnected} liveLatencyResults={liveMetrics[server.id]?.latencyResults} onOpen={openServer} />)}
         </section>
       ) : !error ? (
         <div className="empty-state"><strong>{servers.length ? ui(locale, "没有匹配的节点", "No matching servers") : ui(locale, "尚未添加节点", "No servers added")}</strong></div>

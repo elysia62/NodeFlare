@@ -56,6 +56,50 @@ pub struct SessionIdentity {
     pub username: String,
 }
 
+/// Rewrites `?` placeholders to `$1`, `$2`, … while skipping quoted spans.
+fn translate_placeholders(statement: &str) -> String {
+    let mut output = String::with_capacity(statement.len() + 16);
+    let mut index = 0_u32;
+    let mut characters = statement.chars().peekable();
+    let mut single_quoted = false;
+    let mut double_quoted = false;
+    while let Some(character) = characters.next() {
+        if single_quoted || double_quoted {
+            output.push(character);
+            let delimiter = if single_quoted { '\'' } else { '"' };
+            if character == delimiter {
+                // A doubled delimiter is an escape, not the end of the span.
+                if characters.peek() == Some(&delimiter) {
+                    if let Some(escaped) = characters.next() {
+                        output.push(escaped);
+                    }
+                } else {
+                    single_quoted = false;
+                    double_quoted = false;
+                }
+            }
+            continue;
+        }
+        match character {
+            '\'' => {
+                single_quoted = true;
+                output.push(character);
+            }
+            '"' => {
+                double_quoted = true;
+                output.push(character);
+            }
+            '?' => {
+                index += 1;
+                output.push('$');
+                output.push_str(&index.to_string());
+            }
+            _ => output.push(character),
+        }
+    }
+    output
+}
+
 impl Database {
     pub fn pool(&self) -> &AnyPool {
         &self.pool
@@ -98,6 +142,8 @@ impl Database {
             kind: self.kind.as_str().to_string(),
             size_bytes,
             reclaimable_bytes,
+            // The database layer cannot see pending restarts; routes fill this
+            // in from the activity state (see routes/admin.rs database_stats).
             restart_required: false,
         })
     }
@@ -164,6 +210,11 @@ impl Database {
         Ok(())
     }
 
+    /// Translates SQLite-style `?` placeholders to PostgreSQL `$N`.
+    ///
+    /// Placeholders inside single-quoted literals or double-quoted identifiers
+    /// are left untouched, so a statement such as `WHERE label='?'` cannot
+    /// silently shift the numbering of the real parameters.
     pub fn sql(&self, statement: &'static str) -> &'static str {
         if self.kind == DatabaseKind::Sqlite {
             return statement;
@@ -174,18 +225,7 @@ impl Database {
         if let Some(value) = translated.get(statement) {
             return value;
         }
-        let mut index = 0;
-        let mut output = String::with_capacity(statement.len() + 16);
-        for character in statement.chars() {
-            if character == '?' {
-                index += 1;
-                output.push('$');
-                output.push_str(&index.to_string());
-            } else {
-                output.push(character);
-            }
-        }
-        let output = Box::leak(output.into_boxed_str());
+        let output = Box::leak(translate_placeholders(statement).into_boxed_str());
         translated.insert(statement, output);
         output
     }
@@ -553,6 +593,7 @@ pub async fn update_settings(
     pool: &Database,
     input: &SettingsInput,
     password_hash: Option<&str>,
+    totp_rename: Option<(&str, &str)>,
 ) -> Result<()> {
     let mut updates = Vec::<(&str, String)>::new();
     macro_rules! text {
@@ -645,6 +686,18 @@ pub async fn update_settings(
     }
     if password_hash.is_some() || input.admin_username.is_some() {
         sqlx::query("DELETE FROM sessions")
+            .execute(&mut *transaction)
+            .await?;
+    }
+    // The TOTP record must follow the admin rename atomically; otherwise a
+    // failure between the two writes would leave login unable to find the
+    // secret and silently skip two-factor verification.
+    if let Some((previous, next)) = totp_rename
+        && previous != next
+    {
+        sqlx::query(pool.sql("UPDATE admin_2fa SET username=? WHERE username=?"))
+            .bind(next)
+            .bind(previous)
             .execute(&mut *transaction)
             .await?;
     }
@@ -885,7 +938,7 @@ mod tests {
                 "turnstile_login_enabled": false
             }))
             .unwrap();
-            update_settings(&db, &input, None).await.unwrap();
+            update_settings(&db, &input, None, None).await.unwrap();
             assert_eq!(
                 get_setting(&db, "turnstile_site_key")
                     .await
@@ -905,7 +958,7 @@ mod tests {
             "turnstile_site_key": "new-site", "turnstile_secret_key": "new-secret"
         }))
         .unwrap();
-        update_settings(&db, &input, None).await.unwrap();
+        update_settings(&db, &input, None, None).await.unwrap();
         assert_eq!(
             get_setting(&db, "turnstile_secret_key")
                 .await
@@ -913,6 +966,19 @@ mod tests {
                 .as_deref(),
             Some("new-secret")
         );
+    }
+
+    #[test]
+    fn placeholder_translation_skips_quoted_spans() {
+        assert_eq!(
+            translate_placeholders("SELECT '?' , ? FROM t WHERE a=? AND b='it''s ?'"),
+            "SELECT '?' , $1 FROM t WHERE a=$2 AND b='it''s ?'"
+        );
+        assert_eq!(
+            translate_placeholders("SELECT \"weird?col\" FROM t WHERE a=?"),
+            "SELECT \"weird?col\" FROM t WHERE a=$1"
+        );
+        assert_eq!(translate_placeholders("SELECT 1"), "SELECT 1");
     }
 
     #[tokio::test]

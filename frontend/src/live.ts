@@ -186,24 +186,19 @@ export function applyBatch(
   return next;
 }
 
+// Returns the input object unchanged whenever nothing newer arrived, so memoized
+// subscribers can skip re-rendering. Uptime is shown as reported by the agent;
+// the card grid does not tick it between reports.
 export function mergeServerLive(
   server: Server,
   live: LiveMetrics | undefined,
-  clockNow: number,
-  offlineThresholdSeconds: number,
 ): Server {
-  const merged = !live ? server : (() => {
-    const latency = live.latencyResults?.length ? mergeLiveLatency(server, live.latencyResults) : server.latency;
-    if (live.timestamp <= (server.timestamp ?? 0)) {
-      return latency === server.latency ? server : { ...server, latency };
-    }
-    return { ...server, ...live.metrics, latency, timestamp: live.timestamp };
-  })();
-  if (!merged.timestamp || !merged.uptime || !Number.isFinite(merged.uptime)) return merged;
-  const elapsed = Math.max(0, Math.floor(clockNow / 1000 - merged.timestamp));
-  return elapsed > 0 && elapsed <= offlineThresholdSeconds
-    ? { ...merged, uptime: merged.uptime + elapsed }
-    : merged;
+  if (!live) return server;
+  const latency = live.latencyResults?.length ? mergeLiveLatency(server, live.latencyResults) : server.latency;
+  if (live.timestamp <= (server.timestamp ?? 0)) {
+    return latency === server.latency ? server : { ...server, latency };
+  }
+  return { ...server, ...live.metrics, latency, timestamp: live.timestamp };
 }
 
 export function pruneLiveMetrics(current: LiveMetricsMap, servers: readonly Server[]): LiveMetricsMap {

@@ -174,6 +174,15 @@ pub async fn verify_turnstile(
     headers: HeaderMap,
     Json(input): Json<TurnstileVerifyRequest>,
 ) -> Result<Response, ApiResponse> {
+    // This endpoint is public and each call triggers an outbound request to
+    // Cloudflare, so rate-limit per IP to stop it being used as an amplifier.
+    let client_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
+    if let Some(seconds) = state.turnstile_attempts.retry_after(&client_ip) {
+        return Err(ApiResponse::error(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("人机验证尝试过多，请在 {seconds} 秒后重试"),
+        ));
+    }
     let settings = crate::db::load_settings(&state.db)
         .await
         .map_err(ApiResponse::internal)?;
@@ -181,7 +190,6 @@ pub async fn verify_turnstile(
         return Err(ApiResponse::bad_request("公开仪表盘未启用人机验证"));
     }
     let host = hostname(&headers).ok_or_else(|| ApiResponse::bad_request("请求主机名无效"))?;
-    let client_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
     if !crate::turnstile::verify(
         &state.http,
         &input.token,
@@ -192,8 +200,10 @@ pub async fn verify_turnstile(
     )
     .await
     {
+        state.turnstile_attempts.record_failure(&client_ip);
         return Err(ApiResponse::forbidden("Cloudflare 人机验证失败，请重试"));
     }
+    state.turnstile_attempts.clear(&client_ip);
     let proof = crate::db::create_dashboard_proof(&state.db)
         .await
         .map_err(ApiResponse::internal)?;

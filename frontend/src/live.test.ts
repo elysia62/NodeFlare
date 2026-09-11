@@ -149,7 +149,7 @@ describe("one-second card playback", () => {
         }], servers, now);
       }
       current = applyBatch(current, queue.take(servers, now), servers);
-      const card = mergeServerLive(servers[0], current.s1, now, 180);
+      const card = mergeServerLive(servers[0], current.s1);
       displayed.push([card.cpu, card.net_in, card.net_out]);
     }
     expect(displayed).toEqual(Array.from({ length: 9 }, (_, index) => [
@@ -196,7 +196,7 @@ describe("one-second card playback", () => {
     }] }], [server()], 0);
     const servers = [server({ timestamp: 1_005, cpu: 10 })];
     const state = applyBatch({}, queue.take(servers, 0), servers);
-    expect(mergeServerLive(servers[0], state.s1, 0, 180).cpu).toBe(10);
+    expect(mergeServerLive(servers[0], state.s1).cpu).toBe(10);
     expect(state.s1.latencyResults).toHaveLength(1);
   });
 
@@ -216,30 +216,29 @@ describe("one-second card playback", () => {
 });
 
 describe("mergeServerLive", () => {
-  test("applies a newer live sample and ticks uptime", () => {
+  test("applies a newer live sample without ticking uptime", () => {
     const merged = mergeServerLive(
       server({ timestamp: 1_000, uptime: 100 }),
       { timestamp: 1_010, metrics: { cpu: 42 } },
-      1_015_000,
-      180,
     );
     expect(merged.cpu).toBe(42);
-    expect(merged.uptime).toBe(105);
+    expect(merged.uptime).toBe(100);
+    expect(merged.timestamp).toBe(1_010);
   });
 
-  test("keeps persisted metrics when the live sample is older", () => {
+  test("returns the same object when the live sample is older", () => {
+    const persisted = server({ timestamp: 2_000, cpu: 10, uptime: null });
     const merged = mergeServerLive(
-      server({ timestamp: 2_000, cpu: 10, uptime: null }),
+      persisted,
       { timestamp: 1_000, metrics: { cpu: 99 } },
-      2_000_000,
-      180,
     );
+    expect(merged).toBe(persisted);
     expect(merged.cpu).toBe(10);
   });
 
-  test("does not tick uptime past the offline threshold", () => {
-    const merged = mergeServerLive(server({ timestamp: 1_000, uptime: 100 }), undefined, 9_000_000, 180);
-    expect(merged.uptime).toBe(100);
+  test("returns the same object when there is no live sample", () => {
+    const persisted = server({ timestamp: 1_000, uptime: 100 });
+    expect(mergeServerLive(persisted, undefined)).toBe(persisted);
   });
 });
 

@@ -5,9 +5,10 @@ function toHex(bytes: Uint8Array) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export async function derivePassword(password: string, deploymentSalt: string) {
-  if (!deploymentSalt) throw new Error("登录密码派生参数缺失");
-  if (!globalThis.crypto?.subtle) throw new Error("当前浏览器不支持安全密码派生");
+export async function derivePassword(password: string, deploymentSalt: string, locale?: string) {
+  const english = locale === "en";
+  if (!deploymentSalt) throw new Error(english ? "Password derivation parameters are missing" : "登录密码派生参数缺失");
+  if (!globalThis.crypto?.subtle) throw new Error(english ? "This browser does not support secure password derivation" : "当前浏览器不支持安全密码派生");
   const key = await globalThis.crypto.subtle.importKey(
     "raw",
     encoder.encode(password),

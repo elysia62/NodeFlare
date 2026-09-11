@@ -299,7 +299,17 @@ async fn send(
     }
     let value: Value = serde_json::from_slice(&body)?;
     if value.get("ok").and_then(Value::as_bool) != Some(true) {
-        anyhow::bail!("Telegram rejected the message");
+        // Surface Telegram's error_code/description (e.g. "chat not found",
+        // "bot was blocked by the user") so admins can act on the failure;
+        // neither field contains the bot token.
+        let description = value
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("no description");
+        match value.get("error_code").and_then(Value::as_i64) {
+            Some(code) => anyhow::bail!("Telegram rejected the message (error {code}): {description}"),
+            None => anyhow::bail!("Telegram rejected the message: {description}"),
+        }
     }
     Ok(())
 }

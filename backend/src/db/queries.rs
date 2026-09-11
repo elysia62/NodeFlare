@@ -18,6 +18,9 @@ const AGENT_REPORT_MAX_GPUS: usize = 32;
 const AGENT_REPORT_MAX_LATENCY_RESULTS: usize = 2048;
 const HISTORY_INSERT_BATCH_ROWS: usize = 500;
 const LATENCY_INSERT_BATCH_ROWS: usize = 500;
+// Kept small enough that a 3-column batch stays under the legacy SQLite
+// 999-variable limit as well as PostgreSQL's 65535-parameter limit.
+const ASSIGNMENT_INSERT_BATCH_ROWS: usize = 200;
 const CLEANUP_DELETE_BATCH_ROWS: i64 = 1000;
 const CLEANUP_MAX_PASSES: usize = 10;
 const CLEANUP_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
@@ -532,11 +535,19 @@ pub async fn reorder_servers(db: &Database, ids: &[String]) -> Result<()> {
 
 pub async fn agent_install_token(db: &Database, id: &str) -> Result<Option<String>> {
     let token = auth::random_token(32);
+    // The existence check and the insert share one transaction so a server
+    // deleted in between cannot turn a missing node into a foreign-key 500.
+    let mut transaction = if db.is_postgres() {
+        db.pool().begin().await?
+    } else {
+        db.pool().begin_with("BEGIN IMMEDIATE").await?
+    };
     let exists = sqlx::query_scalar::<_, i64>(db.sql("SELECT COUNT(*) FROM servers WHERE id=?"))
         .bind(id)
-        .fetch_one(db.pool())
+        .fetch_one(&mut *transaction)
         .await?;
     if exists == 0 {
+        transaction.rollback().await?;
         return Ok(None);
     }
     sqlx::query(db.sql(
@@ -545,8 +556,9 @@ pub async fn agent_install_token(db: &Database, id: &str) -> Result<Option<Strin
     .bind(auth::token_hash(&token))
     .bind(id)
     .bind(now())
-    .execute(db.pool())
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(Some(token))
 }
 
@@ -912,12 +924,30 @@ async fn save_traffic_state(
     Ok(())
 }
 
+/// Builds one row's `($1,$2,…)` value group, advancing the shared counter.
+///
+/// PostgreSQL needs numbered placeholders while SQLite (and the `Any` driver
+/// on it) uses `?`, so batch inserts cannot use a single static statement.
+fn placeholder_group(db: &Database, parameter_index: &mut usize, columns: usize) -> String {
+    let mut placeholders = Vec::with_capacity(columns);
+    for _ in 0..columns {
+        if db.is_postgres() {
+            placeholders.push(format!("${}", *parameter_index));
+            *parameter_index += 1;
+        } else {
+            placeholders.push("?".to_string());
+        }
+    }
+    format!("({})", placeholders.join(","))
+}
+
 async fn save_history_rows(
     db: &Database,
     transaction: &mut Transaction<'_, Any>,
     server_id: &str,
     rows: &[HistoryRow],
 ) -> Result<()> {
+    let merge_sql = history_merge_sql();
     for batch in rows.chunks(HISTORY_INSERT_BATCH_ROWS) {
         let mut arguments = AnyArguments::default();
         let mut parameter_index = 1_usize;
@@ -993,7 +1023,7 @@ async fn save_history_rows(
              ON CONFLICT(server_id, timestamp) DO UPDATE SET {}",
             HISTORY_AGGREGATE_COLUMNS.join(","),
             value_groups.join(","),
-            history_merge_sql(),
+            merge_sql,
         );
         sqlx::query_with(AssertSqlSafe(sql), arguments)
             .execute(&mut **transaction)
@@ -1542,15 +1572,30 @@ async fn replace_task_servers(
         .bind(task_id)
         .execute(&mut **transaction)
         .await?;
-    for server_id in server_ids {
-        sqlx::query(db.sql(
-            "INSERT INTO latency_task_servers(task_id, server_id, assigned_at) VALUES (?, ?, ?)",
-        ))
-        .bind(task_id)
-        .bind(server_id)
-        .bind(existing.get(server_id).copied().unwrap_or(timestamp))
-        .execute(&mut **transaction)
-        .await?;
+    for batch in server_ids.chunks(ASSIGNMENT_INSERT_BATCH_ROWS) {
+        let mut arguments = AnyArguments::default();
+        let mut parameter_index = 1_usize;
+        let mut groups = Vec::with_capacity(batch.len());
+        for server_id in batch {
+            groups.push(placeholder_group(db, &mut parameter_index, 3));
+            let assigned_at = existing.get(server_id).copied().unwrap_or(timestamp);
+            arguments
+                .add(task_id.to_string())
+                .map_err(|error| anyhow::anyhow!("无法编码拨测任务节点：{error}"))?;
+            arguments
+                .add(server_id.clone())
+                .map_err(|error| anyhow::anyhow!("无法编码拨测任务节点：{error}"))?;
+            arguments
+                .add(assigned_at)
+                .map_err(|error| anyhow::anyhow!("无法编码拨测任务节点：{error}"))?;
+        }
+        let sql = format!(
+            "INSERT INTO latency_task_servers(task_id, server_id, assigned_at) VALUES {}",
+            groups.join(",")
+        );
+        sqlx::query_with(AssertSqlSafe(sql), arguments)
+            .execute(&mut **transaction)
+            .await?;
     }
     Ok(())
 }
@@ -1740,10 +1785,24 @@ async fn replace_alert_servers(
         .bind(rule_id)
         .execute(&mut **transaction)
         .await?;
-    for server_id in server_ids {
-        sqlx::query(db.sql("INSERT INTO alert_rule_servers(rule_id, server_id) VALUES (?, ?)"))
-            .bind(rule_id)
-            .bind(server_id)
+    for batch in server_ids.chunks(ASSIGNMENT_INSERT_BATCH_ROWS) {
+        let mut arguments = AnyArguments::default();
+        let mut parameter_index = 1_usize;
+        let mut groups = Vec::with_capacity(batch.len());
+        for server_id in batch {
+            groups.push(placeholder_group(db, &mut parameter_index, 2));
+            arguments
+                .add(rule_id.to_string())
+                .map_err(|error| anyhow::anyhow!("无法编码告警规则节点：{error}"))?;
+            arguments
+                .add(server_id.clone())
+                .map_err(|error| anyhow::anyhow!("无法编码告警规则节点：{error}"))?;
+        }
+        let sql = format!(
+            "INSERT INTO alert_rule_servers(rule_id, server_id) VALUES {}",
+            groups.join(",")
+        );
+        sqlx::query_with(AssertSqlSafe(sql), arguments)
             .execute(&mut **transaction)
             .await?;
     }
@@ -1769,17 +1828,37 @@ pub async fn evaluate_resource_rules(
     db: &Database,
     server_id: &str,
 ) -> Result<Vec<ResourceAlertEvaluation>> {
-    let rules = list_alert_rules(db).await?;
     let report_interval =
         sqlx::query_scalar::<_, i64>(db.sql("SELECT report_interval FROM servers WHERE id=?"))
             .bind(server_id)
             .fetch_optional(db.pool())
             .await?
             .unwrap_or(60);
+    // Load only the rules that apply to this server instead of the full rule
+    // table plus every assignment row on every evaluation pass; this runs per
+    // persisted batch, so the previous full scan scaled badly with fleet size.
+    let rows = sqlx::query(db.sql(
+        "SELECT id, name, metric, threshold, duration_minutes, aggregation, all_servers \
+         FROM alert_rules WHERE enabled=1 \
+         AND (all_servers=1 OR id IN (SELECT rule_id FROM alert_rule_servers WHERE server_id=?)) \
+         ORDER BY created_at",
+    ))
+    .bind(server_id)
+    .fetch_all(db.pool())
+    .await?;
     let mut evaluations = Vec::new();
-    for rule in rules.into_iter().filter(|rule| {
-        rule.enabled && (rule.all_servers || rule.server_ids.iter().any(|id| id == server_id))
-    }) {
+    for row in rows {
+        let rule = AlertRuleView {
+            server_ids: Vec::new(),
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            metric: row.try_get("metric")?,
+            threshold: row.try_get("threshold")?,
+            duration_minutes: row.try_get("duration_minutes")?,
+            aggregation: row.try_get("aggregation")?,
+            all_servers: row.try_get::<i64, _>("all_servers")? != 0,
+            enabled: true,
+        };
         let (average_expression, minimum_expression) = match rule.metric.as_str() {
             "cpu" => ("cpu", "cpu_min"),
             "memory" => ("memory_avg", "memory_min"),
@@ -2004,18 +2083,6 @@ pub async fn set_totp_enabled(db: &Database, username: &str, enabled: bool) -> R
         .execute(db.pool())
         .await?;
     Ok(result.rows_affected() > 0)
-}
-
-pub async fn rename_totp_user(db: &Database, old: &str, new: &str) -> Result<()> {
-    if old == new {
-        return Ok(());
-    }
-    sqlx::query(db.sql("UPDATE admin_2fa SET username=? WHERE username=?"))
-        .bind(new)
-        .bind(old)
-        .execute(db.pool())
-        .await?;
-    Ok(())
 }
 
 pub async fn create_remote_task(
@@ -2290,16 +2357,40 @@ pub async fn set_active_theme(db: &Database, id: &str) -> Result<bool> {
 }
 
 pub async fn delete_theme(db: &Database, id: &str) -> Result<bool> {
+    // Deleting the theme and resetting active_theme_id must be atomic; a failure
+    // between them would leave the active theme pointing at a deleted row.
+    let mut transaction = if db.is_postgres() {
+        db.pool().begin().await?
+    } else {
+        db.pool().begin_with("BEGIN IMMEDIATE").await?
+    };
     let result = sqlx::query(db.sql("DELETE FROM themes WHERE id=?"))
         .bind(id)
-        .execute(db.pool())
+        .execute(&mut *transaction)
         .await?;
-    if result.rows_affected() > 0
-        && super::get_setting(db, "active_theme_id").await?.as_deref() == Some(id)
-    {
-        super::set_setting(db, "active_theme_id", "builtin-nodeflare-glass").await?;
+    if result.rows_affected() == 0 {
+        transaction.rollback().await?;
+        return Ok(false);
     }
-    Ok(result.rows_affected() > 0)
+    let active = sqlx::query_scalar::<_, String>(
+        db.sql("SELECT value FROM settings WHERE key=? AND value=?"),
+    )
+    .bind("active_theme_id")
+    .bind(id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if active.is_some() {
+        sqlx::query(db.sql(
+            "INSERT INTO settings(key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        ))
+        .bind("active_theme_id")
+        .bind("builtin-nodeflare-glass")
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(true)
 }
 
 pub async fn create_theme_preview(db: &Database, theme_id: &str) -> Result<String> {

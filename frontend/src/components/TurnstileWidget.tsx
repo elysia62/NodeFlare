@@ -39,6 +39,7 @@ export function TurnstileWidget({
   resetKey,
   onVerify,
   onError,
+  locale,
 }: {
   siteKey: string;
   action: "admin_login" | "public_dashboard";
@@ -46,6 +47,7 @@ export function TurnstileWidget({
   resetKey?: number;
   onVerify: (token: string) => void;
   onError: (message: string) => void;
+  locale?: string;
 }) {
   const target = useRef<HTMLDivElement>(null);
   const widgetId = useRef("");
@@ -78,10 +80,12 @@ export function TurnstileWidget({
         "error-callback": () => {
           setVerified(false);
           verifyCallback.current("");
-          errorCallback.current("Cloudflare 验证暂时不可用，请刷新重试");
+          errorCallback.current(locale === "en"
+            ? "Cloudflare verification is temporarily unavailable; refresh and try again"
+            : "Cloudflare 验证暂时不可用，请刷新重试");
         },
       });
-    }).catch((reason) => errorCallback.current(reason instanceof Error ? reason.message : "验证组件加载失败"));
+    }).catch(() => errorCallback.current(locale === "en" ? "Failed to load the verification widget" : "验证组件加载失败"));
     return () => {
       cancelled = true;
       if (widgetId.current && window.turnstile) window.turnstile.remove(widgetId.current);

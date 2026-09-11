@@ -199,24 +199,31 @@ async fn require_public_server(state: &AppState, server_id: &str) -> Result<(), 
     Ok(())
 }
 
+/// Fields that must never reach the unauthenticated dashboard.
+///
+/// This is a deny list, so a new `ServerView` field is public until added here;
+/// prefer inverting it into an explicit allow list when the public projection is
+/// next reworked (it needs the frontend's field usage verified first).
+const PRIVATE_SERVER_FIELDS: [&str; 13] = [
+    "hidden",
+    "last_ip",
+    "ip_v4",
+    "ip_v6",
+    "network_interface",
+    "reset_day",
+    "report_interval",
+    "collect_interval",
+    "rx_correction",
+    "tx_correction",
+    "agent_mirror",
+    "offline_notify_disabled",
+    "auto_update",
+];
+
 fn public_server(server: crate::models::ServerView) -> serde_json::Value {
     let mut value = serde_json::to_value(server).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(object) = value.as_object_mut() {
-        for key in [
-            "hidden",
-            "last_ip",
-            "ip_v4",
-            "ip_v6",
-            "network_interface",
-            "reset_day",
-            "report_interval",
-            "collect_interval",
-            "rx_correction",
-            "tx_correction",
-            "agent_mirror",
-            "offline_notify_disabled",
-            "auto_update",
-        ] {
+        for key in PRIVATE_SERVER_FIELDS {
             object.remove(key);
         }
     }
