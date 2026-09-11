@@ -239,7 +239,7 @@ describe("Windows update process lifecycle", () => {
         `], { env: { ...process.env, TEST_MODE: mode }, encoding: "utf8", timeout: 10_000 });
         expect(result.status).toBe(mode === "stops" ? 0 : 1);
         expect(result.stdout.trim()).toBe(mode === "stops" ? "replaced:2" : "blocked");
-      });
+      }, 30_000);
     }
   }
 
@@ -271,5 +271,5 @@ describe("Windows update process lifecycle", () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

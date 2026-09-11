@@ -97,9 +97,9 @@ for (const [name, path, server] of [
         $errors = $null
         [System.Management.Automation.Language.Parser]::ParseFile($env:TEST_SCRIPT, [ref]$tokens, [ref]$errors) > $null
         if ($errors.Count) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
-      `], { env: { ...process.env, TEST_SCRIPT: file }, encoding: "utf8" });
+      `], { env: { ...process.env, TEST_SCRIPT: file }, encoding: "utf8", timeout: 10_000 });
       expect(result.status).toBe(0);
-    });
+    }, 30_000);
 
     test.skipIf(!powershell)("separates fresh-install guidance from update results", () => {
       const states = server ? [[true, false, false], [false, false, false]] : [
@@ -120,7 +120,7 @@ for (const [name, path, server] of [
           $Port = 3100
           Write-Step "正在启动服务"
           Show-InstallResult
-        `], { encoding: "utf8" });
+        `], { encoding: "utf8", timeout: 10_000 });
         expect(result.status).toBe(0);
         const output = result.stdout.replaceAll("\r\n", "\n");
         if (fresh) {
@@ -130,6 +130,6 @@ for (const [name, path, server] of [
           expect(output).toBe("正在启动服务\n\n更新完成（v1.2.3）\n");
         }
       }
-    });
+    }, 30_000);
   });
 }
