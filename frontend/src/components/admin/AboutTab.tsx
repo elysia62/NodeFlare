@@ -1,5 +1,5 @@
 import { ExternalLink } from "lucide-react";
-import { ui, type UiLocale } from "../locale";
+import { ui, type UiLocale } from "../../locale";
 import { SiteLogo } from "../SiteLogo";
 import { VERSION } from "./shared";
 

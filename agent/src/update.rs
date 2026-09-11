@@ -98,11 +98,11 @@ pub(crate) fn release_asset_sha256(asset: &GithubReleaseAsset) -> Option<String>
 }
 
 pub(crate) fn download_agent(
-    pub(crate) agent: &ureq::Agent,
-    pub(crate) url: &str,
-    pub(crate) destination: &Path,
-    pub(crate) expected_version: &str,
-    pub(crate) expected_sha256: &str,
+    agent: &ureq::Agent,
+    url: &str,
+    destination: &Path,
+    expected_version: &str,
+    expected_sha256: &str,
 ) -> Result<bool> {
     let Ok(response) = agent.get(url).call() else {
         return Ok(false);

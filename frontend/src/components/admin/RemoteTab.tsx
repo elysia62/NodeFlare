@@ -1,9 +1,9 @@
 import { RotateCw, Search, ShieldCheck, Terminal } from "lucide-react";
 import type { FormEvent } from "react";
-import type { AdminTab } from "../adminRoutes";
-import { REMOTE_TASK_POLL_TIMEOUT_MS } from "../refresh";
-import type { AdminServer, RemoteTask, TotpStatus } from "../types";
-import { ui, type UiLocale } from "../locale";
+import type { AdminTab } from "../../adminRoutes";
+import { REMOTE_TASK_POLL_TIMEOUT_MS } from "../../refresh";
+import type { AdminServer, RemoteTask, TotpStatus } from "../../types";
+import { ui, type UiLocale } from "../../locale";
 import { Checkbox } from "../Checkbox";
 import { remoteTaskStatusLabels } from "./shared";
 

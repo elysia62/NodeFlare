@@ -1,8 +1,8 @@
 import { AlertTriangle, Database, Eye, Info, Palette, RadioTower, ServerCog, ShieldCheck, SlidersHorizontal, Terminal } from "lucide-react";
-import { type AdminTab } from "../adminRoutes";
-import { ui, type UiLocale } from "../locale";
-import { type AdminServer, type DatabaseStats, type RemoteTask, type ServerInput, type Settings } from "../types";
-import pkg from "../../package.json";
+import { type AdminTab } from "../../adminRoutes";
+import { ui, type UiLocale } from "../../locale";
+import { type AdminServer, type DatabaseStats, type RemoteTask, type ServerInput, type Settings } from "../../types";
+import pkg from "../../../package.json";
 
 export const VERSION = import.meta.env.VITE_NODEFLARE_VERSION || pkg.version;
 export const AGENT_SCRIPT_BASE = "https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent";

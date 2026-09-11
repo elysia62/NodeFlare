@@ -99,8 +99,8 @@ pub(crate) fn terminate_remote_process_tree(child: &mut Child) {
 }
 
 pub(crate) fn receive_remote_output(
-    pub(crate) receiver: &mpsc::Receiver<CapturedOutput>,
-    pub(crate) child: &mut Child,
+    receiver: &mpsc::Receiver<CapturedOutput>,
+    child: &mut Child,
 ) -> CapturedOutput {
     match receiver.recv_timeout(REMOTE_OUTPUT_DRAIN_TIMEOUT) {
         Ok(output) => output,
@@ -140,8 +140,8 @@ pub(crate) fn remote_result_text(stdout: &CapturedOutput, stderr: &CapturedOutpu
 }
 
 pub(crate) fn wait_for_remote_child(
-    pub(crate) child: &mut Child,
-    pub(crate) timeout: Duration,
+    child: &mut Child,
+    timeout: Duration,
 ) -> io::Result<Option<std::process::ExitStatus>> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -157,8 +157,8 @@ pub(crate) fn wait_for_remote_child(
 }
 
 pub(crate) fn execute_remote_task_with_timeout(
-    pub(crate) task: &RemoteTaskMessage,
-    pub(crate) timeout: Duration,
+    task: &RemoteTaskMessage,
+    timeout: Duration,
 ) -> TaskResultMessage {
     let task_id = task.task_id.clone();
 

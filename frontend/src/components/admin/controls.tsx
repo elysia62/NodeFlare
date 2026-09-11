@@ -1,5 +1,5 @@
 import { Checkbox } from "../Checkbox";
-import { type ThemeSettingField, type ThemeSettingValue } from "../types";
+import { type ThemeSettingField, type ThemeSettingValue } from "../../types";
 
 export function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
   return <label className="toggle-row"><span><b>{label}</b></span><Checkbox checked={checked} onChange={onChange} /></label>;

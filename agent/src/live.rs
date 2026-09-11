@@ -325,9 +325,9 @@ pub(crate) fn read_live_ack(socket: &mut LiveSocket) -> Result<LiveRead> {
 }
 
 pub(crate) fn accept_remote_task(
-    pub(crate) socket: &mut LiveSocket,
-    pub(crate) executor: &mut RemoteExecutor,
-    pub(crate) task: RemoteTaskMessage,
+    socket: &mut LiveSocket,
+    executor: &mut RemoteExecutor,
+    task: RemoteTaskMessage,
 ) -> Result<()> {
     let task_id = task.task_id.clone();
     let rejected = executor.enqueue(task);
@@ -347,9 +347,9 @@ pub(crate) fn accept_remote_task(
 }
 
 pub(crate) fn wait_for_live_ack(
-    pub(crate) socket: &mut LiveSocket,
-    pub(crate) remote_config: &Arc<Mutex<Option<RemoteConfig>>>,
-    pub(crate) remote_executor: &mut RemoteExecutor,
+    socket: &mut LiveSocket,
+    remote_config: &Arc<Mutex<Option<RemoteConfig>>>,
+    remote_executor: &mut RemoteExecutor,
 ) -> Result<LiveRead> {
     let deadline = Instant::now() + LIVE_ACK_READ_TIMEOUT;
     loop {
@@ -380,9 +380,9 @@ pub(crate) fn wait_for_live_ack(
 }
 
 pub(crate) fn live_update_payload(
-    pub(crate) reports: Vec<Report>,
-    pub(crate) persist: bool,
-    pub(crate) info: &mut Option<telemetry::Info>,
+    reports: Vec<Report>,
+    persist: bool,
+    info: &mut Option<telemetry::Info>,
 ) -> Result<Vec<u8>> {
     let mut next_info = info.clone();
     let payload = telemetry::encode(&telemetry::Update::from_reports(

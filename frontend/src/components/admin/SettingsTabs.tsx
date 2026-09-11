@@ -1,9 +1,9 @@
 import { AlertTriangle, ArrowRightLeft, Check, ChevronDown, ChevronUp, CircleCheck, Coins, Copy, Download, Eye, LogOut, MonitorSmartphone, Power, RotateCw, Save, ShieldCheck, SlidersHorizontal, Upload } from "lucide-react";
 import type { Dispatch, FormEvent, RefObject, SetStateAction } from "react";
-import type { AdminTab } from "../adminRoutes";
-import { formatBytes } from "../format";
-import { ui, type UiLocale } from "../locale";
-import { ASSET_CURRENCIES, type AdminServer, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type Settings, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
+import type { AdminTab } from "../../adminRoutes";
+import { formatBytes } from "../../format";
+import { ui, type UiLocale } from "../../locale";
+import { ASSET_CURRENCIES, type AdminServer, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type Settings, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../../types";
 import { AlertRuleManager } from "../AlertRuleManager";
 import { PasswordInput } from "../PasswordInput";
 import { TelegramSettings } from "../TelegramSettings";

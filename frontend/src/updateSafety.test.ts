@@ -112,6 +112,7 @@ describe("server update rollback ownership", () => {
           previous_install=false
           previous_share=false
           previous_service=false
+          config_created=false
           snapshot_install
           printf newer-agent > "$install_dir/agent"
           printf live-state > "$install_dir/pending.jsonl"
