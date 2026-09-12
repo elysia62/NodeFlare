@@ -4,6 +4,7 @@ NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web
 
 English: [docs/README.en.md](docs/README.en.md)
 
+- [界面预览](#界面预览)
 - [特性](#特性)
 - [平台支持](#平台支持)
 - [安装服务端](#安装服务端)
@@ -15,6 +16,12 @@ English: [docs/README.en.md](docs/README.en.md)
 - [数据库与备份](#数据库与备份)
 - [开发](#开发)
 - [排障](#排障)
+
+## 界面预览
+
+![公开看板](docs/frontend.png)
+
+![管理后台](docs/backend.png)
 
 ## 特性
 

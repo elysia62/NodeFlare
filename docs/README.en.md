@@ -4,6 +4,7 @@ NodeFlare is a lightweight, self-hosted server monitoring panel: view server sta
 
 Chinese: [README.md](../README.md)
 
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [Supported platforms](#supported-platforms)
 - [Install the server](#install-the-server)
@@ -15,6 +16,12 @@ Chinese: [README.md](../README.md)
 - [Database and backups](#database-and-backups)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
+
+## Screenshots
+
+![Public dashboard](frontend.png)
+
+![Admin panel](backend.png)
 
 ## Features
 
