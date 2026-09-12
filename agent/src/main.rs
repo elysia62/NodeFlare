@@ -120,12 +120,8 @@ struct CliOptions {
     #[arg(short = 'e', value_name = "URL")]
     endpoint: String,
     /// Agent token
-    #[arg(short = 't', value_name = "TOKEN", conflicts_with = "token_file")]
+    #[arg(short = 't', value_name = "TOKEN")]
     token: Option<String>,
-    /// Read the Agent token from a file instead of -t, which keeps it out of
-    /// the process list
-    #[arg(long = "token-file", value_name = "PATH")]
-    token_file: Option<PathBuf>,
     /// Initial report interval in seconds (15-3600)
     #[arg(short = 'i', value_name = "SECONDS", default_value_t = 60)]
     interval: u64,
@@ -455,26 +451,16 @@ fn advance_deadline(mut deadline: Instant, interval: Duration, now: Instant) -> 
     deadline
 }
 
-/// Reads an Agent token from a file, trimming surrounding whitespace (editors
-/// and shell redirection usually append a trailing newline).
-fn read_token_file(path: &Path) -> Result<String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read token file {}: {error}", path.display()))?;
-    Ok(contents.trim().to_string())
-}
-
 fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
     let interval = options.interval;
     if !(15..=3600).contains(&interval) {
         return Err("interval must be between 15 and 3600 seconds".into());
     }
-    let token = match &options.token {
-        Some(token) => token.clone(),
-        None => match options.token_file.as_deref() {
-            Some(path) => read_token_file(path)?,
-            None => env::var("NODEFLARE_AGENT_TOKEN").unwrap_or_default(),
-        },
-    };
+    let token = options
+        .token
+        .clone()
+        .or_else(|| env::var("NODEFLARE_AGENT_TOKEN").ok())
+        .unwrap_or_default();
     let endpoint = options.endpoint.clone();
     if token.is_empty() || token.len() > 512 || token.chars().any(char::is_whitespace) {
         return Err("token is invalid".into());

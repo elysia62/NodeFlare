@@ -57,6 +57,8 @@ pub(crate) fn output_with_timeout(
     mut process: Command,
     timeout: Duration,
 ) -> Option<std::process::Output> {
+    #[cfg(unix)]
+    process.process_group(0);
     let mut child = process
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -75,13 +77,13 @@ pub(crate) fn output_with_timeout(
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
+                terminate_command_tree(&mut child);
                 let _ = child.wait();
                 break None;
             }
             Ok(None) => thread::sleep(Duration::from_millis(20)),
             Err(_) => {
-                let _ = child.kill();
+                terminate_command_tree(&mut child);
                 let _ = child.wait();
                 break None;
             }
@@ -95,6 +97,29 @@ pub(crate) fn output_with_timeout(
         stdout,
         stderr: Vec::new(),
     })
+}
+
+fn terminate_command_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", group.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
 }
 
 pub(crate) fn command(name: &str, args: &[&str]) -> String {

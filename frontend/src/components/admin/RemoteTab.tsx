@@ -56,7 +56,7 @@ export function RemoteTab({ locale, servers, busy, selectTab, createRemoteTask, 
 
       {remoteTasks.length > 0 ? <div className="remote-results">
         <div className="section-head"><div><h3>{ui(locale, "执行结果", "Results")}</h3>{remoteTasksActive ? <span className="remote-auto-refresh">{remotePollingUntil ? <RotateCw size={12} /> : null}{remotePollingUntil ? ui(locale, "等待结果，每 2 秒自动刷新", "Waiting for results; auto-refreshing every 2s") : ui(locale, "自动刷新已暂停", "Auto-refresh paused")}</span> : <span>{ui(locale, "本次命令已结束", "This run has finished")}</span>}</div><button type="button" className="secondary-btn compact" disabled={busy} onClick={() => { setRemotePollingUntil(Date.now() + REMOTE_TASK_POLL_TIMEOUT_MS); void refreshRemoteTasks(false, true); }}><RotateCw size={14} />{ui(locale, "刷新结果", "Refresh results")}</button></div>
-        {remoteTasksActive && !remotePollingUntil ? <p className="settings-hint" role="status">ui(locale, "已等待 1 分钟，命令可能仍在执行。点击“刷新结果”可继续查询，暂停刷新不会停止命令。", "Waited 1 minute; the command may still be running. Click \"Refresh results\" to keep polling; pausing refresh does not stop the command.")</p> : null}
+        {remoteTasksActive && !remotePollingUntil ? <p className="settings-hint" role="status">{ui(locale, "已等待 1 分钟，命令可能仍在执行。点击“刷新结果”可继续查询，暂停刷新不会停止命令。", "Waited 1 minute; the command may still be running. Click \"Refresh results\" to keep polling; pausing refresh does not stop the command.")}</p> : null}
         <div className="remote-command-summary"><span>{ui(locale, "本次命令", "Command")}</span><code>{remoteTasks[0]?.command}</code></div>
         <div className="task-list">
           {remoteTasks.map((task) => {

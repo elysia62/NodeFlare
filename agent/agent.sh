@@ -8,9 +8,6 @@ STATE_ROOT="/etc/nodeflare"
 STATE_DIR="$STATE_ROOT/agent"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 OPENRC_FILE="/etc/init.d/$SERVICE_NAME"
-# Holds NODEFLARE_AGENT_TOKEN for systemd; a 0600 file inside the 0750 state dir
-# is readable only by root/uninstall, unlike Environment= in the unit.
-TOKEN_ENV_FILE="$STATE_DIR/agent.env"
 temporary=""
 backup_agent=""
 backup_service=""
@@ -350,10 +347,6 @@ install_agent() {
   mv "$temporary" "$AGENT_FILE"
   log "正在启动 $init_system 服务"
   if [ "$init_system" = "systemd" ]; then
-    # The token goes into a 0600 file rather than Environment=, which any local
-    # user can read back with `systemctl show`.
-    printf 'NODEFLARE_AGENT_TOKEN=%s\n' "$token" > "$TOKEN_ENV_FILE"
-    chmod 600 "$TOKEN_ENV_FILE"
     printf '%s\n' \
     '[Unit]' \
     'Description=NodeFlare Agent' \
@@ -366,7 +359,7 @@ install_agent() {
     'Restart=always' \
     'RestartSec=10' \
     'NoNewPrivileges=true' \
-    "EnvironmentFile=$TOKEN_ENV_FILE" \
+    "Environment=NODEFLARE_AGENT_TOKEN=$token" \
     "Environment=NODEFLARE_STATE_DIR=$STATE_DIR" \
     '' \
     '[Install]' \
@@ -411,15 +404,7 @@ load_installed_agent_config() {
       service_exec=$(sed -n 's/^ExecStart=//p' "$SERVICE_FILE" | head -n 1)
       endpoint=$(printf '%s\n' "$service_exec" | sed -n 's/.* -e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\1/p')
       interval=$(printf '%s\n' "$service_exec" | sed -n 's/.* -e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\2/p')
-      token=""
-      if [ -f "$TOKEN_ENV_FILE" ]; then
-        token=$(sed -n 's/^NODEFLARE_AGENT_TOKEN=//p' "$TOKEN_ENV_FILE" | head -n 1)
-      fi
-      # Fall back to the unit file so installs created before the token moved
-      # into an EnvironmentFile still update cleanly.
-      if [ -z "$token" ]; then
-        token=$(sed -n 's/^Environment=NODEFLARE_AGENT_TOKEN=//p' "$SERVICE_FILE" | head -n 1)
-      fi
+      token=$(sed -n 's/^Environment=NODEFLARE_AGENT_TOKEN=//p' "$SERVICE_FILE" | head -n 1)
       ;;
     openrc)
       [ -f "$OPENRC_FILE" ] || fail "未找到 Agent 服务配置，请先完成安装"

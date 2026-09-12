@@ -422,7 +422,6 @@ describe("agent installer manual update", () => {
           set -eu
           ${functions}
           init_system=${init}
-          TOKEN_ENV_FILE=$SERVICE_CONFIG.env
           SERVICE_FILE=$SERVICE_CONFIG
           OPENRC_FILE=$SERVICE_CONFIG
           load_installed_agent_config

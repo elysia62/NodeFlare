@@ -136,7 +136,7 @@ curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent
 
 Windows 对应 `-Endpoint` / `-Token` / `-Interval` / `-Mirror` 与 `-Update` / `-Status` / `-Uninstall`。
 
-> **关于 Token 传递**：`-t` 会出现在进程列表中。Agent 也支持环境变量 `NODEFLARE_AGENT_TOKEN`，以及 `--token-file <路径>` 从文件读取。Linux 安装脚本会把 Token 写入 `0600` 的 `agent.env` 供服务单元读取。
+Linux 使用 systemd 时，安装脚本将 Token 直接写入服务单元的 `Environment=NODEFLARE_AGENT_TOKEN=...`；`--update` 从该服务配置读取地址、Token 和历史保存间隔。
 
 ## 监控口径与采样
 

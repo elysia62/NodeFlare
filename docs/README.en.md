@@ -136,7 +136,7 @@ Per-platform scripts:
 
 On Windows the equivalents are `-Endpoint` / `-Token` / `-Interval` / `-Mirror` and `-Update` / `-Status` / `-Uninstall`.
 
-> **About the token**: `-t` is visible in the process list. The agent also accepts the `NODEFLARE_AGENT_TOKEN` environment variable and `--token-file <path>`. The Linux installer writes the token to a `0600` `agent.env` file that the service unit reads.
+On Linux with systemd, the installer writes the token directly into the service unit as `Environment=NODEFLARE_AGENT_TOKEN=...`. The `--update` command reads the endpoint, token, and history interval from that service configuration.
 
 ## Metrics and sampling
 

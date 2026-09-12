@@ -287,9 +287,8 @@ async fn send(
         .json(&payload)
         .send()
         .await
-        .map_err(reqwest::Error::without_url)?
-        .error_for_status()
         .map_err(reqwest::Error::without_url)?;
+    let status = response.status();
     let body = response
         .bytes()
         .await
@@ -297,8 +296,8 @@ async fn send(
     if body.len() > 64 * 1024 {
         anyhow::bail!("Telegram response is too large");
     }
-    let value: Value = serde_json::from_slice(&body)?;
-    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+    let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    if !status.is_success() || value.get("ok").and_then(Value::as_bool) != Some(true) {
         // Surface Telegram's error_code/description (e.g. "chat not found",
         // "bot was blocked by the user") so admins can act on the failure;
         // neither field contains the bot token.
@@ -306,11 +305,18 @@ async fn send(
             .get("description")
             .and_then(Value::as_str)
             .unwrap_or("no description");
+        let status_text = if status.is_success() {
+            String::new()
+        } else {
+            format!(" HTTP {}", status.as_u16())
+        };
         match value.get("error_code").and_then(Value::as_i64) {
             Some(code) => {
-                anyhow::bail!("Telegram rejected the message (error {code}): {description}")
+                anyhow::bail!(
+                    "Telegram rejected the message{status_text} (error {code}): {description}"
+                )
             }
-            None => anyhow::bail!("Telegram rejected the message: {description}"),
+            None => anyhow::bail!("Telegram rejected the message{status_text}: {description}"),
         }
     }
     Ok(())

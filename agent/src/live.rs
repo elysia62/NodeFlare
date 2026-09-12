@@ -574,6 +574,7 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
                                 stats.live_persistence_failed();
                                 drop_socket = true;
                             } else {
+                                backoff.reset();
                                 prune_live_queue(&pending, ack.persisted_through_ts);
                                 accepted_through = accepted_through.max(ack.persisted_through_ts);
                                 next_probe_at = Instant::now() + ack_persist_interval(&ack);
@@ -644,7 +645,6 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
             continue;
         }
         stats.live_batch_sent(batch_len);
-        backoff.reset();
         if let Some(timestamp) = batch_last {
             accepted_through = accepted_through.max(timestamp);
         }
@@ -663,6 +663,7 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
                         stats.live_persistence_failed();
                         drop_socket = true;
                     } else {
+                        backoff.reset();
                         prune_live_queue(&pending, ack.persisted_through_ts);
                         accepted_through = accepted_through.max(ack.persisted_through_ts);
                         next_probe_at = Instant::now() + ack_persist_interval(&ack);

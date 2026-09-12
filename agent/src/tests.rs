@@ -430,6 +430,16 @@ fn remote_commands_are_terminated_after_the_deadline() {
     assert!(result.result.contains("已终止"));
 }
 
+#[cfg(unix)]
+#[test]
+fn command_timeout_terminates_descendants_without_waiting_for_pipes() {
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "sleep 2 & wait"]);
+    let started = Instant::now();
+    assert!(super::output_with_timeout(command, Duration::from_millis(50)).is_none());
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
 #[test]
 fn combined_remote_output_is_bounded_at_utf8_boundaries() {
     let result = remote_result_text(
@@ -628,18 +638,6 @@ fn parses_cli_options() {
     assert!(parsed.once);
     assert!(CliOptions::try_parse_from(["agent", "-t"]).is_err());
     assert!(CliOptions::try_parse_from(["agent", "-t", "first", "-t", "second"]).is_err());
-    assert!(
-        CliOptions::try_parse_from([
-            "agent",
-            "-e",
-            "https://monitor.example.com",
-            "-t",
-            "agent-token",
-            "--token-file",
-            "/run/nodeflare/token",
-        ])
-        .is_err()
-    );
     assert!(CliOptions::try_parse_from(["agent", "--once", "--collect"]).is_err());
 }
 
