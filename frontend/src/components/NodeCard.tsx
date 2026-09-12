@@ -104,6 +104,7 @@ export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResu
 }) {
   const threshold = config.offline_threshold_seconds;
   const online = isOnline(server, threshold);
+  const cpuCores = Math.max(0, Math.trunc(number(server.cpu_cores)));
   const memory = percent(server.mem_used, server.mem_total);
   const disk = percent(server.disk_used, server.disk_total);
   const usedTraffic = trafficUsed(server);
@@ -135,7 +136,7 @@ export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResu
         </div>
 
         <div className="metric-grid">
-          <Metric label="CPU" value={`${number(server.cpu).toFixed(1)}%`} used={number(server.cpu)} sub={`${number(server.load1).toFixed(2)}, ${number(server.load5).toFixed(2)}, ${number(server.load15).toFixed(2)}`} muted={!online} />
+          <Metric label={cpuCores > 0 ? ui(locale, `CPU ${cpuCores} 核`, `CPU ${cpuCores} ${cpuCores === 1 ? "core" : "cores"}`) : "CPU"} value={`${number(server.cpu).toFixed(1)}%`} used={number(server.cpu)} sub={`${number(server.load1).toFixed(2)}, ${number(server.load5).toFixed(2)}, ${number(server.load15).toFixed(2)}`} muted={!online} />
           <Metric label={ui(locale, "内存", "Memory")} value={`${memory.toFixed(1)}%`} used={memory} sub={`${formatBytes(server.mem_used)} / ${formatBytes(server.mem_total)}`} muted={!online} />
           <Metric label={ui(locale, "硬盘", "Disk")} value={`${disk.toFixed(1)}%`} used={disk} sub={`${formatBytes(server.disk_used)} / ${formatBytes(server.disk_total)}`} muted={!online} />
           <Metric label={ui(locale, "流量", "Traffic")} value={server.traffic_limit > 0 ? `${traffic.toFixed(1)}%` : "∞"} used={traffic} sub={`${formatBytes(usedTraffic)} / ${server.traffic_limit > 0 ? formatBytes(server.traffic_limit) : "∞"}`} muted={!online} />
