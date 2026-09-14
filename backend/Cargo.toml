@@ -33,7 +33,7 @@ argon2 = "0.6"
 rand = "0.10"
 hex = "0.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "json", "form"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 data-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
 url = "2.5"
