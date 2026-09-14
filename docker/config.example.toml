@@ -1,4 +1,4 @@
-# Copy to data/config.toml and set the initial administrator credentials.
+# Save as /etc/nodeflare/config.toml and set the initial administrator credentials.
 database_url = "sqlite://nodeflare.db"
 bind_addr = "0.0.0.0:2206"
 admin_username = "admin"

@@ -15,7 +15,11 @@ NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web
 
 ## 界面预览
 
-![公开看板](docs/frontend.png)
+**公开看板** · [在线演示](https://elysia62.github.io/NodeFlareWiki/demo/)
+
+[![公开看板](docs/frontend.png)](https://elysia62.github.io/NodeFlareWiki/demo/)
+
+**管理后台**
 
 ![管理后台](docs/backend.png)
 
@@ -30,7 +34,7 @@ NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web
 
 ## 快速开始
 
-安装服务端（自动下载最新 Release 并注册系统服务）。
+安装服务端（自动下载最新 Release 并注册系统服务）：
 
 Linux / macOS：
 
@@ -68,15 +72,24 @@ curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent
 
 ## Docker 部署
 
-镜像：[`gxmandppx/nodeflare`](https://hub.docker.com/r/gxmandppx/nodeflare)，支持 amd64 / arm64。两种方式均需先按[配置示例](docker/config.example.toml)准备 `./data/config.toml`，并确保 `./data` 及配置文件可由容器用户 `10001:10001` 读写。
+使用 Docker 或 Docker Compose 部署 NodeFlare。镜像 [`gxmandppx/nodeflare`](https://hub.docker.com/r/gxmandppx/nodeflare) 支持 amd64 / arm64，配置和数据保存在宿主机的 `/etc/nodeflare`。
+
+首次启动前，准备配置文件并为容器设置数据目录的读写权限：
+
+```bash
+sudo mkdir -p /etc/nodeflare
+sudo curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/docker/config.example.toml -o /etc/nodeflare/config.toml
+# 编辑 /etc/nodeflare/config.toml，填好管理员账号密码
+sudo chown -R 10001:10001 /etc/nodeflare
+```
 
 Docker：
 
 ```bash
 docker run -d --name nodeflare \
   --restart unless-stopped \
-  -p 127.0.0.1:2206:2206 \
-  -v "$PWD/data:/etc/nodeflare" \
+  -p 2206:2206 \
+  -v /etc/nodeflare:/etc/nodeflare \
   gxmandppx/nodeflare:latest
 ```
 
@@ -89,28 +102,32 @@ services:
     container_name: nodeflare
     restart: unless-stopped
     ports:
-      - "127.0.0.1:2206:2206"
+      - "2206:2206"
     volumes:
-      - ./data:/etc/nodeflare
+      - /etc/nodeflare:/etc/nodeflare
 ```
 
 ```bash
 docker compose up -d
 ```
 
+启动后访问 `http://<服务器地址>:2206/admin/login`。面板自身不提供 HTTPS，对外网提供服务时建议只发布到本机（`-p 127.0.0.1:2206:2206`）并配合 HTTPS 反向代理；升级、日志与卸载见 [Docker 部署](https://elysia62.github.io/NodeFlareWiki/guide/docker.html)。
+
 ## 文档
 
 | 文档 | 说明 |
 | --- | --- |
 | [安装服务端](https://elysia62.github.io/NodeFlareWiki/guide/quick-start.html) | 一键安装、首次初始化、脚本参数与更新 |
+| [Docker 部署](https://elysia62.github.io/NodeFlareWiki/guide/docker.html) | 官方镜像、Compose 部署与数据持久化 |
 | [安装 Agent](https://elysia62.github.io/NodeFlareWiki/guide/agent.html) | 各平台安装脚本与参数 |
+| [平台支持与默认目录](https://elysia62.github.io/NodeFlareWiki/guide/platforms.html) | 支持的系统与架构、默认目录与日志位置 |
 | [卸载](https://elysia62.github.io/NodeFlareWiki/guide/uninstall.html) | 服务端与 Agent 的卸载及数据清理 |
 | [配置](https://elysia62.github.io/NodeFlareWiki/guide/config.html) | 配置项说明与完整示例 |
 | [反向代理](https://elysia62.github.io/NodeFlareWiki/guide/proxy.html) | nginx / Caddy 配置与 trusted_proxies |
 | [数据库与备份](https://elysia62.github.io/NodeFlareWiki/guide/database.html) | 备份恢复、SQLite ↔ PostgreSQL 在线迁移 |
 | [监控口径与采样](https://elysia62.github.io/NodeFlareWiki/guide/monitoring.html) | 采样频率与内存统计口径 |
 | [告警与通知](https://elysia62.github.io/NodeFlareWiki/guide/alerts.html) | 阈值、离线、到期、流量告警 |
-| [主题定制](https://elysia62.github.io/NodeFlareWiki/guide/themes.html) | 主题商店与主题参数 |
+| [主题开发](https://elysia62.github.io/NodeFlareWiki/guide/themes.html) | 主题包结构、设置表单与数据接口 |
 | [常见问题](https://elysia62.github.io/NodeFlareWiki/faq.html) | 排障与 FAQ |
 | [开发指南](https://elysia62.github.io/NodeFlareWiki/dev/develop.html) | 本地开发、测试与构建 |
 

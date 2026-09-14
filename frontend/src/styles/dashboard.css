@@ -72,8 +72,9 @@
 .metric.muted { opacity: .55; }
 /* 固定行高:CJK 回退字体的 normal 行高大于拉丁文本,浮动行高会把进度条与下一行顶偏 */
 .metric > div { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; line-height: 16px; white-space: nowrap; }
+.metric > div > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .metric span, .metric small { color: var(--muted-foreground); }
-.metric strong { font-weight: 500; font-variant-numeric: tabular-nums; }
+.metric strong { flex: 0 0 auto; font-weight: 500; font-variant-numeric: tabular-nums; }
 .metric small { overflow: hidden; font-size: 12px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; }
 .progress-track { display: block; width: 100%; height: 4px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--foreground) 9%, transparent); }
 .progress-fill { display: block; height: 100%; border-radius: 2px; transition: width 300ms ease; }

@@ -32,7 +32,7 @@ const USAGE_TEXT_TONE: Record<UsageTone, string> = { good: "", warning: "warning
 function Metric({ label, value, used, sub, muted = false }: { label: string; value: string; used: number; sub: string; muted?: boolean }) {
   return (
     <div className={`metric ${muted ? "muted" : ""}`}>
-      <div><span>{label}</span><strong className={USAGE_TEXT_TONE[usageTone(used)]}>{value}</strong></div>
+      <div><span title={label}>{label}</span><strong className={USAGE_TEXT_TONE[usageTone(used)]}>{value}</strong></div>
       <ProgressBar value={used} />
       <small title={sub}>{sub}</small>
     </div>

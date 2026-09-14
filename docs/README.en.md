@@ -15,7 +15,11 @@ NodeFlare is a lightweight, self-hosted server monitoring panel: view server sta
 
 ## Screenshots
 
-![Public dashboard](frontend.png)
+**Public dashboard** · [Live Demo](https://elysia62.github.io/NodeFlareWiki/demo/)
+
+[![Public dashboard](frontend.png)](https://elysia62.github.io/NodeFlareWiki/demo/)
+
+**Admin panel**
 
 ![Admin panel](backend.png)
 
@@ -30,7 +34,7 @@ NodeFlare is a lightweight, self-hosted server monitoring panel: view server sta
 
 ## Quick Start
 
-Install the server (downloads the latest release and registers a system service automatically).
+Install the server (downloads the latest release and registers a system service automatically):
 
 Linux / macOS:
 
@@ -68,15 +72,24 @@ Updating: re-run the install script. Config and data are preserved and a failed 
 
 ## Docker Deployment
 
-Image: [`gxmandppx/nodeflare`](https://hub.docker.com/r/gxmandppx/nodeflare), available for amd64 / arm64. Both options require `./data/config.toml` based on the [example configuration](../docker/config.example.toml), with `./data` and the configuration file writable by container user `10001:10001`.
+Deploy NodeFlare with Docker or Docker Compose. The [`gxmandppx/nodeflare`](https://hub.docker.com/r/gxmandppx/nodeflare) image supports amd64 / arm64 and stores configuration and data in `/etc/nodeflare` on the host.
+
+Before the first start, prepare the configuration file and allow the container to write to the data directory:
+
+```bash
+sudo mkdir -p /etc/nodeflare
+sudo curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/docker/config.example.toml -o /etc/nodeflare/config.toml
+# Edit /etc/nodeflare/config.toml and set the administrator username and password
+sudo chown -R 10001:10001 /etc/nodeflare
+```
 
 Docker:
 
 ```bash
 docker run -d --name nodeflare \
   --restart unless-stopped \
-  -p 127.0.0.1:2206:2206 \
-  -v "$PWD/data:/etc/nodeflare" \
+  -p 2206:2206 \
+  -v /etc/nodeflare:/etc/nodeflare \
   gxmandppx/nodeflare:latest
 ```
 
@@ -89,21 +102,25 @@ services:
     container_name: nodeflare
     restart: unless-stopped
     ports:
-      - "127.0.0.1:2206:2206"
+      - "2206:2206"
     volumes:
-      - ./data:/etc/nodeflare
+      - /etc/nodeflare:/etc/nodeflare
 ```
 
 ```bash
 docker compose up -d
 ```
 
+Then open `http://<server-address>:2206/admin/login`. The panel does not serve HTTPS, so to expose it externally publish the port on loopback (`-p 127.0.0.1:2206:2206`) and put an HTTPS reverse proxy in front. Updates, logs, and uninstall: [Docker Deployment](https://elysia62.github.io/NodeFlareWiki/en/guide/docker.html).
+
 ## Documentation
 
 | Document | Description |
 | --- | --- |
 | [Install the Server](https://elysia62.github.io/NodeFlareWiki/en/guide/quick-start.html) | One-line install, first-time setup, script options, updates |
+| [Docker Deployment](https://elysia62.github.io/NodeFlareWiki/en/guide/docker.html) | Official image, Compose setup, and data persistence |
 | [Install the Agent](https://elysia62.github.io/NodeFlareWiki/en/guide/agent.html) | Per-platform scripts and options |
+| [Platforms & Paths](https://elysia62.github.io/NodeFlareWiki/en/guide/platforms.html) | Supported systems and architectures, default paths and logs |
 | [Uninstall](https://elysia62.github.io/NodeFlareWiki/en/guide/uninstall.html) | Uninstalling the server and agent, data cleanup |
 | [Configuration](https://elysia62.github.io/NodeFlareWiki/en/guide/config.html) | Config options and a full example |
 | [Reverse Proxy](https://elysia62.github.io/NodeFlareWiki/en/guide/proxy.html) | nginx / Caddy setup and trusted_proxies |

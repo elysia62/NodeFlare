@@ -39,6 +39,7 @@ RUN apk add --no-cache ca-certificates \
     && addgroup -S -g 10001 nodeflare \
     && adduser -S -D -H -u 10001 -G nodeflare -s /sbin/nologin nodeflare \
     && mkdir -p /etc/nodeflare \
+    && chmod 700 /etc/nodeflare \
     && chown nodeflare:nodeflare /etc/nodeflare
 COPY --from=backend /usr/local/bin/nodeflare /usr/local/bin/nodeflare
 COPY --from=frontend /build/frontend/dist/ /opt/nodeflare/share/frontend/
