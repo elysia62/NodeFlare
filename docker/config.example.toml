@@ -1,0 +1,15 @@
+# Copy to data/config.toml and set the initial administrator credentials.
+database_url = "sqlite://nodeflare.db"
+bind_addr = "0.0.0.0:2206"
+admin_username = "admin"
+# Used only for the first database initialization; cleared after startup.
+admin_password = "CHANGE_ME_WITH_A_STRONG_PASSWORD"
+
+frontend_dir = "/opt/nodeflare/share/frontend"
+admin_frontend_dir = "/opt/nodeflare/share/admin"
+theme_dir = "themes"
+
+trusted_proxies = ["127.0.0.1/32", "::1/128"]
+turnstile_site_key = ""
+turnstile_secret_key = ""
+session_ttl_hours = 168

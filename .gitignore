@@ -9,6 +9,9 @@
 /frontend/admin-dist/
 /release/
 
+# Docker 持久化数据
+/data/
+
 # 依赖
 /node_modules/
 /frontend/node_modules/

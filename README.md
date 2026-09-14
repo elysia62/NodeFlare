@@ -11,7 +11,7 @@ NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web
 > [!WARNING]
 > NodeFlare 是一款自托管的监控/控制程序，仅应部署在你拥有或已获得授权管理的系统上。在未获授权的系统上部署、访问或执行命令，由部署者自行承担责任。
 
-[在线文档](https://elysia62.github.io/NodeFlareWiki/) | [常见问题](https://elysia62.github.io/NodeFlareWiki/faq.html) | [发布下载](https://github.com/elysia62/NodeFlare/releases)
+[在线文档](https://elysia62.github.io/NodeFlareWiki/) | [在线演示](https://elysia62.github.io/NodeFlareWiki/demo/) | [常见问题](https://elysia62.github.io/NodeFlareWiki/faq.html) | [发布下载](https://github.com/elysia62/NodeFlare/releases)
 
 ## 界面预览
 
@@ -65,6 +65,38 @@ curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent
 
 > [!TIP]
 > 安装脚本参数、各平台 Agent 脚本与卸载方法见文档：[安装服务端](https://elysia62.github.io/NodeFlareWiki/guide/quick-start.html) · [安装 Agent](https://elysia62.github.io/NodeFlareWiki/guide/agent.html) · [卸载](https://elysia62.github.io/NodeFlareWiki/guide/uninstall.html)。
+
+## Docker 部署
+
+镜像：[`gxmandppx/nodeflare`](https://hub.docker.com/r/gxmandppx/nodeflare)，支持 amd64 / arm64。两种方式均需先按[配置示例](docker/config.example.toml)准备 `./data/config.toml`，并确保 `./data` 及配置文件可由容器用户 `10001:10001` 读写。
+
+Docker：
+
+```bash
+docker run -d --name nodeflare \
+  --restart unless-stopped \
+  -p 127.0.0.1:2206:2206 \
+  -v "$PWD/data:/etc/nodeflare" \
+  gxmandppx/nodeflare:latest
+```
+
+Docker Compose（将以下内容保存为 `compose.yaml`）：
+
+```yaml
+services:
+  nodeflare:
+    image: gxmandppx/nodeflare:latest
+    container_name: nodeflare
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:2206:2206"
+    volumes:
+      - ./data:/etc/nodeflare
+```
+
+```bash
+docker compose up -d
+```
 
 ## 文档
 
