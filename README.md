@@ -11,11 +11,11 @@ NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web
 > [!WARNING]
 > NodeFlare 是一款自托管的监控/控制程序，仅应部署在你拥有或已获得授权管理的系统上。在未获授权的系统上部署、访问或执行命令，由部署者自行承担责任。
 
-[在线文档](https://elysia62.github.io/NodeFlareWiki/) | [在线演示](https://elysia62.github.io/NodeFlareWiki/demo/) | [常见问题](https://elysia62.github.io/NodeFlareWiki/faq.html) | [发布下载](https://github.com/elysia62/NodeFlare/releases)
+[在线文档](https://elysia62.github.io/NodeFlareWiki/) | [在线演示](https://dash.elysiaya.xyz) | [常见问题](https://elysia62.github.io/NodeFlareWiki/faq.html) | [发布下载](https://github.com/elysia62/NodeFlare/releases)
 
 ## 界面预览
 
-**公开看板** · [在线演示](https://elysia62.github.io/NodeFlareWiki/demo/)
+**公开看板** · [在线演示](https://dash.elysiaya.xyz)
 
 [![公开看板](docs/frontend.png)](https://elysia62.github.io/NodeFlareWiki/demo/)
 
