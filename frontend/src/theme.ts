@@ -25,8 +25,8 @@ function themeText(config: Config, key: string) {
 export function carrierSelection(config: Config): CarrierSlotKey {
   return {
     telecom: themeText(config, "telecomLatencyTask"),
-    mobile: themeText(config, "mobileLatencyTask"),
     unicom: themeText(config, "unicomLatencyTask"),
+    mobile: themeText(config, "mobileLatencyTask"),
   };
 }
 

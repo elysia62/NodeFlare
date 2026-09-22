@@ -35,7 +35,6 @@ interface NodeLatencyStats {
   latencyBars: LatencyBar[];
   lossBars: LatencyBar[];
   carriers: CarrierLatencyRow[];
-  loading: boolean;
 }
 
 const cache = new Map<string, { at: number; signature: string; points: LatencySample[] }>();
@@ -176,7 +175,7 @@ export function useNodeLatency(
       .filter((point) => point.timestamp >= cutoff);
   }, [server.latency, fetched, liveResults]);
   const carrierKey = carrierSelection
-    ? `${carrierSelection.telecom}\0${carrierSelection.mobile}\0${carrierSelection.unicom}`
+    ? `${carrierSelection.telecom}\0${carrierSelection.unicom}\0${carrierSelection.mobile}`
     : "";
 
   return useMemo<NodeLatencyStats>(() => {
@@ -203,20 +202,19 @@ export function useNodeLatency(
       const selected = selectCarrierTasks(available, carrierSelection);
       for (const slot of CARRIER_SLOTS) {
         const task = selected.get(slot.key);
-        if (!task) continue;
-        const samples = byTask.get(task.id) ?? [];
+        const samples = task ? byTask.get(task.id) ?? [] : [];
         const taskBuckets = bucketSamples(samples, windowSeconds);
         const latency = averageOf(samples.map((sample) => sample.latency_ms));
         const loss = averageOf(samples.map((sample) => sample.packet_loss));
         carriers.push({
-          id: task.id,
+          id: slot.key,
           label: ui(locale, slot.label, slot.labelEn),
-          name: task.name || ui(locale, slot.label, slot.labelEn),
+          name: task?.name || ui(locale, slot.label, slot.labelEn),
           color: slot.color,
           latencyDisplay: latency === null ? "-" : `${Math.round(latency)} ms`,
           lossDisplay: loss === null ? "-" : `${loss.toFixed(1)}%`,
-          latencyBars: taskBuckets.length ? latencyBars(taskBuckets, task.id, locale) : emptyBars(placeholder),
-          lossBars: taskBuckets.length ? lossBars(taskBuckets, task.id, locale) : emptyBars(placeholder),
+          latencyBars: taskBuckets.length ? latencyBars(taskBuckets, task?.id ?? slot.key, locale) : emptyBars(placeholder),
+          lossBars: taskBuckets.length ? lossBars(taskBuckets, task?.id ?? slot.key, locale) : emptyBars(placeholder),
         });
       }
     }
@@ -227,7 +225,6 @@ export function useNodeLatency(
       latencyBars: buckets.length ? latencyBars(buckets, "all", locale) : emptyBars(placeholder),
       lossBars: buckets.length ? lossBars(buckets, "all", locale) : emptyBars(placeholder),
       carriers,
-      loading,
     };
   }, [carrierKey, carrierSelection !== null, loading, locale, points]);
 }

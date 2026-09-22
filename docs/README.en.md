@@ -26,7 +26,7 @@ NodeFlare is a lightweight, self-hosted server monitoring panel: view server sta
 ## Features
 
 - **Live metrics**: CPU, memory, and network speed sampled every second and uploaded in compressed batches every 3 seconds by default; slower metrics such as disks, GPU, and connection counts cached separately
-- **Latency probing**: TCP and ICMP tasks assigned per node, with per-carrier (China Telecom / Mobile / Unicom) display
+- **Latency probing**: TCP and ICMP tasks assigned per node, with per-carrier (China Telecom / Unicom / Mobile) display
 - **Alerts**: resource thresholds, offline, expiry, and traffic alerts pushed through Telegram with customizable message templates
 - **Theme store**: built-in themes, one-click install from GitHub repositories, local ZIP upload, and per-theme settings
 - **Secure by default**: TOTP two-factor authentication, Cloudflare Turnstile, login rate limiting, and session management; the server listens on `127.0.0.1` only, and the agent connects outbound with no inbound ports

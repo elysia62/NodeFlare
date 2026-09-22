@@ -99,7 +99,6 @@
 .carrier-row-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .carrier-row-head b { margin-left: auto; flex: 0 0 auto; color: var(--foreground); font-weight: 500; font-variant-numeric: tabular-nums; }
 .carrier-row .quality-bars { min-height: 8px; }
-.empty-inline { display: grid; min-height: 0; flex: 1; place-items: center; color: var(--muted-foreground); font-size: 11px; }
 .quality-panel b { color: var(--foreground); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .quality-bars { display: grid; min-height: 0; flex: 1; align-items: end; gap: 1px; opacity: .85; transition: opacity 150ms ease; }
 .quality-bars > span { position: relative; display: flex; height: 100%; min-width: 0; align-items: end; overflow: visible; border-radius: 1px; background: color-mix(in srgb, var(--foreground) 6%, transparent); }

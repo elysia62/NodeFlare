@@ -481,8 +481,8 @@ pub fn builtin_settings_schema() -> Value {
             {"key": "showOnline", "label": "总览显示在线节点", "type": "toggle", "default": true},
             {"key": "showCarrierLatency", "label": "节点卡片分线路显示延迟", "type": "toggle", "default": false},
             {"key": "telecomLatencyTask", "label": "电信线路任务名称", "type": "text", "default": "", "placeholder": "留空时按任务名称自动匹配"},
-            {"key": "mobileLatencyTask", "label": "移动线路任务名称", "type": "text", "default": "", "placeholder": "留空时按任务名称自动匹配"},
-            {"key": "unicomLatencyTask", "label": "联通线路任务名称", "type": "text", "default": "", "placeholder": "留空时按任务名称自动匹配"}
+            {"key": "unicomLatencyTask", "label": "联通线路任务名称", "type": "text", "default": "", "placeholder": "留空时按任务名称自动匹配"},
+            {"key": "mobileLatencyTask", "label": "移动线路任务名称", "type": "text", "default": "", "placeholder": "留空时按任务名称自动匹配"}
         ]
     })
 }

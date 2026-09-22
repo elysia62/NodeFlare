@@ -49,8 +49,8 @@ describe("selectCarrierTasks", () => {
       { telecom: "", mobile: "", unicom: "" },
     );
     expect(selected.get("telecom")?.id).toBe("x");
-    expect(selected.get("mobile")?.id).toBe("y");
-    expect(selected.has("unicom")).toBe(false);
+    expect(selected.get("unicom")?.id).toBe("y");
+    expect(selected.has("mobile")).toBe(false);
   });
 });
 

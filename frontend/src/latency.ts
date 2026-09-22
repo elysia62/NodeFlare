@@ -12,16 +12,16 @@ export interface LatencyBar {
 
 export interface CarrierSlotKey {
   telecom: string;
-  mobile: string;
   unicom: string;
+  mobile: string;
 }
 
 export const BAR_COUNT = 20;
 
 export const CARRIER_SLOTS = [
   { key: "telecom" as const, label: "电信", labelEn: "Telecom", color: "#fb7185", aliases: ["电信", "chinatelecom", "telecom", "ctcc", "ct"] },
-  { key: "mobile" as const, label: "移动", labelEn: "Mobile", color: "#34d399", aliases: ["移动", "chinamobile", "mobile", "cmcc", "cm"] },
   { key: "unicom" as const, label: "联通", labelEn: "Unicom", color: "#60a5fa", aliases: ["联通", "chinaunicom", "unicom", "cucc", "cu"] },
+  { key: "mobile" as const, label: "移动", labelEn: "Mobile", color: "#34d399", aliases: ["移动", "chinamobile", "mobile", "cmcc", "cm"] },
 ] as const;
 
 type CarrierSlot = typeof CARRIER_SLOTS[number];

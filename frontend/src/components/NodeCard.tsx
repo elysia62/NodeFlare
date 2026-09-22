@@ -72,16 +72,15 @@ function QualityPanel({ label, value, bars }: {
   );
 }
 
-function CarrierPanel({ label, rows, kind, empty }: {
+function CarrierPanel({ label, rows, kind }: {
   label: string;
   rows: CarrierLatencyRow[];
   kind: "latency" | "loss";
-  empty: string;
 }) {
   return (
     <div className="quality-panel carrier-panel">
       <div><span>{label}</span></div>
-      {rows.length ? <div className="carrier-rows">
+      <div className="carrier-rows">
         {rows.map((row) => <div className="carrier-row" key={row.id}>
           <div className="carrier-row-head" title={row.name}>
             <i style={{ backgroundColor: row.color }} />
@@ -90,7 +89,7 @@ function CarrierPanel({ label, rows, kind, empty }: {
           </div>
           <QualityBars bars={kind === "latency" ? row.latencyBars : row.lossBars} />
         </div>)}
-      </div> : <div className="empty-inline">{empty}</div>}
+      </div>
     </div>
   );
 }
@@ -115,9 +114,6 @@ export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResu
   const price = formatPrice(server, locale);
   const remainingValue = remainingAssetValue(server.price, server.billing_cycle, server.expires_at);
   const showExpiryPanel = config.show_expiry || config.show_price;
-  const carrierEmpty = quality.loading
-    ? ui(locale, "加载中", "Loading")
-    : ui(locale, "未匹配到线路", "No lines matched");
   const lastUpdated = new Date(number(server.timestamp) * 1000).toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
   return (
@@ -161,8 +157,8 @@ export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResu
 
         {config.show_latency ? <div className="quality-grid">
           {showCarriers ? <>
-            <CarrierPanel label={ui(locale, "延迟", "Latency")} rows={quality.carriers} kind="latency" empty={carrierEmpty} />
-            <CarrierPanel label={ui(locale, "丢包", "Packet loss")} rows={quality.carriers} kind="loss" empty={carrierEmpty} />
+            <CarrierPanel label={ui(locale, "延迟", "Latency")} rows={quality.carriers} kind="latency" />
+            <CarrierPanel label={ui(locale, "丢包", "Packet loss")} rows={quality.carriers} kind="loss" />
           </> : <>
             <QualityPanel label={ui(locale, "延迟", "Latency")} value={quality.latencyDisplay} bars={quality.latencyBars} />
             <QualityPanel label={ui(locale, "丢包", "Packet loss")} value={quality.lossDisplay} bars={quality.lossBars} />
