@@ -25,6 +25,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, watch};
+use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::trace::TraceLayer;
 
 pub struct AppState {
@@ -46,6 +48,8 @@ pub struct AppState {
     pub login_attempts: security::AttemptLimiter,
     pub sensitive_attempts: security::AttemptLimiter,
     pub turnstile_attempts: security::AttemptLimiter,
+    /// Bounds repeated history queries per client IP and node.
+    pub public_history_requests: security::RateLimiter,
     pub password_verifications: Arc<Semaphore>,
 }
 
@@ -139,7 +143,17 @@ async fn main() -> Result<()> {
             }
             Ok(false) => {}
             Err(error) => {
-                tracing::warn!(%error, path = %args.config.display(), "failed to clear bootstrap password from configuration")
+                // The database is already initialized, so refusing to start
+                // would break a working deployment over a now-redundant value.
+                // The plaintext password stays on disk though, so say exactly
+                // what to do instead of leaving it in a passing log line.
+                tracing::warn!(
+                    %error,
+                    path = %args.config.display(),
+                    "failed to clear the bootstrap password from the configuration file; \
+                     the password is no longer used but is still stored in plaintext. \
+                     Set admin_password = \"\" in that file and restrict its permissions"
+                );
             }
         }
         config.admin_password.clear();
@@ -191,6 +205,11 @@ async fn main() -> Result<()> {
             10,
             std::time::Duration::from_secs(5 * 60),
             std::time::Duration::from_secs(5 * 60),
+        ),
+        // Each node gets its own budget so large dashboards can load every card.
+        public_history_requests: security::RateLimiter::new(
+            120,
+            std::time::Duration::from_secs(60),
         ),
         password_verifications: Arc::new(Semaphore::new(4)),
     });
@@ -308,29 +327,38 @@ async fn main() -> Result<()> {
             middleware::auth_middleware,
         ));
 
-    let app = Router::new()
-        .route("/api/bootstrap", get(routes::public::bootstrap))
-        .route("/api/favicon", get(routes::public::favicon))
-        .route("/api/history/{id}", get(routes::public::history))
-        .route("/api/latency/{id}", get(routes::public::latency_history))
-        .route("/api/exchange-rates", get(routes::public::exchange_rates))
-        .route(
-            "/api/turnstile/verify",
-            post(routes::auth::verify_turnstile),
-        )
-        .route("/api/admin/login", post(routes::auth::login))
-        .route("/api/agent/ws", get(websocket::agent::handle))
-        .route("/api/ws", get(websocket::dashboard::handle))
-        .merge(protected)
-        .fallback(routes::site::handle)
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
-        .layer(axum_middleware::from_fn_with_state(
-            Arc::clone(&state),
-            middleware::database_activity,
-        ))
-        .layer(TraceLayer::new_for_http())
-        .layer(axum_middleware::from_fn(middleware::security_headers))
-        .with_state(Arc::clone(&state));
+    let app =
+        Router::new()
+            .route("/api/bootstrap", get(routes::public::bootstrap))
+            .route("/api/favicon", get(routes::public::favicon))
+            .route("/api/history/{id}", get(routes::public::history))
+            .route("/api/latency/{id}", get(routes::public::latency_history))
+            .route("/api/exchange-rates", get(routes::public::exchange_rates))
+            .route(
+                "/api/turnstile/verify",
+                post(routes::auth::verify_turnstile),
+            )
+            .route("/api/admin/login", post(routes::auth::login))
+            .route("/api/agent/ws", get(websocket::agent::handle))
+            .route("/api/ws", get(websocket::dashboard::handle))
+            .merge(protected)
+            .fallback(routes::site::handle)
+            .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+            .layer(axum_middleware::from_fn_with_state(
+                Arc::clone(&state),
+                middleware::database_activity,
+            ))
+            .layer(TraceLayer::new_for_http())
+            // Compression sits above the response-generating layers so frontend
+            // assets, JSON payloads and the SSE-less API all shrink on the wire.
+            // The default predicate already skips bodies under 32 bytes and
+            // `text/event-stream`; ZIP downloads are excluded because they are
+            // already deflated and re-compressing them only burns CPU.
+            .layer(CompressionLayer::new().compress_when(
+                DefaultPredicate::new().and(NotForContentType::new("application/zip")),
+            ))
+            .layer(axum_middleware::from_fn(middleware::security_headers))
+            .with_state(Arc::clone(&state));
 
     spawn_maintenance(Arc::clone(&state));
     spawn_notifications(Arc::clone(&state));

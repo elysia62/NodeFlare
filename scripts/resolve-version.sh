@@ -9,6 +9,12 @@ if [ -z "$raw" ]; then
   raw=$(git -C "$root_dir" describe --tags --exact-match --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
 fi
 if [ -z "$raw" ]; then
+  # Not exactly on a tag: report the release this tree is based on rather than
+  # the package.json value, which only tracks the format and goes stale.
+  raw=$(git -C "$root_dir" describe --tags --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
+  raw=${raw%%-*}
+fi
+if [ -z "$raw" ]; then
   raw=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)",*$/\1/p' "$root_dir/package.json" | sed -n '1p')
 fi
 

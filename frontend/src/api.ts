@@ -1,11 +1,34 @@
 import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
+import { localizedError } from "./errors";
+import type { UiLocale } from "./locale";
 
 export const ADMIN_UNAUTHORIZED_EVENT = "nodeflare:admin-unauthorized";
 
+/**
+ * The dashboard locale is only known after `/api/bootstrap` returns, so the
+ * API layer keeps it in module state instead of importing the app provider
+ * (which would create a cycle). Errors raised before the first bootstrap fall
+ * back to the server text.
+ */
+let activeLocale: UiLocale | undefined;
+
+export function setApiLocale(locale: UiLocale | string | undefined) {
+  activeLocale = locale === "en" ? "en" : locale === "zh-CN" ? "zh-CN" : undefined;
+}
+
 export class ApiError extends Error {
-  constructor(message: string, public status: number) {
-    super(message);
+  constructor(message: string, public status: number, public retryAfterMs?: number) {
+    super(localizedError(message, activeLocale));
   }
+}
+
+function retryAfterMs(value: string | null): number | undefined {
+  if (!value?.trim()) return undefined;
+  const trimmed = value.trim();
+  const delay = /^\d+$/.test(trimmed) ? Number(trimmed) * 1_000 : Date.parse(trimmed) - Date.now();
+  if (!Number.isFinite(delay)) return undefined;
+  // Avoid an immediate retry loop and the browser's signed 32-bit timer overflow.
+  return Math.min(2_147_483_647, Math.max(1_000, delay));
 }
 
 async function requestResponse(path: string, init: RequestInit = {}, admin = false): Promise<Response> {
@@ -18,7 +41,7 @@ async function requestResponse(path: string, init: RequestInit = {}, admin = fal
       window.dispatchEvent(new Event(ADMIN_UNAUTHORIZED_EVENT));
       throw new ApiError("", response.status);
     }
-    throw new ApiError(payload.error ?? "请求失败", response.status);
+    throw new ApiError(payload.error ?? "请求失败", response.status, retryAfterMs(response.headers.get("Retry-After")));
   }
   return response;
 }

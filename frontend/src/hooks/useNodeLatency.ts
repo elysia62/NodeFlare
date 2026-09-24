@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { liveLatencySamples } from "../live";
 import {
   averageOf,
@@ -104,6 +104,7 @@ export function useNodeLatency(
     let stopped = false;
     let running = false;
     let loaded = false;
+    let retryAt = 0;
     let timer: number | undefined;
 
     const canRefresh = () => !document.hidden && navigator.onLine !== false;
@@ -116,12 +117,15 @@ export function useNodeLatency(
     const schedule = () => {
       clearTimer();
       if (!stopped && canRefresh() && (!liveConnected || !loaded)) {
-        timer = window.setTimeout(() => void load(true), REFRESH_INTERVAL);
+        const delay = retryAt ? Math.max(0, retryAt - Date.now()) : REFRESH_INTERVAL;
+        timer = window.setTimeout(() => void load(true), Math.min(delay, 2_147_483_647));
       }
     };
     const load = async (force: boolean) => {
       clearTimer();
       if (stopped || running || !canRefresh()) return;
+      if (retryAt > Date.now()) { schedule(); return; }
+      retryAt = 0;
       running = true;
       try {
         const hit = cache.get(server.id);
@@ -140,7 +144,12 @@ export function useNodeLatency(
           cache.set(server.id, { at: now, signature: taskSignature, points: result.points });
           setFetched(result.points);
         }
-      } catch {} finally {
+      } catch (reason) {
+        if (reason instanceof ApiError && reason.status === 429) {
+          loaded = false;
+          retryAt = Date.now() + (reason.retryAfterMs ?? 1_000) + Math.floor(Math.random() * 250);
+        }
+      } finally {
         running = false;
         if (!stopped) setLoading(false);
         schedule();

@@ -1,14 +1,18 @@
+mod gpu;
 mod live;
 mod live_batch;
 mod metrics;
+mod probe;
 mod remote;
 mod runtime_stats;
 mod update;
 
 // Re-exported so the rest of the crate keeps referring to these items by their
 // original unqualified names (and so tests can keep using `crate::name`).
+pub(crate) use gpu::*;
 pub(crate) use live::*;
 pub(crate) use metrics::*;
+pub(crate) use probe::*;
 pub(crate) use remote::*;
 pub(crate) use update::*;
 

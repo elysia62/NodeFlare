@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, ApiError } from "./api";
+import { api, setApiLocale, ApiError } from "./api";
 import { demoConfig, demoExchangeRates, demoServers } from "./demo";
 import {
   applyBatch,
@@ -119,6 +119,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       try {
         const result = await api.bootstrap();
+        // Set before any later request so server errors come back translated.
+        setApiLocale(result.config.locale);
         setConfig(result.config);
         setConfigReady(true);
         serversRef.current = result.servers;

@@ -52,9 +52,9 @@ pub async fn create_task(
     Json(input): Json<CreateRemoteTaskRequest>,
 ) -> Result<Response, ApiResponse> {
     if let Some(seconds) = state.sensitive_attempts.retry_after(&user.session_id) {
-        return Err(ApiResponse::error(
-            StatusCode::TOO_MANY_REQUESTS,
+        return Err(ApiResponse::throttled(
             format!("验证码尝试过多，请在 {seconds} 秒后重试"),
+            seconds,
         ));
     }
     let command = input.command.as_str();

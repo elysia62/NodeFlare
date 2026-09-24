@@ -13,6 +13,8 @@ use axum::response::{IntoResponse, Response};
 pub struct ApiResponse {
     status: StatusCode,
     message: String,
+    /// Seconds a throttled caller should wait, sent as `Retry-After`.
+    retry_after: Option<u64>,
 }
 
 impl ApiResponse {
@@ -20,6 +22,15 @@ impl ApiResponse {
         Self {
             status,
             message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// A `429` that tells the caller when it may retry.
+    pub fn throttled(message: impl Into<String>, seconds: u64) -> Self {
+        Self {
+            retry_after: Some(seconds.max(1)),
+            ..Self::error(StatusCode::TOO_MANY_REQUESTS, message)
         }
     }
 
@@ -55,7 +66,15 @@ impl ApiResponse {
 
 impl IntoResponse for ApiResponse {
     fn into_response(self) -> Response {
-        (self.status, Json(ApiError::new(self.message))).into_response()
+        let mut response = (self.status, Json(ApiError::new(self.message))).into_response();
+        if let Some(seconds) = self.retry_after
+            && let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string())
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        response
     }
 }
 

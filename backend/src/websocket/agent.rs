@@ -20,23 +20,43 @@ use tokio::sync::mpsc;
 
 const MAX_AGENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TASK_RESULT_BYTES: usize = 1024 * 1024;
-/// Static identity fields the public dashboard already receives through
-/// `/api/bootstrap`, so the live stream omits them.
+/// Fields a public dashboard may receive in a live sample.
 ///
-/// This is a deny list, so a new `Report` field is broadcast until added here;
-/// prefer inverting it into an explicit allow list when the sample shape is next
-/// reworked (verify the frontend's usage first).
-const LIVE_SAMPLE_PRIVATE_FIELDS: [&str; 10] = [
-    "timestamp",
-    "cpu_model",
-    "os",
-    "kernel",
-    "arch",
-    "virtualization",
-    "gpu_model",
-    "agent_version",
-    "ip_v4",
-    "ip_v6",
+/// This is an allow list: static identity fields already arrive through
+/// `/api/bootstrap`, and anything not listed here stays private even if a new
+/// field is added to `telemetry::Report`. `timestamp` is excluded on purpose —
+/// each sample carries it in the sibling `ts` field.
+/// Registered in `live_broadcast_keeps_identity_fields_private`.
+const LIVE_SAMPLE_PUBLIC_FIELDS: [&str; 29] = [
+    "cpu",
+    "load1",
+    "load5",
+    "load15",
+    "mem_used",
+    "mem_total",
+    "swap_used",
+    "swap_total",
+    "disk_used",
+    "disk_total",
+    "net_in",
+    "net_out",
+    "net_rx_total",
+    "net_tx_total",
+    "uptime",
+    "processes",
+    "tcp_connections",
+    "udp_connections",
+    "cpu_cores",
+    "gpu_usage",
+    "disk_read_bps",
+    "disk_write_bps",
+    "disk_read_iops",
+    "disk_write_iops",
+    "disk_await_ms",
+    "disk_utilization",
+    "disks",
+    "gpus",
+    "latency_results",
 ];
 
 #[derive(Deserialize)]
@@ -116,6 +136,9 @@ async fn run(
         return;
     };
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentCommand>(256);
+    // Identity fields (cpu_model, os, kernel, …) are sent only when they change,
+    // so each connection keeps the last set seen and re-applies it to every
+    // sample. The Agent replays them after a reconnect too.
     let mut info = None;
     let previous = state.agents.write().await.insert(
         identity.server_id.clone(),
@@ -415,22 +438,20 @@ fn send_persistence_error(outbound: &mpsc::Sender<AgentCommand>, persisted: i64)
     ));
 }
 
+/// Projects one telemetry report into the sample a public dashboard receives.
+fn live_sample(report: &AgentReport) -> serde_json::Value {
+    let mut data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(object) = data.as_object_mut() {
+        object.retain(|key, _| LIVE_SAMPLE_PUBLIC_FIELDS.contains(&key.as_str()));
+    }
+    serde_json::json!({"ts": report.timestamp, "data": data})
+}
+
 fn broadcast_reports(state: &AppState, identity: &AgentIdentity, reports: &[AgentReport]) {
     if identity.hidden || state.dashboard_tx.receiver_count() == 0 {
         return;
     }
-    let samples = reports
-        .iter()
-        .map(|report| {
-            let mut data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(object) = data.as_object_mut() {
-                for key in LIVE_SAMPLE_PRIVATE_FIELDS {
-                    object.remove(key);
-                }
-            }
-            serde_json::json!({"ts": report.timestamp, "data": data})
-        })
-        .collect::<Vec<_>>();
+    let samples = reports.iter().map(live_sample).collect::<Vec<_>>();
     let payload = telemetry::encode(&serde_json::json!({
         "type": "batchUpdate",
         "ts": crate::db::now(),
@@ -492,6 +513,25 @@ pub fn queue_remote_task(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use std::collections::HashSet;
+
+    /// `Report` fields a public dashboard must never receive.
+    ///
+    /// Together with `LIVE_SAMPLE_PUBLIC_FIELDS` this must cover every struct
+    /// field so `live_broadcast_keeps_identity_fields_private` fails when a new
+    /// field is added without classifying it.
+    const PRIVATE_SAMPLE_FIELDS: [&str; 10] = [
+        "timestamp",
+        "cpu_model",
+        "os",
+        "kernel",
+        "arch",
+        "virtualization",
+        "gpu_model",
+        "agent_version",
+        "ip_v4",
+        "ip_v6",
+    ];
 
     #[test]
     fn remote_dispatch_reports_backpressure_and_disconnects() {
@@ -575,5 +615,70 @@ mod tests {
                 persist
             );
         }
+    }
+
+    /// A `Report` field must be classified explicitly before it reaches the
+    /// public dashboard. This fails when one is added to the struct, forcing
+    /// the decision instead of silently broadcasting it.
+    #[test]
+    fn live_broadcast_keeps_identity_fields_private() {
+        let report = AgentReport {
+            timestamp: 42,
+            cpu: 1.0,
+            cpu_model: "CPU".to_string(),
+            os: "Linux".to_string(),
+            kernel: "6.1".to_string(),
+            arch: "x86_64".to_string(),
+            virtualization: "KVM".to_string(),
+            gpu_model: "GPU".to_string(),
+            agent_version: "1.0.0".to_string(),
+            ip_v4: "203.0.113.7".to_string(),
+            ip_v6: "2001:db8::1".to_string(),
+            ..AgentReport::default()
+        };
+        let all_fields = serde_json::to_value(&report)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let public = LIVE_SAMPLE_PUBLIC_FIELDS
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect::<HashSet<_>>();
+        let private = PRIVATE_SAMPLE_FIELDS
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect::<HashSet<_>>();
+
+        for field in public.union(&private) {
+            assert!(
+                all_fields.contains(field),
+                "{field} is listed but is not a Report field"
+            );
+        }
+        assert_eq!(
+            all_fields,
+            public.union(&private).cloned().collect::<HashSet<_>>(),
+            "classify new Report fields as public or private"
+        );
+        assert!(
+            public.is_disjoint(&private),
+            "a field cannot be both public and private"
+        );
+
+        let sample = live_sample(&report);
+        assert_eq!(sample["ts"], 42);
+        assert_eq!(
+            sample["data"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
+            public,
+            "the live stream carries exactly LIVE_SAMPLE_PUBLIC_FIELDS"
+        );
     }
 }

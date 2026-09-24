@@ -1,23 +1,11 @@
 import {
   ArrowLeft,
-  ChevronDown,
-  ChevronUp,
   CircleAlert,
   CircleCheck,
-  Copy,
-  Download,
-  Eye,
-  GripVertical,
   LogOut,
   Moon,
-  Pencil,
-  Plus,
   Save,
   Sun,
-  Trash2,
-  Upload,
-  Check,
-  ExternalLink,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError } from "../api";
@@ -27,19 +15,19 @@ import { formatBytes, formatByteSize, parseByteSize } from "../format";
 import { derivePassword } from "../password";
 import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS, REMOTE_TASK_POLL_TIMEOUT_MS } from "../refresh";
 import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
-import { Checkbox } from "./Checkbox";
 import { LoginForm } from "./LoginForm";
 import { useDialog } from "./useDialog";
 import { SiteLogo } from "./SiteLogo";
 import { LatencyManager } from "./LatencyManager";
 import { useVerification } from "./useVerification";
-import { Flag } from "./Flag";
 import { AboutTab } from "./admin/AboutTab";
 import { RemoteTab } from "./admin/RemoteTab";
+import { ServersTab } from "./admin/ServersTab";
+import { InstallDialog } from "./admin/InstallDialog";
 import { SettingsTabs } from "./admin/SettingsTabs";
+import { ThemesTab } from "./admin/ThemesTab";
 import { Toggle } from "./admin/controls";
 import {
-  AGENT_SCRIPT_BASE,
   adminNavigation,
   adminPages,
   billingCycles,
@@ -48,35 +36,10 @@ import {
   emptyServer,
   formatDate,
   settingPatch,
-  shellLiteral,
-  powershellLiteral,
   toInput,
   waitForDatabaseSwitch,
   type AgentInstallInfo,
-  type AgentPlatform,
-  type ThemeSourceMode,
 } from "./admin/shared";
-
-function ServerIpMeta({ server, agentVersion, onCopy, locale }: { server: AdminServer; agentVersion: string | null; onCopy: (ip: string) => void; locale: string }) {
-  const entries = [
-    { family: "v4" as const, ip: server.ip_v4 || "" },
-    { family: "v6" as const, ip: server.ip_v6 || "" },
-  ].filter((entry) => entry.ip);
-  return (
-    <div className="server-name-meta">
-      {entries.map((entry) => (
-        <span className="server-ip-entry" key={entry.family}>
-          <span className={`ip-badge ${entry.family}`}>{entry.family === "v6" ? "IPv6" : "IPv4"}</span>
-          <button type="button" className="ip-value" title={ui(locale, `点击复制：${entry.ip}`, `Click to copy: ${entry.ip}`)} onClick={() => onCopy(entry.ip)}>{entry.ip}</button>
-        </span>
-      ))}
-      {!entries.length ? <span className="meta-item">{ui(locale, "尚未探测到公网 IP", "No public IP detected yet")}</span> : null}
-      <span className="meta-dot">·</span>
-      <span className="meta-item">{agentVersion ? `Agent v${agentVersion}` : ui(locale, "Agent 未上报版本", "Agent version not reported")}</span>
-    </div>
-  );
-}
-
 
 export function AdminPanel({
   config,
@@ -109,11 +72,6 @@ export function AdminPanel({
   const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [exchangeRatesExpanded, setExchangeRatesExpanded] = useState(false);
   const [themes, setThemes] = useState<Theme[]>([]);
-  const [themeName, setThemeName] = useState("");
-  const [themeDescription, setThemeDescription] = useState("");
-  const [themeUrl, setThemeUrl] = useState("");
-  const [themeSourceMode, setThemeSourceMode] = useState<ThemeSourceMode>("repository");
-  const [themeFile, setThemeFile] = useState<File | null>(null);
   const [themeSettingsSchema, setThemeSettingsSchema] = useState<ThemeSettingsSchema | null>(null);
   const [editing, setEditing] = useState<AdminServer | "new" | null>(null);
   const [form, setForm] = useState<ServerInput>(emptyServer);
@@ -126,7 +84,6 @@ export function AdminPanel({
   const [txCurrentBytes, setTxCurrentBytes] = useState(0);
   const [rxBaseBytes, setRxBaseBytes] = useState(0);
   const [txBaseBytes, setTxBaseBytes] = useState(0);
-  const [installPlatform, setInstallPlatform] = useState<AgentPlatform>("linux");
   const [remoteSelectedIds, setRemoteSelectedIds] = useState<string[]>([]);
   const [remoteQuery, setRemoteQuery] = useState("");
   const [remoteCommand, setRemoteCommand] = useState("");
@@ -139,7 +96,6 @@ export function AdminPanel({
   const [loginSessions, setLoginSessions] = useState<LoginSession[]>([]);
   const [loginSessionsLoaded, setLoginSessionsLoaded] = useState(false);
   const [revokingSessionId, setRevokingSessionId] = useState("");
-  const themeFileInputRef = useRef<HTMLInputElement>(null);
   const databaseRestoreInputRef = useRef<HTMLInputElement>(null);
   const remoteTasksRef = useRef<RemoteTask[]>([]);
   const remoteTasksRequestRef = useRef(0);
@@ -352,15 +308,6 @@ export function AdminPanel({
     }
   }
 
-  async function copyInstallCommand() {
-    try {
-      if (installCommand) await copyText(installCommand);
-      setNotice(ui(locale, "安装命令已复制", "Install command copied"));
-    } catch {
-      setError(ui(locale, "复制失败，请手动选择命令复制", "Copy failed; select and copy the command manually"));
-    }
-  }
-
   async function copyServerIp(ip: string) {
     try {
       await copyText(ip);
@@ -566,30 +513,24 @@ export function AdminPanel({
     finally { setBusy(false); }
   }
 
-  async function addTheme(event: FormEvent) {
-    event.preventDefault();
-    if (themeSourceMode === "upload" && !themeFile) {
-      setError(ui(locale, "请选择 ZIP 主题文件", "Choose a ZIP theme file"));
-      return;
-    }
-    if (themeSourceMode === "upload" && themeFile && themeFile.size > 32 * 1024 * 1024) {
-      setError(ui(locale, "主题 ZIP 不能超过 32 MiB", "Theme ZIP must not exceed 32 MiB"));
-      return;
-    }
+  async function addTheme(
+    input: { name: string; description: string; url: string },
+    file: File | null,
+  ): Promise<boolean> {
     setBusy(true); setError(""); setNotice("");
     try {
-      if (themeSourceMode === "upload" && themeFile) {
-        await api.uploadTheme({ name: themeName.trim(), description: themeDescription.trim() }, themeFile);
+      if (file) {
+        await api.uploadTheme({ name: input.name, description: input.description }, file);
       } else {
-        await api.addTheme({ name: themeName.trim(), description: themeDescription.trim(), url: themeUrl.trim() });
+        await api.addTheme({ name: input.name, description: input.description, url: input.url });
       }
-      setThemeName(""); setThemeDescription(""); setThemeUrl("");
-      setThemeFile(null);
-      if (themeFileInputRef.current) themeFileInputRef.current.value = "";
       await load();
-      setNotice(themeSourceMode === "upload" ? ui(locale, "主题 ZIP 已安装", "Theme ZIP installed") : ui(locale, "最新 Release 主题已安装", "Latest release theme installed"));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "添加主题失败", "Failed to add the theme")); }
-    finally { setBusy(false); }
+      setNotice(file ? ui(locale, "主题 ZIP 已安装", "Theme ZIP installed") : ui(locale, "最新 Release 主题已安装", "Latest release theme installed"));
+      return true;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : ui(locale, "添加主题失败", "Failed to add the theme"));
+      return false;
+    } finally { setBusy(false); }
   }
 
   async function activateTheme(theme: Theme) {
@@ -723,26 +664,7 @@ export function AdminPanel({
     }
   }
 
-  const installCommand = useMemo(() => {
-    if (!install) return "";
-    const origin = window.location.origin;
-    const installer = AGENT_SCRIPT_BASE;
-    const mirror = install.agent_mirror.trim().replace(/\/+$/, "");
-    const shellMirror = mirror ? ` -m ${shellLiteral(mirror)}` : "";
-    const powershellMirror = mirror ? ` -Mirror ${powershellLiteral(mirror)}` : "";
-    if (installPlatform === "windows") {
-      return `Invoke-WebRequest -UseBasicParsing -Uri "${installer}/install.ps1" -OutFile "$env:TEMP\\nodeflare-install.ps1"\nUnblock-File "$env:TEMP\\nodeflare-install.ps1"\n& "$env:TEMP\\nodeflare-install.ps1" -e ${powershellLiteral(origin)} -t ${powershellLiteral(install.agent_token)}${powershellMirror}`;
-    }
-    if (installPlatform === "macos") {
-      return `curl -fsSL ${installer}/install-macos.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}`;
-    }
-    if (installPlatform === "freebsd") {
-      return `fetch -qo - ${installer}/install-freebsd.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}`;
-    }
-    return `curl -fsSL ${installer}/agent.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}`;
-  }, [install, installPlatform]);
   const serverDialog = useDialog<HTMLFormElement>(editing !== null, () => setEditing(null));
-  const installDialog = useDialog<HTMLElement>(Boolean(installCommand), () => setInstall(null));
 
   const toggleSelected = (id: string) => setSelectedIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
   const allSelected = servers.length > 0 && selectedIds.length === servers.length;
@@ -967,58 +889,39 @@ export function AdminPanel({
             <div className="admin-content">
               <header className="admin-content-header"><h1>{pages[tab].title}</h1><p>{pages[tab].description}</p></header>
               {tab === "servers" ? (
-                <div className="admin-section">
-                  <div className="section-head"><div><h3>{ui(locale, "监控节点", "Monitored servers")}</h3><span>{ui(locale, `${servers.length} 个节点 · 可拖动上下排序`, `${servers.length} server(s) · drag to reorder`)}</span></div><div className="section-actions"><button className="primary-btn compact" onClick={() => openEditor()}><Plus size={15} />{ui(locale, "添加", "Add")}</button></div></div>
-                  <div className="batch-toolbar"><label className="select-all"><Checkbox checked={allSelected} onChange={() => setSelectedIds(allSelected ? [] : servers.map((server) => server.id))} />{ui(locale, "全选", "Select all")}</label>{selectedIds.length ? <button className="danger-btn compact" onClick={() => void removeSelected()}><Trash2 size={15} />{ui(locale, `删除选中 (${selectedIds.length})`, `Delete selected (${selectedIds.length})`)}</button> : <span>{ui(locale, "批量操作", "Batch actions")}</span>}</div>
-                  <div className="server-list">
-                    {servers.map((server, index) => (
-                      <div className={`server-row ${draggingId === server.id ? "dragging" : ""}`} key={server.id} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => void dropServer(event, server.id)}>
-                        <button type="button" className="drag-handle" draggable onDragStart={(event) => startDrag(event, server.id)} onDragEnd={() => setDraggingId("")} title={ui(locale, `拖动排序：${server.name}`, `Drag to reorder: ${server.name}`)}><GripVertical size={15} /></button>
-                        <Checkbox checked={selectedIds.includes(server.id)} onChange={() => toggleSelected(server.id)} ariaLabel={ui(locale, `选择 ${server.name}`, `Select ${server.name}`)} />
-                        <div className="server-name"><div className="server-name-main"><Flag region={server.region} size={17} /><strong>{server.name}</strong></div><ServerIpMeta server={server} agentVersion={server.agent_version} onCopy={(value) => void copyServerIp(value)} locale={locale} /></div>
-                        <div className="row-actions"><button className="icon-btn" disabled={index === 0} onClick={() => void move(index, -1)} title={ui(locale, "上移", "Move up")}><ChevronUp size={15} /></button><button className="icon-btn" disabled={index === servers.length - 1} onClick={() => void move(index, 1)} title={ui(locale, "下移", "Move down")}><ChevronDown size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => void showInstallCommand(server)} title={ui(locale, "下载 Agent", "Download Agent")}><Download size={15} /></button><button className="icon-btn" onClick={() => openEditor(server)} title={ui(locale, "编辑节点", "Edit server")}><Pencil size={15} /></button><button className="icon-btn danger" onClick={() => void remove(server)} title={ui(locale, "删除节点", "Delete server")}><Trash2 size={15} /></button></div>
-                      </div>
-                    ))}
-                    {!servers.length && !busy ? <div className="list-empty">{ui(locale, "暂无节点", "No servers yet")}</div> : null}
-                  </div>
-                </div>
+                <ServersTab
+                  locale={locale}
+                  servers={servers}
+                  busy={busy}
+                  selectedIds={selectedIds}
+                  allSelected={allSelected}
+                  draggingId={draggingId}
+                  onCopyIp={(ip) => void copyServerIp(ip)}
+                  onAdd={() => openEditor()}
+                  onToggleSelected={toggleSelected}
+                  onToggleAll={() => setSelectedIds(allSelected ? [] : servers.map((server) => server.id))}
+                  onRemoveSelected={() => void removeSelected()}
+                  onMove={(index, offset) => void move(index, offset)}
+                  onStartDrag={startDrag}
+                  onEndDrag={() => setDraggingId("")}
+                  onDrop={(event, id) => void dropServer(event, id)}
+                  onInstallCommand={(server) => void showInstallCommand(server)}
+                  onEdit={(server) => openEditor(server)}
+                  onRemove={(server) => void remove(server)}
+                />
               ) : tab === "latency" ? (
                 <LatencyManager locale={locale} servers={servers} onError={setError} onNotice={setNotice} />
               ) : tab === "themes" && settings ? (
-                <div className="theme-store-page">
-                  <section className="admin-section">
-                    <div className="section-head"><h3>{ui(locale, "主题列表", "Themes")}</h3></div>
-                    <div className="theme-list">
-                      {themes.map((theme) => {
-                        const uploaded = theme.url.startsWith("upload:");
-                        return <article className={`theme-row ${theme.active ? "active" : ""}`} key={theme.id}>
-                        <div className="theme-row-main">
-                          <div className="theme-row-title"><strong>{theme.name}</strong><span className={`theme-badge ${theme.builtin ? "builtin" : uploaded ? "upload" : "remote"}`}>{theme.builtin ? ui(locale, "默认主题", "Built-in") : uploaded ? ui(locale, "上传安装", "Uploaded") : "GitHub Release"}</span>{theme.version ? <span className="theme-badge version">v{theme.version}</span> : null}</div>
-                          {!theme.builtin ? <p title={theme.description || undefined}>{theme.description || ui(locale, "暂无主题说明", "No description")}</p> : null}
-                          {!theme.builtin && uploaded ? <span className="theme-upload-source"><Upload size={13} /><span>{theme.url.slice("upload:".length)}</span></span> : null}
-                          {!theme.builtin && !uploaded ? <a href={theme.url} target="_blank" rel="noreferrer"><span>{theme.url}</span><ExternalLink size={13} /></a> : null}
-                        </div>
-                        <div className="theme-row-actions">
-                          {!theme.builtin ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => void previewTheme(theme)}><Eye size={15} />{ui(locale, "预览", "Preview")}</button> : null}
-                          <button type="button" className={theme.active ? "theme-active-btn" : "primary-btn compact"} disabled={busy || theme.active} onClick={() => void activateTheme(theme)}>{theme.active ? <><Check size={15} />{ui(locale, "使用中", "Active")}</> : ui(locale, "启用", "Activate")}</button>
-                          {!theme.builtin ? <button type="button" className="icon-btn danger" disabled={busy} title={ui(locale, "删除主题", "Delete theme")} onClick={() => void removeTheme(theme)}><Trash2 size={15} /></button> : null}
-                        </div>
-                      </article>;
-                      })}
-                    </div>
-                  </section>
-                  <form className="admin-section theme-add-form" onSubmit={addTheme}>
-                    <div className="section-head"><div><h3>{ui(locale, "安装主题", "Install theme")}</h3><span>{ui(locale, "主题包含可执行前端代码，只安装可信来源；安装后不依赖运行时远程资源。", "Themes contain executable frontend code; install only from trusted sources. No runtime remote resources are needed after installation.")}</span></div></div>
-                    <div className="segmented theme-source-tabs" role="group" aria-label={ui(locale, "主题安装来源", "Theme install source")}>
-                      <button type="button" className={themeSourceMode === "repository" ? "active" : ""} aria-pressed={themeSourceMode === "repository"} onClick={() => setThemeSourceMode("repository")}>{ui(locale, "GitHub 仓库", "GitHub repository")}</button>
-                      <button type="button" className={themeSourceMode === "upload" ? "active" : ""} aria-pressed={themeSourceMode === "upload"} onClick={() => setThemeSourceMode("upload")}>{ui(locale, "上传", "Upload")}</button>
-                    </div>
-                    <p className="settings-hint">{themeSourceMode === "repository" ? ui(locale, "填写仓库主页地址，NodeFlare 会下载 latest Release 中的第一个 ZIP 文件。", "Enter the repository URL; NodeFlare downloads the first ZIP asset of the latest release.") : ui(locale, "ZIP 根目录需包含 index.html，也支持外层只有一个目录的打包方式；最大 32 MiB。", "The ZIP must contain index.html at its root (a single wrapping directory is fine); max 32 MiB.")}</p>
-                    <div className="form-grid"><label><span>{ui(locale, "主题名称", "Theme name")}</span><input required maxLength={80} value={themeName} onChange={(event) => setThemeName(event.target.value)} placeholder={ui(locale, "例如：Ocean", "e.g. Ocean")} /></label>{themeSourceMode === "repository" ? <label><span>{ui(locale, "GitHub 仓库", "GitHub repository")}</span><input required type="url" maxLength={2048} value={themeUrl} onChange={(event) => setThemeUrl(event.target.value)} placeholder="https://github.com/user/theme" /></label> : <label className="theme-file-field"><span>{ui(locale, "文件", "File")}</span><input ref={themeFileInputRef} required type="file" accept=".zip,application/zip" onChange={(event) => setThemeFile(event.target.files?.[0] ?? null)} /><small>{themeFile ? `${themeFile.name} · ${(themeFile.size / 1024 / 1024).toFixed(2)} MiB` : ui(locale, "请选择 .zip 文件", "Choose a .zip file")}</small></label>}</div>
-                    <label><span>{ui(locale, "主题说明（可选）", "Theme description (optional)")}</span><textarea rows={2} maxLength={300} value={themeDescription} onChange={(event) => setThemeDescription(event.target.value)} placeholder={ui(locale, "简短描述主题风格和来源", "Briefly describe the style and source")} /></label>
-                    <div className="form-actions"><button className="primary-btn" disabled={busy || (themeSourceMode === "upload" && !themeFile)}>{themeSourceMode === "upload" ? <Upload size={15} /> : <Download size={15} />}{busy ? ui(locale, "安装中", "Installing") : ui(locale, "安装主题", "Install theme")}</button></div>
-                  </form>
-                </div>
+                <ThemesTab
+                  locale={locale}
+                  themes={themes}
+                  busy={busy}
+                  onActivate={(theme) => void activateTheme(theme)}
+                  onPreview={(theme) => void previewTheme(theme)}
+                  onRemove={(theme) => void removeTheme(theme)}
+                  onAdd={addTheme}
+                  onError={setError}
+                />
               ) : settings && (tab === "appearance" || tab === "themeSettings" || tab === "alerts" || tab === "security" || tab === "data") ? (
                 <SettingsTabs
                   tab={tab}
@@ -1105,7 +1008,7 @@ export function AdminPanel({
         <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>{ui(locale, "取消", "Cancel")}</button><button className="primary-btn" disabled={busy}><Save size={15} />{ui(locale, "保存节点", "Save server")}</button></div>
       </form></div> : null}
 
-      {installCommand ? <div className="submodal-backdrop" role="presentation" onMouseDown={installDialog.onBackdropMouseDown}><section ref={installDialog.dialogRef} className="install-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title" tabIndex={-1}><header><div><span className="eyebrow">{ui(locale, "Agent 部署", "Agent deployment")}</span><h3 id="install-dialog-title">{ui(locale, "下载 Agent", "Download Agent")}</h3></div><div className="segmented install-platform" role="group" aria-label={ui(locale, "Agent 平台", "Agent platform")}><button type="button" className={installPlatform === "linux" ? "active" : ""} aria-pressed={installPlatform === "linux"} onClick={() => setInstallPlatform("linux")}>Linux</button><button type="button" className={installPlatform === "windows" ? "active" : ""} aria-pressed={installPlatform === "windows"} onClick={() => setInstallPlatform("windows")}>Windows</button><button type="button" className={installPlatform === "macos" ? "active" : ""} aria-pressed={installPlatform === "macos"} onClick={() => setInstallPlatform("macos")}>macOS ARM</button><button type="button" className={installPlatform === "freebsd" ? "active" : ""} aria-pressed={installPlatform === "freebsd"} onClick={() => setInstallPlatform("freebsd")}>FreeBSD</button></div></header><div className="install-list"><pre>{installCommand}</pre></div><div className="form-actions"><button className="secondary-btn" type="button" onClick={() => setInstall(null)}>{ui(locale, "关闭", "Close")}</button><button className="primary-btn" type="button" onClick={() => void copyInstallCommand()}><Copy size={15} />{ui(locale, "复制", "Copy")}</button></div></section></div> : null}
+      {install ? <InstallDialog locale={locale} install={install} onClose={() => setInstall(null)} onNotice={setNotice} onError={setError} /> : null}
       {verificationDialog.dialog}
     </div>
   );

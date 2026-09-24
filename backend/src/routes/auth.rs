@@ -25,9 +25,9 @@ pub async fn login(
 ) -> Result<Response, ApiResponse> {
     let client_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
     if let Some(seconds) = state.login_attempts.retry_after(&client_ip) {
-        return Err(ApiResponse::error(
-            StatusCode::TOO_MANY_REQUESTS,
+        return Err(ApiResponse::throttled(
             format!("登录尝试过多，请在 {seconds} 秒后重试"),
+            seconds,
         ));
     }
     if input.username.trim().is_empty()
@@ -178,9 +178,9 @@ pub async fn verify_turnstile(
     // Cloudflare, so rate-limit per IP to stop it being used as an amplifier.
     let client_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
     if let Some(seconds) = state.turnstile_attempts.retry_after(&client_ip) {
-        return Err(ApiResponse::error(
-            StatusCode::TOO_MANY_REQUESTS,
+        return Err(ApiResponse::throttled(
             format!("人机验证尝试过多，请在 {seconds} 秒后重试"),
+            seconds,
         ));
     }
     let settings = crate::db::load_settings(&state.db)
@@ -267,9 +267,9 @@ pub async fn enable_2fa(
     Json(input): Json<Enable2FaRequest>,
 ) -> Result<Response, ApiResponse> {
     if let Some(seconds) = state.sensitive_attempts.retry_after(&user.session_id) {
-        return Err(ApiResponse::error(
-            StatusCode::TOO_MANY_REQUESTS,
+        return Err(ApiResponse::throttled(
             format!("验证码尝试过多，请在 {seconds} 秒后重试"),
+            seconds,
         ));
     }
     let (secret, _) = crate::db::queries::get_totp_secret(&state.db, &user.username)
@@ -325,9 +325,9 @@ pub(crate) async fn require_sensitive_auth(
     let totp_code = totp_code.trim();
     let password_derived = password_derived.trim();
     if let Some(seconds) = state.sensitive_attempts.retry_after(&user.session_id) {
-        return Err(ApiResponse::error(
-            StatusCode::TOO_MANY_REQUESTS,
+        return Err(ApiResponse::throttled(
             format!("验证尝试过多，请在 {seconds} 秒后重试"),
+            seconds,
         ));
     }
 

@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api } from "./api";
+import { api, setApiLocale } from "./api";
 import { AdminPanel } from "./components/AdminPanel";
 import { useFavicon, useStoredAppearance, useSystemDark } from "./hooks/useBrowserAppearance";
 import { ui } from "./locale";
@@ -20,6 +20,7 @@ function AdminApp() {
   async function loadConfig() {
     try {
       const next = await api.bootstrap();
+      setApiLocale(next.config.locale);
       setConfig(next.config);
       setError("");
     } catch (reason) {

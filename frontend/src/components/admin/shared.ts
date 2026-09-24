@@ -8,7 +8,6 @@ export const VERSION = import.meta.env.VITE_NODEFLARE_VERSION || pkg.version;
 export const AGENT_SCRIPT_BASE = "https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent";
 
 export type AgentPlatform = "linux" | "windows" | "macos" | "freebsd";
-export type ThemeSourceMode = "repository" | "upload";
 
 export interface AgentInstallInfo {
   agent_token: string;
