@@ -481,7 +481,8 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
         collect_interval: telemetry::MIN_UPLOAD_INTERVAL,
         network_interface: String::new(),
         agent_mirror: String::new(),
-        auto_update: true,
+        // Wait for the server to explicitly enable automatic updates.
+        auto_update: false,
         latency_tasks: Vec::new(),
     })
 }

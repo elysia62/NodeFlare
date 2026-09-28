@@ -5,15 +5,12 @@ use anyhow::Result;
 use sqlx::Row;
 
 pub async fn list_themes(db: &Database, active_id: &str) -> Result<Vec<ThemeView>> {
-    let rows = sqlx::query(
-        "SELECT id, name, description, url, version FROM themes ORDER BY created_at DESC",
-    )
-    .fetch_all(db.pool())
-    .await?;
+    let rows = sqlx::query("SELECT id, name, url, version FROM themes ORDER BY created_at DESC")
+        .fetch_all(db.pool())
+        .await?;
     let mut themes = vec![ThemeView {
         id: "builtin-nodeflare-glass".to_string(),
         name: "NodeFlare Glass".to_string(),
-        description: "默认主题".to_string(),
         url: String::new(),
         version: crate::config::VERSION.to_string(),
         builtin: true,
@@ -25,7 +22,6 @@ pub async fn list_themes(db: &Database, active_id: &str) -> Result<Vec<ThemeView
             active: id == active_id,
             id,
             name: row.try_get("name")?,
-            description: row.try_get("description")?,
             url: row.try_get("url")?,
             version: row.try_get("version")?,
             builtin: false,
@@ -42,12 +38,11 @@ pub async fn create_theme(
     version: &str,
 ) -> Result<()> {
     sqlx::query(db.sql(
-        "INSERT INTO themes(id, name, description, url, resolved_url, version, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO themes(id, name, url, resolved_url, version, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     ))
     .bind(id)
     .bind(input.name.trim())
-    .bind(input.description.trim())
     .bind(input.url.trim())
     .bind(resolved_url)
     .bind(version)

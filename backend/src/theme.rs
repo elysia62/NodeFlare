@@ -462,10 +462,20 @@ fn package_root(staging: &Path, files: &[PathBuf]) -> Result<PathBuf> {
     Ok(root)
 }
 
-pub fn builtin_settings_schema() -> Value {
+pub fn builtin_settings_schema(task_names: &[String]) -> Value {
     let currencies = [
         "CNY", "USD", "HKD", "EUR", "GBP", "JPY", "RUB", "CHF", "INR", "VND", "THB", "CAD",
     ];
+    let mut task_options = vec![serde_json::json!({
+        "label": "未指定（全部留空时自动匹配）", "value": ""
+    })];
+    let mut seen = HashSet::new();
+    for name in task_names {
+        let name = name.trim();
+        if !name.is_empty() && seen.insert(name) {
+            task_options.push(serde_json::json!({"label": name, "value": name}));
+        }
+    }
     serde_json::json!({
         "schema": 1,
         "source": "builtin",
@@ -480,9 +490,9 @@ pub fn builtin_settings_schema() -> Value {
             {"key": "enableBlur", "label": "启用毛玻璃效果", "type": "toggle", "default": true},
             {"key": "showOnline", "label": "总览显示在线节点", "type": "toggle", "default": true},
             {"key": "showCarrierLatency", "label": "节点卡片分线路显示延迟", "type": "toggle", "default": false},
-            {"key": "telecomLatencyTask", "label": "电信线路任务名称", "type": "text", "default": "", "placeholder": "留空时按任务名称自动匹配"},
-            {"key": "unicomLatencyTask", "label": "联通线路任务名称", "type": "text", "default": "", "placeholder": "留空时按任务名称自动匹配"},
-            {"key": "mobileLatencyTask", "label": "移动线路任务名称", "type": "text", "default": "", "placeholder": "留空时按任务名称自动匹配"}
+            {"key": "telecomLatencyTask", "label": "电信线路任务", "type": "select", "default": "", "options": task_options},
+            {"key": "unicomLatencyTask", "label": "联通线路任务", "type": "select", "default": "", "options": task_options},
+            {"key": "mobileLatencyTask", "label": "移动线路任务", "type": "select", "default": "", "options": task_options}
         ]
     })
 }

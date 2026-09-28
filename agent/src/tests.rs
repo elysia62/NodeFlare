@@ -24,6 +24,28 @@ use super::connection_counts_from_netstat;
 use super::disk_device;
 
 #[test]
+fn auto_updates_require_server_opt_in() {
+    let options =
+        CliOptions::try_parse_from(["agent", "-t", "test-token", "-e", "http://127.0.0.1:2206"])
+            .unwrap();
+    let mut config = super::runtime_config(&options).unwrap();
+    assert!(!config.auto_update);
+
+    for enabled in [true, false] {
+        let remote = super::RemoteConfig {
+            report_interval: 60,
+            collect_interval: 3,
+            network_interface: String::new(),
+            agent_mirror: String::new(),
+            auto_update: enabled,
+            latency_tasks: Vec::new(),
+        };
+        super::apply_remote(&mut config, &remote);
+        assert_eq!(config.auto_update, enabled);
+    }
+}
+
+#[test]
 fn parses_family_matched_public_ips() {
     let v4: std::net::IpAddr = "203.0.113.7".parse().unwrap();
     let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();

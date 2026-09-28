@@ -61,7 +61,6 @@ export interface ThemeSettingsSchema {
 export interface Theme {
   id: string;
   name: string;
-  description: string;
   url: string;
   version: string;
   builtin: boolean;

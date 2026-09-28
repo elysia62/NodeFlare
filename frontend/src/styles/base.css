@@ -88,7 +88,7 @@ html[data-blur="off"] .glass-panel { background: color-mix(in srgb, var(--card-s
 .icon-btn { display: inline-flex; width: 36px; height: 36px; flex: 0 0 auto; align-items: center; justify-content: center; border-radius: 8px; color: var(--muted-foreground); }
 .icon-btn:hover { color: var(--foreground); background: color-mix(in srgb, var(--foreground) 7%, transparent); }
 .icon-btn.danger:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, transparent); }
-.node-card:focus-visible, .icon-btn:focus-visible, .drag-handle:focus-visible, .primary-btn:focus-visible, .secondary-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.node-card:focus-visible, .icon-btn:focus-visible, .primary-btn:focus-visible, .secondary-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 .primary-btn, .secondary-btn { display: inline-flex; min-height: 36px; align-items: center; justify-content: center; gap: 7px; border-radius: 7px; padding: 7px 13px; font-size: 12px; font-weight: 650; }
 .primary-btn { color: var(--primary-foreground); background: var(--primary); }

@@ -13,7 +13,9 @@ export function ThemeOption({ field, value, onChange }: { field: ThemeSettingFie
     return <label className="theme-option"><span>{field.label}</span><textarea rows={3} maxLength={500} placeholder={field.placeholder} value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value)} /></label>;
   }
   if (field.type === "select") {
-    return <label className="theme-option"><span>{field.label}</span><select value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value)}>{field.options?.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>;
+    const selected = typeof value === "string" ? value : "";
+    const options = field.options ?? [];
+    return <label className="theme-option"><span>{field.label}</span><select value={selected} onChange={(event) => onChange(event.target.value)}>{!options.some((option) => option.value === selected) ? <option value={selected}>{selected || "—"}</option> : null}{options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>;
   }
   if (field.type === "number") {
     return <label className="theme-option"><span>{field.label}</span><input type="number" min={field.min} max={field.max} step={field.step} value={typeof value === "number" ? value : ""} onChange={(event) => onChange(Number(event.target.value))} /></label>;

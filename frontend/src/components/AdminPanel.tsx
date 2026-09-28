@@ -7,7 +7,7 @@ import {
   Save,
   Sun,
 } from "lucide-react";
-import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError } from "../api";
 import { ui } from "../locale";
 import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } from "../adminRoutes";
@@ -63,7 +63,6 @@ export function AdminPanel({
   const [tab, setTab] = useState<AdminTab>(() => adminTabFromPath(window.location.pathname));
   const [servers, setServers] = useState<AdminServer[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [draggingId, setDraggingId] = useState("");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [database, setDatabase] = useState<DatabaseStats | null>(null);
   const [databaseMigrationUrl, setDatabaseMigrationUrl] = useState("");
@@ -327,29 +326,6 @@ export function AdminPanel({
     catch (reason) { setServers(servers); setError(reason instanceof Error ? reason.message : ui(locale, "排序失败", "Failed to reorder")); }
   }
 
-  function startDrag(event: DragEvent<HTMLButtonElement>, id: string) {
-    setDraggingId(id);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", id);
-  }
-
-  async function dropServer(event: DragEvent<HTMLDivElement>, targetId: string) {
-    event.preventDefault();
-    const sourceId = draggingId || event.dataTransfer.getData("text/plain");
-    setDraggingId("");
-    if (!sourceId || sourceId === targetId) return;
-    const sourceIndex = servers.findIndex((server) => server.id === sourceId);
-    const targetIndex = servers.findIndex((server) => server.id === targetId);
-    if (sourceIndex < 0 || targetIndex < 0) return;
-    const previous = [...servers];
-    const next = [...servers];
-    const [moved] = next.splice(sourceIndex, 1);
-    next.splice(targetIndex, 0, moved);
-    setServers(next);
-    try { await api.reorderServers(next.map((server) => server.id)); onChanged(); }
-    catch (reason) { setServers(previous); setError(reason instanceof Error ? reason.message : ui(locale, "排序失败", "Failed to reorder")); }
-  }
-
   async function saveSite(event: FormEvent) {
     event.preventDefault();
     if (!settings) return;
@@ -514,15 +490,15 @@ export function AdminPanel({
   }
 
   async function addTheme(
-    input: { name: string; description: string; url: string },
+    input: { name: string; url: string },
     file: File | null,
   ): Promise<boolean> {
     setBusy(true); setError(""); setNotice("");
     try {
       if (file) {
-        await api.uploadTheme({ name: input.name, description: input.description }, file);
+        await api.uploadTheme({ name: input.name }, file);
       } else {
-        await api.addTheme({ name: input.name, description: input.description, url: input.url });
+        await api.addTheme({ name: input.name, url: input.url });
       }
       await load();
       setNotice(file ? ui(locale, "主题 ZIP 已安装", "Theme ZIP installed") : ui(locale, "最新 Release 主题已安装", "Latest release theme installed"));
@@ -686,7 +662,7 @@ export function AdminPanel({
   const remoteVisibleServers = useMemo(() => {
     const keyword = remoteQuery.trim().toLowerCase();
     if (!keyword) return servers;
-    return servers.filter((server) => `${server.name} ${server.region} ${server.group_name} ${server.last_ip}`.toLowerCase().includes(keyword));
+    return servers.filter((server) => `${server.name} ${server.ip_v4} ${server.ip_v6} ${server.last_ip}`.toLowerCase().includes(keyword));
   }, [remoteQuery, servers]);
   const remoteServerById = useMemo(() => new Map(servers.map((server) => [server.id, server])), [servers]);
   const remoteAllSelected = servers.length > 0 && remoteSelectedIds.length === servers.length;
@@ -895,16 +871,12 @@ export function AdminPanel({
                   busy={busy}
                   selectedIds={selectedIds}
                   allSelected={allSelected}
-                  draggingId={draggingId}
                   onCopyIp={(ip) => void copyServerIp(ip)}
                   onAdd={() => openEditor()}
                   onToggleSelected={toggleSelected}
                   onToggleAll={() => setSelectedIds(allSelected ? [] : servers.map((server) => server.id))}
                   onRemoveSelected={() => void removeSelected()}
                   onMove={(index, offset) => void move(index, offset)}
-                  onStartDrag={startDrag}
-                  onEndDrag={() => setDraggingId("")}
-                  onDrop={(event, id) => void dropServer(event, id)}
                   onInstallCommand={(server) => void showInstallCommand(server)}
                   onEdit={(server) => openEditor(server)}
                   onRemove={(server) => void remove(server)}
@@ -1013,4 +985,3 @@ export function AdminPanel({
     </div>
   );
 }
-

@@ -25,7 +25,7 @@ const MESSAGES: Record<string, string> = {
   "任务不存在": "Task not found",
   "主题 ZIP 不能超过 32 MiB": "The theme ZIP cannot exceed 32 MiB",
   "主题不存在": "Theme not found",
-  "主题名称或说明无效": "Invalid theme name or description",
+  "主题名称无效": "Invalid theme name",
   "主题设置格式无效": "Invalid theme settings",
   "使用 --database 启动时无法自动切换配置":
     "The configuration cannot be switched automatically when started with --database",

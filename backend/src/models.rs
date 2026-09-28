@@ -337,7 +337,6 @@ pub struct TelegramSettingsView {
 #[serde(deny_unknown_fields)]
 pub struct ThemeInput {
     pub name: String,
-    pub description: String,
     pub url: String,
 }
 
@@ -346,8 +345,6 @@ pub struct ThemeInput {
 pub struct ThemeUploadInput {
     pub name: String,
     #[serde(default)]
-    pub description: String,
-    #[serde(default)]
     pub filename: String,
 }
 
@@ -355,7 +352,6 @@ pub struct ThemeUploadInput {
 pub struct ThemeView {
     pub id: String,
     pub name: String,
-    pub description: String,
     pub url: String,
     pub version: String,
     pub builtin: bool,

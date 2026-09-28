@@ -11,7 +11,7 @@ const MAX_THEME_BYTES = 32 * 1024 * 1024;
  * Theme list plus the install form.
  *
  * The form owns its own draft state so the parent panel does not have to reset
- * five fields after every install; the parent supplies the actions and reports
+ * draft fields after every install; the parent supplies the actions and reports
  * failures back through `onError`.
  */
 export function ThemesTab({
@@ -30,11 +30,10 @@ export function ThemesTab({
   onActivate: (theme: Theme) => void;
   onPreview: (theme: Theme) => void;
   onRemove: (theme: Theme) => void;
-  onAdd: (input: { name: string; description: string; url: string }, file: File | null) => Promise<boolean>;
+  onAdd: (input: { name: string; url: string }, file: File | null) => Promise<boolean>;
   onError: (message: string) => void;
 }) {
   const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
   const [url, setUrl] = useState("");
   const [sourceMode, setSourceMode] = useState<ThemeSourceMode>("repository");
   const [file, setFile] = useState<File | null>(null);
@@ -51,11 +50,11 @@ export function ThemesTab({
       return;
     }
     const installed = await onAdd(
-      { name: name.trim(), description: description.trim(), url: url.trim() },
+      { name: name.trim(), url: url.trim() },
       sourceMode === "upload" ? file : null,
     );
     if (!installed) return;
-    setName(""); setDescription(""); setUrl(""); setFile(null);
+    setName(""); setUrl(""); setFile(null);
     if (fileInput.current) fileInput.current.value = "";
   }
 
@@ -69,7 +68,6 @@ export function ThemesTab({
             return <article className={`theme-row ${theme.active ? "active" : ""}`} key={theme.id}>
               <div className="theme-row-main">
                 <div className="theme-row-title"><strong>{theme.name}</strong><span className={`theme-badge ${theme.builtin ? "builtin" : uploaded ? "upload" : "remote"}`}>{theme.builtin ? ui(locale, "默认主题", "Built-in") : uploaded ? ui(locale, "上传安装", "Uploaded") : "GitHub Release"}</span>{theme.version ? <span className="theme-badge version">v{theme.version}</span> : null}</div>
-                {!theme.builtin ? <p title={theme.description || undefined}>{theme.description || ui(locale, "暂无主题说明", "No description")}</p> : null}
                 {!theme.builtin && uploaded ? <span className="theme-upload-source"><Upload size={13} /><span>{theme.url.slice("upload:".length)}</span></span> : null}
                 {!theme.builtin && !uploaded ? <a href={theme.url} target="_blank" rel="noreferrer"><span>{theme.url}</span><ExternalLink size={13} /></a> : null}
               </div>
@@ -88,10 +86,8 @@ export function ThemesTab({
           <button type="button" className={sourceMode === "repository" ? "active" : ""} aria-pressed={sourceMode === "repository"} onClick={() => setSourceMode("repository")}>{ui(locale, "GitHub 仓库", "GitHub repository")}</button>
           <button type="button" className={sourceMode === "upload" ? "active" : ""} aria-pressed={sourceMode === "upload"} onClick={() => setSourceMode("upload")}>{ui(locale, "上传", "Upload")}</button>
         </div>
-        <p className="settings-hint">{sourceMode === "repository" ? ui(locale, "填写仓库主页地址，NodeFlare 会下载 latest Release 中的第一个 ZIP 文件。", "Enter the repository URL; NodeFlare downloads the first ZIP asset of the latest release.") : ui(locale, "ZIP 根目录需包含 index.html，也支持外层只有一个目录的打包方式；最大 32 MiB。", "The ZIP must contain index.html at its root (a single wrapping directory is fine); max 32 MiB.")}</p>
-        <div className="form-grid"><label><span>{ui(locale, "主题名称", "Theme name")}</span><input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder={ui(locale, "例如：Ocean", "e.g. Ocean")} /></label>{sourceMode === "repository" ? <label><span>{ui(locale, "GitHub 仓库", "GitHub repository")}</span><input required type="url" maxLength={2048} value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://github.com/user/theme" /></label> : <label className="theme-file-field"><span>{ui(locale, "文件", "File")}</span><input ref={fileInput} required type="file" accept=".zip,application/zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><small>{file ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MiB` : ui(locale, "请选择 .zip 文件", "Choose a .zip file")}</small></label>}</div>
-        <label><span>{ui(locale, "主题说明（可选）", "Theme description (optional)")}</span><textarea rows={2} maxLength={300} value={description} onChange={(event) => setDescription(event.target.value)} placeholder={ui(locale, "简短描述主题风格和来源", "Briefly describe the style and source")} /></label>
-        <div className="form-actions"><button className="primary-btn" disabled={busy || (sourceMode === "upload" && !file)}>{sourceMode === "upload" ? <Upload size={15} /> : <Download size={15} />}{busy ? ui(locale, "安装中", "Installing") : ui(locale, "安装主题", "Install theme")}</button></div>
+        <div className="form-grid"><label><span>{ui(locale, "主题名称", "Theme name")}</span><input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder={ui(locale, "例如：Ocean", "e.g. Ocean")} /></label>{sourceMode === "repository" ? <label><span>{ui(locale, "GitHub 仓库", "GitHub repository")}</span><input required type="url" maxLength={2048} value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://github.com/user/theme" /></label> : <label className="theme-file-field"><span>{ui(locale, "文件", "File")}</span><input ref={fileInput} required type="file" accept=".zip,application/zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />{file ? <small>{`${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MiB`}</small> : null}</label>}</div>
+        <div className="form-actions"><button className="primary-btn" disabled={busy || !name.trim() || (sourceMode === "repository" ? !url.trim() : !file)}>{sourceMode === "upload" ? <Upload size={15} /> : <Download size={15} />}{busy ? ui(locale, "安装中", "Installing") : ui(locale, "安装主题", "Install theme")}</button></div>
       </form>
     </div>
   );

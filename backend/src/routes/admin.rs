@@ -405,7 +405,7 @@ pub async fn themes_post(
     Json(input): Json<ThemeInput>,
 ) -> Result<Response, ApiResponse> {
     let _themes = state.theme_operations.lock().await;
-    validate_theme_metadata(&input.name, &input.description)?;
+    validate_theme_name(&input.name)?;
     let source_url = crate::theme::normalize_repository_url(&input.url)
         .map_err(|error| ApiResponse::bad_request(error.to_string()))?;
     let digest = Sha256::digest(source_url.as_bytes());
@@ -438,7 +438,7 @@ pub async fn themes_upload(
     request: Request,
 ) -> Result<Response, ApiResponse> {
     let _themes = state.theme_operations.lock().await;
-    validate_theme_metadata(&input.name, &input.description)?;
+    validate_theme_name(&input.name)?;
     let filename = validate_theme_filename(&input.filename)?;
     if request
         .headers()
@@ -472,7 +472,6 @@ pub async fn themes_upload(
         id,
         ThemeInput {
             name: input.name,
-            description: input.description,
             url: format!("upload:{filename}"),
         },
         archive,
@@ -556,7 +555,13 @@ pub async fn theme_settings(State(state): State<Arc<AppState>>) -> Result<Respon
         .await
         .map_err(ApiResponse::internal)?;
     if settings.active_theme_id == crate::theme::BUILTIN_THEME_ID {
-        return Ok(Json(crate::theme::builtin_settings_schema()).into_response());
+        let task_names = crate::db::queries::list_latency_tasks(&state.db)
+            .await
+            .map_err(ApiResponse::internal)?
+            .into_iter()
+            .map(|task| task.name)
+            .collect::<Vec<_>>();
+        return Ok(Json(crate::theme::builtin_settings_schema(&task_names)).into_response());
     }
     let url = crate::db::queries::theme_resolved_url(&state.db, &settings.active_theme_id)
         .await
@@ -603,10 +608,9 @@ async fn create_installed_theme(
     Ok((StatusCode::CREATED, Json(serde_json::json!({"id": id}))).into_response())
 }
 
-fn validate_theme_metadata(name: &str, description: &str) -> Result<(), ApiResponse> {
-    if !(1..=80).contains(&name.trim().chars().count()) || description.trim().chars().count() > 300
-    {
-        return Err(ApiResponse::bad_request("主题名称或说明无效"));
+fn validate_theme_name(name: &str) -> Result<(), ApiResponse> {
+    if !(1..=80).contains(&name.trim().chars().count()) {
+        return Err(ApiResponse::bad_request("主题名称无效"));
     }
     Ok(())
 }

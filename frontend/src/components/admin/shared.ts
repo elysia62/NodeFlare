@@ -75,7 +75,7 @@ export const emptyServer: ServerInput = {
   tx_correction: 0,
   agent_mirror: "",
   offline_notify_disabled: false,
-  auto_update: true,
+  auto_update: false,
 };
 
 export function toInput(server: AdminServer): ServerInput {

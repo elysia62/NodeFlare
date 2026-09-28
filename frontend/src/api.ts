@@ -119,9 +119,9 @@ export const api = {
   testTelegram: () => request<void>("/api/admin/telegram/test", { method: "POST" }, true),
   themeSettings: () => request<ThemeSettingsSchema>("/api/admin/theme-settings", {}, true),
   themes: () => request<{ themes: Theme[] }>("/api/admin/themes", {}, true),
-  addTheme: (input: Pick<Theme, "name" | "description" | "url">) =>
+  addTheme: (input: Pick<Theme, "name" | "url">) =>
     request<{ id: string }>("/api/admin/themes", { method: "POST", body: JSON.stringify(input) }, true),
-  uploadTheme: (input: Pick<Theme, "name" | "description">, file: File) => {
+  uploadTheme: (input: Pick<Theme, "name">, file: File) => {
     const query = new URLSearchParams({ ...input, filename: file.name });
     return request<{ id: string }>(`/api/admin/themes/upload?${query}`, { method: "POST", body: file }, true);
   },

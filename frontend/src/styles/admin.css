@@ -115,14 +115,16 @@
 .section-head span { color: var(--admin-muted); font-size: 12px; }
 .row-actions { display: flex; align-items: center; gap: 3px; }
 .section-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
-.batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; justify-content: space-between; min-height: 44px; border-block: 1px solid var(--admin-border); color: var(--admin-muted); font-size: 13px; }
 .select-all { display: inline-flex; align-items: center; flex-direction: row; gap: 7px; color: var(--admin-text); font-size: 13px; }
 
-.server-list { border-top: 1px solid var(--admin-border); }
-.server-row { display: grid; min-width: 0; min-height: 62px; align-items: center; gap: 10px; border-bottom: 1px solid var(--admin-border); grid-template-columns: 20px 20px minmax(0, 1fr) auto; transition: opacity .15s ease, background-color .15s ease; }
-.server-row.dragging { opacity: .45; background: color-mix(in srgb, var(--primary) 8%, transparent); }
-.drag-handle { display: inline-flex; width: 18px; height: 32px; align-items: center; justify-content: center; padding: 0; color: var(--admin-muted); cursor: grab; touch-action: none; }
-.drag-handle:active { cursor: grabbing; }
+.server-list { overflow-x: auto; border-top: 1px solid var(--admin-border); }
+.server-list-header, .server-row { display: grid; min-width: 820px; align-items: center; gap: 10px; border-bottom: 1px solid var(--admin-border); grid-template-columns: 20px minmax(140px, .7fr) minmax(200px, 1.6fr) 105px 120px 175px; }
+.server-list-header { min-height: 44px; color: var(--admin-muted); font-size: 12px; }
+.server-list-header .select-all { grid-column: 1 / 3; }
+.server-batch-actions { display: flex; justify-content: flex-end; }
+.server-row { min-height: 62px; padding-block: 8px; transition: opacity .15s ease, background-color .15s ease; }
+.server-expiry, .server-agent-version { overflow: hidden; color: var(--admin-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.server-expiry { font-variant-numeric: tabular-nums; }
 .server-name { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .server-row strong { overflow: hidden; color: var(--admin-text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .server-row .row-actions { margin-left: 3px; }
@@ -212,7 +214,6 @@
 .theme-badge.builtin { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 30%, transparent); background: color-mix(in srgb, var(--primary) 8%, transparent); }
 .theme-badge.remote { color: var(--info); border-color: color-mix(in srgb, var(--info) 30%, transparent); background: color-mix(in srgb, var(--info) 8%, transparent); }
 .theme-badge.upload { color: var(--admin-success); border-color: color-mix(in srgb, var(--admin-success) 30%, transparent); background: color-mix(in srgb, var(--admin-success) 8%, transparent); }
-.theme-row-main p { margin: 0; overflow: hidden; color: var(--admin-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .theme-row-main a { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; overflow: hidden; color: var(--admin-accent); font-size: 12px; text-decoration: none; }
 .theme-row-main a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .theme-upload-source { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; overflow: hidden; color: var(--admin-muted); font-size: 12px; }
@@ -337,7 +338,7 @@
   .admin-shell { min-height: 100dvh; }
   .login-form { width: calc(100% - 26px); padding: 24px 20px; }
   .admin-section, .settings-form { padding: 14px; }
-  .server-row { padding-block: 6px; grid-template-columns: 18px 20px minmax(0, 1fr) auto; }
+  .server-row { padding-block: 6px; }
   .form-grid, .form-grid.three, .settings-toggles, .theme-option-grid { grid-template-columns: 1fr; }
   /* 与 .settings-toggles 同元素，撤销上一行的单列 */
   .editor-toggles { grid-template-columns: 1fr 1fr; }
@@ -356,14 +357,12 @@
 .server-name-main { display: flex; min-width: 0; align-items: center; gap: 7px; }
 .server-name-main .region-flag { flex: 0 0 auto; font-size: 16px; line-height: 1; }
 .server-name-main strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.server-name-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 3px 7px; color: var(--admin-muted); font-size: 12px; }
-.server-ip-entry { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
+.server-ip-addresses { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 4px; color: var(--admin-muted); font-size: 12px; }
+.server-ip-entry { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 5px; }
 .ip-badge { flex: 0 0 auto; padding: 0 6px; border: 1px solid var(--admin-border); border-radius: 999px; font-size: 10px; font-weight: 600; line-height: 1.5; letter-spacing: .03em; }
 .ip-badge.v6 { color: var(--admin-accent); border-color: color-mix(in srgb, var(--admin-accent) 40%, transparent); }
 .ip-value { overflow: hidden; min-width: 0; max-width: 30ch; padding: 0; border: 0; background: none; color: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: copy; }
 .ip-value:hover { color: var(--admin-text); text-decoration: underline; text-underline-offset: 3px; }
-.meta-dot { flex: 0 0 auto; opacity: .55; }
-.meta-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .about-page { display: flex; flex-direction: column; gap: 20px; }
 .about-brand { display: flex; align-items: center; gap: 14px; }
 .about-brand img { flex: 0 0 auto; }
@@ -391,6 +390,9 @@
 .remote-command-field textarea { min-height: 118px; resize: vertical; font: 13px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
 .remote-command-field small { color: var(--admin-muted); font-size: 11px; }
 .remote-server-picker .server-picker-list { max-height: 280px; }
+.remote-server-picker .remote-server-identity { flex-direction: row; align-items: center; gap: 12px; }
+.remote-server-identity strong { min-width: 0; max-width: 50%; }
+.remote-server-identity small { min-width: 0; overflow: hidden; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .remote-confirm-row { display: flex; justify-content: flex-end; }
 .remote-submit { min-width: 160px; min-height: 40px; }
 .remote-results { margin-top: 22px; border-top: 1px solid var(--admin-border); padding-top: 20px; }

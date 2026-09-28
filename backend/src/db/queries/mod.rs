@@ -92,6 +92,37 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     #[tokio::test]
+    async fn themes_can_be_created_without_descriptions_and_hide_legacy_descriptions() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let input = serde_json::from_value::<crate::models::ThemeInput>(serde_json::json!({
+            "name": "Ocean", "url": "https://github.com/example/ocean"
+        }))
+        .unwrap();
+        create_theme(&db, "ocean", &input, "local://ocean", "1.0.0")
+            .await
+            .unwrap();
+        // Existing databases and backups can still contain the retired column.
+        sqlx::query("UPDATE themes SET description='Legacy description' WHERE id='ocean'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let themes = list_themes(&db, "ocean").await.unwrap();
+        assert_eq!(themes.len(), 2);
+        let installed = themes.iter().find(|theme| theme.id == "ocean").unwrap();
+        assert_eq!(installed.name, "Ocean");
+        assert!(installed.active);
+        for theme in themes {
+            assert!(
+                serde_json::to_value(theme)
+                    .unwrap()
+                    .get("description")
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn telegram_settings_mask_and_preserve_saved_credentials() {
         let db = crate::db::connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();
