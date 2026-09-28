@@ -453,6 +453,11 @@ fn spawn_maintenance(state: Arc<AppState>) {
                 {
                     tracing::error!(%error, "database cleanup failed");
                 }
+                if let Err(error) =
+                    db::queries::compact_history(&state.db, settings.history_retention_days).await
+                {
+                    tracing::error!(%error, "history compaction failed");
+                }
                 if maintenance_runs.is_multiple_of(6 * 60)
                     && let Err(error) = state.db.optimize().await
                 {

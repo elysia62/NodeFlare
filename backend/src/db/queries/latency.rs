@@ -26,12 +26,13 @@ pub(crate) async fn latest_latency_map(
     }
     let rows = sqlx::query(
         "SELECT a.server_id, a.assigned_at, t.id AS task_id, t.name, t.task_type, t.target, t.port, \
-         lr.timestamp, lr.latency_ms, lr.packet_loss FROM latency_task_servers a \
+         COALESCE(lr.last_timestamp,lr.timestamp) AS timestamp, lr.latency_ms, lr.packet_loss FROM latency_task_servers a \
          JOIN latency_tasks t ON t.id=a.task_id LEFT JOIN latency_results lr \
          ON lr.task_id=a.task_id AND lr.server_id=a.server_id AND lr.timestamp=( \
            SELECT MAX(newer.timestamp) FROM latency_results newer \
            WHERE newer.task_id=a.task_id AND newer.server_id=a.server_id \
-             AND newer.timestamp>=a.assigned_at) \
+             AND newer.timestamp>=a.assigned_at-3600 \
+             AND COALESCE(newer.last_timestamp,newer.timestamp)>=a.assigned_at) \
          ORDER BY t.sort_order, t.created_at",
     )
     .fetch_all(db.pool())
@@ -298,23 +299,26 @@ pub async fn latency_history(
     let rows = sqlx::query(db.sql(
         "SELECT task_id, server_id, name, task_type, target, port, \
          bucket_timestamp AS timestamp, \
-         CASE WHEN SUM(CASE WHEN latency_ms>=0 THEN 1 ELSE 0 END)>0 \
-           THEN SUM(CASE WHEN latency_ms>=0 THEN latency_ms ELSE 0 END) / \
-                SUM(CASE WHEN latency_ms>=0 THEN CAST(1 AS DOUBLE PRECISION) \
-                         ELSE CAST(0 AS DOUBLE PRECISION) END) \
+         CASE WHEN SUM(valid_count)>0 \
+           THEN SUM(CASE WHEN valid_count>0 THEN latency_ms*valid_count ELSE 0 END) / \
+                SUM(valid_count) \
            ELSE CAST(-1 AS DOUBLE PRECISION) END AS latency_ms, \
-         AVG(packet_loss) AS packet_loss FROM ( \
+         SUM(packet_loss*sample_count)/SUM(sample_count) AS packet_loss FROM ( \
            SELECT r.task_id, r.server_id, t.name, t.task_type, t.target, t.port, \
-                  (r.timestamp / ?) * ? AS bucket_timestamp, r.latency_ms, r.packet_loss \
+                  (r.timestamp / ?) * ? AS bucket_timestamp, r.latency_ms, r.packet_loss, r.sample_count, \
+                  COALESCE(r.latency_sample_count,CASE WHEN r.latency_ms>=0 THEN r.sample_count ELSE 0 END) AS valid_count \
            FROM latency_results r JOIN latency_tasks t ON t.id=r.task_id \
            JOIN latency_task_servers a ON a.task_id=r.task_id AND a.server_id=r.server_id \
-           WHERE r.server_id=? AND r.timestamp>=? AND r.timestamp>=a.assigned_at \
+           WHERE r.server_id=? AND r.timestamp>=? AND COALESCE(r.last_timestamp,r.timestamp)>=? \
+             AND r.timestamp>=a.assigned_at-3600 \
+             AND COALESCE(r.last_timestamp,r.timestamp)>=a.assigned_at \
          ) samples GROUP BY task_id, server_id, name, task_type, target, port, bucket_timestamp \
          ORDER BY bucket_timestamp, name LIMIT 4000",
     ))
     .bind(bucket)
     .bind(bucket)
     .bind(server_id)
+    .bind(since.saturating_sub(3600))
     .bind(since)
     .fetch_all(db.pool())
     .await?;

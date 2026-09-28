@@ -114,7 +114,7 @@ function formatNetworkAxis(value: number): string {
 }
 
 function latencyBucketSeconds(hours: number, taskCount: number): number {
-  const boundedHours = Math.max(1, Math.min(24 * 30, Math.trunc(hours)));
+  const boundedHours = Math.max(1, Math.min(24 * 365, Math.trunc(hours)));
   const boundedTasks = Math.max(1, Math.trunc(taskCount));
   const base = boundedHours === 1 ? 60
     : boundedHours <= 4 ? 120
@@ -298,6 +298,8 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
     { value: 24, label: ui(locale, "1 天", "1 day") },
     { value: 168, label: ui(locale, "7 天", "7 days") },
     { value: 720, label: ui(locale, "30 天", "30 days") },
+    { value: 2160, label: ui(locale, "90 天", "90 days") },
+    { value: 8760, label: ui(locale, "1 年", "1 year") },
   ].filter((range) => range.value <= Math.max(24, retentionDays * 24));
   const ranges = chartType === "load" ? loadRanges : loadRanges.filter((range) => range.value > 0);
   const hours = chartType === "load" ? loadHours : latencyHours;

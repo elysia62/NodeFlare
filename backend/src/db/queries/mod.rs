@@ -38,6 +38,7 @@ mod ingest;
 mod latency;
 mod maintenance;
 mod remote;
+mod rollup;
 mod servers;
 mod telegram;
 mod themes;
@@ -64,6 +65,7 @@ pub use maintenance::cleanup_database;
 pub use remote::{
     create_remote_task, mark_remote_task_sent, remote_task, update_remote_task_result,
 };
+pub use rollup::compact_history;
 pub use servers::{
     agent_config, agent_identity, agent_install_token, all_server_ids, create_server,
     delete_server, delete_servers, list_servers, list_servers_with_live, public_server_exists,
@@ -507,6 +509,29 @@ mod tests {
             net_rx_total: timestamp * 10,
             net_tx_total: timestamp * 20,
             ..AgentReport::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn minute_history_is_independent_of_the_persistence_interval() {
+        for interval in [15, 300] {
+            let (db, mut identity) = test_server().await;
+            identity.report_interval = interval;
+            let start = now().div_euclid(60) * 60 - 180;
+            let reports = (0..120)
+                .map(|offset| sample(start + offset, 10.0))
+                .collect::<Vec<_>>();
+            let saved = save_agent_batch(&db, &identity, "minute-history", &reports, "127.0.0.1")
+                .await
+                .unwrap();
+            assert_eq!(saved.next_persist_after_ms, interval as u64 * 1000);
+            let counts: (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*),CAST(SUM(sample_count) AS BIGINT) FROM metric_history",
+            )
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(counts, (2, 120));
         }
     }
 

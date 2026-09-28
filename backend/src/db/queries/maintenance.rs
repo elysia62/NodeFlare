@@ -24,7 +24,7 @@ pub(crate) async fn cleanup_database_with_budget(
            last_timestamp<? \
            ORDER BY timestamp LIMIT ?)",
         "DELETE FROM latency_results WHERE (task_id, server_id, timestamp) IN ( \
-           SELECT task_id, server_id, timestamp FROM latency_results WHERE timestamp<? \
+           SELECT task_id, server_id, timestamp FROM latency_results WHERE COALESCE(last_timestamp,timestamp)<? \
            ORDER BY timestamp LIMIT ?)",
         "DELETE FROM remote_tasks WHERE status IN ('success','failed') AND id IN ( \
            SELECT id FROM remote_tasks WHERE status IN ('success','failed') AND completed_at<? \

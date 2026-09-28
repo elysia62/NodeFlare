@@ -772,9 +772,20 @@ async fn restore_table<R: Read + Seek + Send>(
         bail!("{table} 备份表头无效");
     }
     let header: BackupTableHeader = serde_json::from_str(line.trim_end())?;
-    if header.table != table || header.columns != columns {
+    // Backups from the initial schema predate latency rollup weights. Those exact legacy
+    // columns can be restored with the migration's raw-sample defaults.
+    let legacy_latency = table == "latency_results"
+        && columns.len() == 8
+        && header.columns == columns[..5]
+        && columns[5..].iter().map(|column| column.name.as_str()).eq([
+            "sample_count",
+            "latency_sample_count",
+            "last_timestamp",
+        ]);
+    if header.table != table || (header.columns != columns && !legacy_latency) {
         bail!("{table} 备份结构无效");
     }
+    let columns = header.columns.as_slice();
     let mut restored = 0_usize;
     let mut batch = Vec::with_capacity(INSERT_BATCH_ROWS);
     let mut batch_bytes = 0_usize;
@@ -907,6 +918,43 @@ pub async fn copy_database(source: &Database, target: &Database) -> Result<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn restores_latency_history_from_before_tiered_storage() {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        source.migrate().await.unwrap();
+        target.migrate().await.unwrap();
+        for column in ["last_timestamp", "latency_sample_count", "sample_count"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE latency_results DROP COLUMN {column}"
+            )))
+            .execute(source.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO settings(key,value) VALUES ('admin_username','admin'),('admin_password_hash','hash'),('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','hash',1,1)")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO latency_tasks(id,name,task_type,target,interval_seconds,created_at,updated_at) VALUES ('task','Task','icmp','example.com',60,1,1)")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO latency_task_servers(task_id,server_id,assigned_at) VALUES ('task','node',1)")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO latency_results(task_id,server_id,timestamp,latency_ms,packet_loss) VALUES ('task','node',10,15.0,0.0),('task','node',20,-1.0,100.0)")
+            .execute(source.pool()).await.unwrap();
+        copy_database(&source, &target).await.unwrap();
+        let rows = sqlx::query("SELECT sample_count,latency_sample_count,last_timestamp,latency_ms FROM latency_results ORDER BY timestamp")
+            .fetch_all(target.pool()).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.get::<i64, _>("sample_count"), 1);
+            assert_eq!(row.get::<Option<i64>, _>("latency_sample_count"), None);
+            assert_eq!(row.get::<Option<i64>, _>("last_timestamp"), None);
+        }
+        assert_eq!(rows[0].get::<f64, _>("latency_ms"), 15.0);
+        assert_eq!(rows[1].get::<f64, _>("latency_ms"), -1.0);
+    }
 
     #[test]
     fn exported_archives_must_fit_both_restore_limits() {
@@ -1269,7 +1317,7 @@ mod tests {
                 .fetch_all(target.pool())
                 .await
                 .unwrap(),
-            vec![1]
+            vec![1, 2]
         );
         assert!(
             crate::db::queries::agent_identity(&source, "install-token")

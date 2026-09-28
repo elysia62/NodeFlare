@@ -32,6 +32,18 @@ NodeFlare is a lightweight, self-hosted server monitoring panel: view server sta
 - **Secure by default**: TOTP two-factor authentication, Cloudflare Turnstile, login rate limiting, and session management; the server listens on `127.0.0.1` only, and the agent connects outbound with no inbound ports
 - **Data ownership**: SQLite and PostgreSQL with online migration between them, one-click backup and restore, and automatic history cleanup by retention days
 
+## History storage
+
+| Data age | Stored resolution |
+| --- | --- |
+| Last 7 days | 1 minute |
+| Days 7–30 | 5 minutes |
+| Older than 30 days | 1 hour |
+
+Background batches merge completed time buckets while retaining sample weights, peaks, and the latest traffic counters. Retries do not double-count samples. Live sampling and uploads are unchanged; the history write interval controls batch persistence only. Probe results retain roughly two hours of raw samples for late arrivals and deduplication before compaction. Packet loss includes failed samples; latency averages use successful samples only.
+
+Retention defaults to 30 days and is configurable from 1 to 3650 days. Older data is deleted, so increase retention to keep hourly history beyond day 30. Detail charts expose up to one year, subject to retention. Previously coarser data cannot be reconstructed at a finer resolution.
+
 ## Quick Start
 
 Install the server (downloads the latest release and registers a system service automatically):

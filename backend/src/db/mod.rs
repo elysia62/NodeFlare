@@ -1098,7 +1098,7 @@ mod tests {
                     .iter()
                     .map(|migration| migration.version)
                     .collect::<Vec<_>>(),
-                vec![1]
+                vec![1, 2]
             );
         }
         db.migrate().await.unwrap();

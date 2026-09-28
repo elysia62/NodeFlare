@@ -88,7 +88,8 @@ pub async fn save_agent_batch(
     }
     let report_interval = identity.report_interval.clamp(15, 3600);
 
-    let history_rows = aggregate_history(&reports, report_interval);
+    // Persistence/upload cadence is independent of the stored history resolution.
+    let history_rows = aggregate_history(&reports, 60);
     save_history_rows(db, &mut transaction, &identity.server_id, &history_rows).await?;
     save_latency_rows(db, &mut transaction, &identity.server_id, &reports).await?;
     let latest = reports.last().context("report batch became empty")?;
