@@ -411,12 +411,21 @@ fn spawn_maintenance(state: Arc<AppState>) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut maintenance_runs = 0_u64;
+        // The first tick runs at startup; renewal checks then run every 12 hours.
+        let mut next_renewal = tokio::time::Instant::now();
         loop {
             interval.tick().await;
             let _maintenance = state.database_maintenance.lock().await;
             let Ok(_activity) = state.database_activity.write() else {
                 continue;
             };
+            if tokio::time::Instant::now() >= next_renewal {
+                if let Err(error) = db::queries::renew_expired_servers(&state.db, db::now()).await {
+                    tracing::error!(%error, "automatic server renewal failed");
+                }
+                next_renewal =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(12 * 60 * 60);
+            }
             if let Err(error) = db::cleanup_auth(&state.db).await {
                 tracing::error!(%error, "session cleanup failed");
             }

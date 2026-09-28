@@ -67,7 +67,7 @@ pub use remote::{
 pub use servers::{
     agent_config, agent_identity, agent_install_token, all_server_ids, create_server,
     delete_server, delete_servers, list_servers, list_servers_with_live, public_server_exists,
-    reorder_servers, server_name, update_server,
+    renew_expired_servers, reorder_servers, server_name, update_server,
 };
 pub use telegram::{raw_telegram_settings, save_telegram_settings, telegram_settings};
 pub use themes::{
@@ -167,6 +167,116 @@ mod tests {
         let (_, token) = create_server(&db, &server_input(0)).await.unwrap();
         let identity = agent_identity(&db, &token).await.unwrap().unwrap();
         (db, identity)
+    }
+
+    #[tokio::test]
+    async fn auto_renewal_advances_expiry_when_creating_or_saving_a_server() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let current = now();
+        let mut input = server_input(0);
+        input.expires_at = Some(current - 75 * 86_400);
+        let (id, _) = create_server(&db, &input).await.unwrap();
+        assert_eq!(
+            list_servers(&db, true).await.unwrap()[0].expires_at,
+            input.expires_at
+        );
+
+        input.auto_renewal = true;
+        assert!(update_server(&db, &id, &input).await.unwrap());
+        let expected = Some(current + 15 * 86_400);
+        let stored =
+            sqlx::query_scalar::<_, i64>(db.sql("SELECT expires_at FROM servers WHERE id=?"))
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(Some(stored), expected);
+        assert_eq!(
+            list_servers(&db, false).await.unwrap()[0].expires_at,
+            expected
+        );
+
+        // Saving the same expired form again must not add another billing cycle.
+        assert!(update_server(&db, &id, &input).await.unwrap());
+        let (created_id, _) = create_server(&db, &input).await.unwrap();
+        let servers = list_servers(&db, true).await.unwrap();
+        assert_eq!(servers.len(), 2);
+        assert!(servers.iter().all(|server| server.expires_at == expected));
+        assert!(servers.iter().any(|server| server.id == created_id));
+    }
+
+    #[tokio::test]
+    async fn auto_renewal_maintenance_catches_up_only_eligible_servers() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let day = 86_400;
+        // Start with future dates, then advance the maintenance clock without
+        // editing or reading nodes (including a hidden, disconnected node).
+        let expiry = now() + day;
+        let current = expiry + 75 * day;
+        let cases = [
+            (30, true, false, Some(expiry), Some(expiry + 90 * day)),
+            (30, true, true, Some(expiry), Some(expiry + 90 * day)),
+            (1, true, false, Some(expiry), Some(expiry + 76 * day)),
+            (7, true, false, Some(expiry), Some(expiry + 77 * day)),
+            (90, true, false, Some(expiry), Some(expiry + 90 * day)),
+            (180, true, false, Some(expiry), Some(expiry + 180 * day)),
+            (365, true, false, Some(expiry), Some(expiry + 365 * day)),
+            (30, true, false, Some(current), Some(current + 30 * day)),
+            (30, false, false, Some(expiry), Some(expiry)),
+            (0, true, false, Some(expiry), Some(expiry)),
+            (30, true, false, None, None),
+            (30, true, false, Some(current + day), Some(current + day)),
+        ];
+        let mut expected_nodes = Vec::new();
+        for (cycle, auto_renewal, hidden, expires_at, expected) in cases {
+            let mut input = server_input(0);
+            input.billing_cycle = cycle;
+            input.auto_renewal = auto_renewal;
+            input.hidden = hidden;
+            input.expires_at = expires_at;
+            let (id, _) = create_server(&db, &input).await.unwrap();
+            let updated_at =
+                sqlx::query_scalar::<_, i64>(db.sql("SELECT updated_at FROM servers WHERE id=?"))
+                    .bind(&id)
+                    .fetch_one(db.pool())
+                    .await
+                    .unwrap();
+            expected_nodes.push((
+                id,
+                expected,
+                if expected != expires_at {
+                    current
+                } else {
+                    updated_at
+                },
+            ));
+        }
+
+        let (first, second) = tokio::join!(
+            renew_expired_servers(&db, current),
+            renew_expired_servers(&db, current),
+        );
+        assert_eq!(first.unwrap() + second.unwrap(), 8);
+        assert_eq!(renew_expired_servers(&db, current + 1).await.unwrap(), 0);
+        for (id, expected, updated_at) in expected_nodes {
+            let stored = sqlx::query_as::<_, (Option<i64>, i64)>(
+                db.sql("SELECT expires_at, updated_at FROM servers WHERE id=?"),
+            )
+            .bind(&id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(stored, (expected, updated_at));
+            let server = list_servers(&db, true)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|server| server.id == id)
+                .unwrap();
+            assert_eq!(server.expires_at, expected);
+        }
     }
 
     fn alert_input(server_ids: Vec<String>, all_servers: bool) -> AlertRuleInput {

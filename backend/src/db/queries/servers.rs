@@ -7,6 +7,59 @@ use anyhow::Result;
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 
+fn renewed_expiry(
+    expires_at: Option<i64>,
+    billing_cycle: i64,
+    auto_renewal: bool,
+    current: i64,
+) -> Option<i64> {
+    let expires_at = expires_at?;
+    if !auto_renewal || billing_cycle <= 0 || expires_at > current {
+        return Some(expires_at);
+    }
+    // Billing cycles are stored in days. Preserve the original cycle boundary
+    // and catch up in one step, even after several missed renewals.
+    let cycle = i128::from(billing_cycle) * 86_400;
+    let elapsed = i128::from(current) - i128::from(expires_at);
+    let renewed = i128::from(expires_at) + (elapsed / cycle + 1) * cycle;
+    Some(i64::try_from(renewed).unwrap_or(expires_at))
+}
+
+pub async fn renew_expired_servers(db: &Database, current: i64) -> Result<u64> {
+    let rows = sqlx::query(db.sql(
+        "SELECT id, expires_at, billing_cycle FROM servers \
+         WHERE auto_renewal=1 AND billing_cycle>0 AND expires_at<=?",
+    ))
+    .bind(current)
+    .fetch_all(db.pool())
+    .await?;
+    let mut renewed_count = 0;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let expires_at: i64 = row.try_get("expires_at")?;
+        let billing_cycle: i64 = row.try_get("billing_cycle")?;
+        let renewed = renewed_expiry(Some(expires_at), billing_cycle, true, current);
+        if renewed == Some(expires_at) {
+            continue;
+        }
+        // Do not overwrite an administrator's intervening edit or renew twice
+        // if another maintenance worker has already processed this node.
+        renewed_count += sqlx::query(db.sql(
+            "UPDATE servers SET expires_at=?, updated_at=? \
+             WHERE id=? AND auto_renewal=1 AND expires_at=? AND billing_cycle=?",
+        ))
+        .bind(renewed)
+        .bind(current)
+        .bind(&id)
+        .bind(expires_at)
+        .bind(billing_cycle)
+        .execute(db.pool())
+        .await?
+        .rows_affected();
+    }
+    Ok(renewed_count)
+}
+
 pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<ServerView>> {
     list_servers_with_live(db, include_hidden, &HashMap::new()).await
 }
@@ -160,7 +213,12 @@ pub async fn create_server(db: &Database, input: &ServerInput) -> Result<(String
     .bind(input.group_name.trim())
     .bind(input.tags.trim())
     .bind(i64::from(input.hidden))
-    .bind(input.expires_at)
+    .bind(renewed_expiry(
+        input.expires_at,
+        input.billing_cycle,
+        input.auto_renewal,
+        timestamp,
+    ))
     .bind(input.traffic_limit)
     .bind(&input.traffic_limit_type)
     .bind(input.price)
@@ -194,6 +252,7 @@ pub async fn create_server(db: &Database, input: &ServerInput) -> Result<(String
 }
 
 pub async fn update_server(db: &Database, id: &str, input: &ServerInput) -> Result<bool> {
+    let timestamp = now();
     let result = sqlx::query(db.sql(
         "UPDATE servers SET name=?, region=?, group_name=?, tags=?, hidden=?, expires_at=?, \
          traffic_limit=?, traffic_limit_type=?, price=?, billing_cycle=?, currency=?, auto_renewal=?, \
@@ -206,7 +265,12 @@ pub async fn update_server(db: &Database, id: &str, input: &ServerInput) -> Resu
     .bind(input.group_name.trim())
     .bind(input.tags.trim())
     .bind(i64::from(input.hidden))
-    .bind(input.expires_at)
+    .bind(renewed_expiry(
+        input.expires_at,
+        input.billing_cycle,
+        input.auto_renewal,
+        timestamp,
+    ))
     .bind(input.traffic_limit)
     .bind(&input.traffic_limit_type)
     .bind(input.price)
@@ -222,7 +286,7 @@ pub async fn update_server(db: &Database, id: &str, input: &ServerInput) -> Resu
     .bind(input.agent_mirror.trim().trim_end_matches('/'))
     .bind(i64::from(input.offline_notify_disabled))
     .bind(i64::from(input.auto_update))
-    .bind(now())
+    .bind(timestamp)
     .bind(id)
     .execute(db.pool())
     .await?;
@@ -357,4 +421,44 @@ pub async fn public_server_exists(db: &Database, server_id: &str) -> Result<bool
     .fetch_one(db.pool())
     .await?;
     Ok(count > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::renewed_expiry;
+
+    #[test]
+    fn auto_renewal_handles_boundaries_and_timestamp_limits() {
+        let cycle = 30 * 86_400;
+        let expiry = 1_800_000_000;
+        assert_eq!(
+            renewed_expiry(Some(expiry), 30, true, expiry - 1),
+            Some(expiry)
+        );
+        assert_eq!(
+            renewed_expiry(Some(expiry), 30, true, expiry),
+            Some(expiry + cycle)
+        );
+        assert_eq!(
+            renewed_expiry(Some(expiry), 30, true, expiry + cycle),
+            Some(expiry + 2 * cycle)
+        );
+        assert_eq!(
+            renewed_expiry(Some(expiry), 30, false, expiry),
+            Some(expiry)
+        );
+        assert_eq!(renewed_expiry(Some(expiry), 0, true, expiry), Some(expiry));
+        assert_eq!(renewed_expiry(None, 30, true, expiry), None);
+
+        let renewed = renewed_expiry(Some(i64::MIN), 30, true, expiry).unwrap();
+        assert!(renewed > expiry && renewed <= expiry + cycle);
+        assert_eq!(
+            (i128::from(renewed) - i128::from(i64::MIN)) % i128::from(cycle),
+            0
+        );
+        assert_eq!(
+            renewed_expiry(Some(i64::MAX - 1), 30, true, i64::MAX),
+            Some(i64::MAX - 1)
+        );
+    }
 }
