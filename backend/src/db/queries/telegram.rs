@@ -22,8 +22,12 @@ pub async fn raw_telegram_settings(db: &Database) -> Result<Option<TelegramSetti
     )
     .fetch_optional(db.pool())
     .await?;
+    let enabled = super::super::get_setting(db, "notification_telegram_enabled")
+        .await?
+        .is_none_or(|value| value != "false");
     row.map(|row| {
         Ok::<TelegramSettingsView, sqlx::Error>(TelegramSettingsView {
+            enabled,
             bot_token: row.try_get("bot_token")?,
             chat_id: row.try_get("chat_id")?,
             message_thread_id: row.try_get("message_thread_id")?,
@@ -52,6 +56,7 @@ pub async fn save_telegram_settings(db: &Database, input: &TelegramSettingsInput
     } else {
         input.chat_id.trim()
     };
+    let mut transaction = db.pool().begin().await?;
     sqlx::query(db.sql(
         "INSERT INTO notification_telegram(id, bot_token, chat_id, message_thread_id, template, \
          updated_at) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET \
@@ -64,7 +69,15 @@ pub async fn save_telegram_settings(db: &Database, input: &TelegramSettingsInput
     .bind(input.message_thread_id)
     .bind(input.template.trim())
     .bind(now())
-    .execute(db.pool())
+    .execute(&mut *transaction)
     .await?;
+    sqlx::query(db.sql(
+        "INSERT INTO settings(key,value) VALUES ('notification_telegram_enabled',?) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    ))
+    .bind(if input.enabled { "true" } else { "false" })
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     Ok(())
 }

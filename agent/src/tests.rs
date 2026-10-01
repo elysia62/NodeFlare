@@ -198,6 +198,76 @@ fn keeps_root_filesystem_but_filters_virtual_mounts() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn excludes_container_virtual_capacity_but_keeps_real_storage() {
+    let mounts = super::disk_mounts(
+        r"/dev/vda1 / ext4 rw 0 0
+/dev/vdb1 /var/lib/docker ext4 rw 0 0
+/dev/mapper/docker-253:0-12345-container /var/lib/docker/devicemapper/mnt/id ext4 rw 0 0
+/dev/mapper/docker-253:0-12345-other /custom/container ext4 rw 0 0
+/dev/loop0 /mnt/custom-data/devicemapper/mnt/id ext4 rw 0 0
+overlay /mnt/custom-data/overlay2/id/merged overlay rw 0 0
+fuse-overlayfs /home/user/.local/share/containers/storage/overlay/id/merged fuse.fuse-overlayfs rw 0 0
+/dev/vda1 /var/lib/docker/volumes/volume/_data ext4 rw 0 0
+/dev/vda1 /var/lib/containerd/io.containerd.snapshotter.v1.btrfs/snapshots/1/fs btrfs rw 0 0
+/dev/mapper/docker-data /docker-data ext4 rw 0 0
+/dev/vdc1 /data ext4 rw 0 0",
+    ).collect::<Vec<_>>();
+    assert_eq!(
+        mounts,
+        vec![
+            ("/dev/vda1".into(), "/".into()),
+            ("/dev/vdb1".into(), "/var/lib/docker".into()),
+            ("/dev/mapper/docker-data".into(), "/docker-data".into()),
+            ("/dev/vdc1".into(), "/data".into()),
+        ]
+    );
+    assert!(!super::excluded_filesystem("fuse.overlayfs", "/"));
+    assert!(!super::excluded_filesystem("ext4", "/data/docker-backups"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn device_aliases_and_bind_mounts_do_not_multiply_disk_capacity() {
+    let disks = super::dedupe_disks_by([
+        (
+            1,
+            DiskMetric {
+                name: "/dev/root".into(),
+                mount_point: "/".into(),
+                total: 100,
+                used: 25,
+                ..DiskMetric::default()
+            },
+        ),
+        (
+            1,
+            DiskMetric {
+                name: "/dev/mapper/system".into(),
+                mount_point: "/data/bind".into(),
+                total: 100,
+                used: 25,
+                ..DiskMetric::default()
+            },
+        ),
+        (
+            2,
+            DiskMetric {
+                name: "/dev/vdb".into(),
+                mount_point: "/var/lib/docker".into(),
+                total: 200,
+                used: 50,
+                ..DiskMetric::default()
+            },
+        ),
+    ]);
+    assert_eq!(disks.len(), 2);
+    assert_eq!(disks.iter().map(|disk| disk.total).sum::<i64>(), 300);
+    assert_eq!(disks.iter().map(|disk| disk.used).sum::<i64>(), 75);
+    assert_eq!(disks[0].mount_point, "/");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn memory_matches_komari_default_including_shared_memory_and_swap_cache() {
     let memory = super::memory_sample(
         "MemTotal: 1000000 kB\nMemFree: 100000 kB\nMemAvailable: 750000 kB\n\

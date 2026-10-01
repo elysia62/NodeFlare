@@ -13,6 +13,7 @@ mod security;
 mod theme;
 mod totp;
 mod turnstile;
+mod webhook;
 mod websocket;
 
 use anyhow::{Context, Result};
@@ -35,6 +36,7 @@ pub struct AppState {
     pub config_path: std::path::PathBuf,
     pub database_overridden: bool,
     pub http: reqwest::Client,
+    pub webhook_http: reqwest::Client,
     pub agents: RwLock<HashMap<String, websocket::AgentConnection>>,
     pub last_agent_reports: RwLock<HashMap<String, i64>>,
     pub live_reports: RwLock<HashMap<String, models::AgentReport>>,
@@ -181,6 +183,7 @@ async fn main() -> Result<()> {
         config_path: args.config,
         database_overridden,
         http,
+        webhook_http: webhook::client()?,
         agents: RwLock::new(HashMap::new()),
         last_agent_reports: RwLock::new(HashMap::new()),
         live_reports: RwLock::new(HashMap::new()),
@@ -271,6 +274,13 @@ async fn main() -> Result<()> {
             "/api/admin/telegram/test",
             post(routes::admin::telegram_test),
         )
+        .route(
+            "/api/admin/webhook",
+            get(routes::admin::webhook_get)
+                .put(routes::admin::webhook_put)
+                .delete(routes::admin::webhook_delete),
+        )
+        .route("/api/admin/webhook/test", post(routes::admin::webhook_test))
         .route(
             "/api/admin/themes",
             get(routes::admin::themes_get).post(routes::admin::themes_post),
@@ -397,7 +407,7 @@ fn spawn_notifications(state: Arc<AppState>) {
                 }
                 Ok(_) => {}
             }
-            match notify::deliver_next(&state.db, &state.http).await {
+            match notify::deliver_next(&state.db, &state.http, &state.webhook_http).await {
                 Ok(true) => state.notification_wake.notify_one(),
                 Ok(false) => {}
                 Err(error) => tracing::error!(%error, "notification delivery failed"),

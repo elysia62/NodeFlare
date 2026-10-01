@@ -43,11 +43,13 @@ mod servers;
 mod telegram;
 mod themes;
 mod totp;
+mod webhook;
 
 pub use alerts::{
     AlertNotification, AlertObservation, PendingAlertNotification, complete_notification,
-    create_alert_rule, delete_alert_rule, evaluate_resource_rules, list_alert_rules,
-    next_notification, record_alert, retry_notification, update_alert_rule,
+    create_alert_rule, delete_alert_rule, delivered_notification_channels, evaluate_resource_rules,
+    list_alert_rules, mark_notification_delivered, next_notification, record_alert,
+    retry_notification, update_alert_rule,
 };
 pub use exchange::{
     ExchangeSnapshot, exchange_snapshot, mark_exchange_attempt, upsert_exchange_snapshot,
@@ -77,6 +79,10 @@ pub use themes::{
     set_active_theme, theme_asset, theme_exists, theme_preview_url, theme_resolved_url,
 };
 pub use totp::{get_totp_secret, save_totp_secret, set_totp_enabled};
+pub use webhook::{
+    delete_webhook_settings, raw_webhook_settings, resolve_webhook_settings, save_webhook_settings,
+    webhook_settings,
+};
 
 #[cfg(test)]
 mod tests {
@@ -130,6 +136,7 @@ mod tests {
         db.migrate().await.unwrap();
         assert!(telegram_settings(&db).await.unwrap().is_none());
         let mut input = TelegramSettingsInput {
+            enabled: true,
             bot_token: "123456789:test-token".into(),
             chat_id: "-1001234567890".into(),
             message_thread_id: None,
@@ -139,14 +146,17 @@ mod tests {
         let view = telegram_settings(&db).await.unwrap().unwrap();
         assert_eq!(view.bot_token, SECRET_MASK);
         assert_eq!(view.chat_id, SECRET_MASK);
+        assert!(view.enabled);
 
         input.bot_token = view.bot_token;
         input.chat_id = view.chat_id;
         input.template = "{{title}}: {{message}}".into();
+        input.enabled = false;
         input.message_thread_id = Some(123);
         save_telegram_settings(&db, &input).await.unwrap();
         let raw = raw_telegram_settings(&db).await.unwrap().unwrap();
         assert_eq!(raw.bot_token, "123456789:test-token");
+        assert!(!raw.enabled);
         assert_eq!(raw.chat_id, "-1001234567890");
         assert_eq!(raw.template, input.template);
         assert_eq!(raw.message_thread_id, Some(123));

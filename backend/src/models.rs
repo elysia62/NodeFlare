@@ -318,6 +318,8 @@ pub struct AlertRuleView {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramSettingsInput {
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
     pub bot_token: String,
     pub chat_id: String,
     #[serde(default)]
@@ -327,10 +329,52 @@ pub struct TelegramSettingsInput {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TelegramSettingsView {
+    pub enabled: bool,
     pub bot_token: String,
     pub chat_id: String,
     pub message_thread_id: Option<i64>,
     pub template: String,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookSettingsInput {
+    pub enabled: bool,
+    #[serde(default)]
+    pub preset: WebhookPreset,
+    pub url: String,
+    pub headers: String,
+    pub body: String,
+    #[serde(default, skip_serializing)]
+    pub clear_headers: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebhookPreset {
+    #[default]
+    Custom,
+    Bark,
+    Discord,
+    Slack,
+    Wecom,
+    Dingtalk,
+    Feishu,
+    Ntfy,
+    Gotify,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WebhookSettingsView {
+    pub enabled: bool,
+    pub preset: WebhookPreset,
+    pub url_configured: bool,
+    pub headers_configured: bool,
+    pub body_configured: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

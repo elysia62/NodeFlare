@@ -4,7 +4,7 @@ use crate::db::SECRET_MASK;
 use crate::middleware::AuthenticatedUser;
 use crate::models::{
     AlertRuleInput, LatencyTaskInput, ServerBatchInput, ServerInput, ServerOrderInput,
-    SettingsInput, TelegramSettingsInput, ThemeInput, ThemeUploadInput,
+    SettingsInput, TelegramSettingsInput, ThemeInput, ThemeUploadInput, WebhookSettingsInput,
 };
 use axum::Json;
 use axum::body::{Body, to_bytes};
@@ -385,6 +385,42 @@ pub async fn telegram_put(
 
 pub async fn telegram_test(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
     crate::notify::test_telegram(&state.db, &state.http)
+        .await
+        .map_err(|error| ApiResponse::error(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn webhook_get(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+    let webhook = crate::db::queries::webhook_settings(&state.db)
+        .await
+        .map_err(ApiResponse::internal)?;
+    Ok(Json(serde_json::json!({"webhook": webhook})).into_response())
+}
+
+pub async fn webhook_put(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<WebhookSettingsInput>,
+) -> Result<Response, ApiResponse> {
+    let input = crate::db::queries::resolve_webhook_settings(&state.db, input)
+        .await
+        .map_err(ApiResponse::internal)?;
+    crate::webhook::validate(&input)
+        .map_err(|error| ApiResponse::bad_request(error.to_string()))?;
+    crate::db::queries::save_webhook_settings(&state.db, &input)
+        .await
+        .map_err(ApiResponse::internal)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn webhook_delete(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+    crate::db::queries::delete_webhook_settings(&state.db)
+        .await
+        .map_err(ApiResponse::internal)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn webhook_test(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
+    crate::notify::test_webhook(&state.db, &state.webhook_http)
         .await
         .map_err(|error| ApiResponse::error(StatusCode::BAD_GATEWAY, error.to_string()))?;
     Ok(StatusCode::NO_CONTENT.into_response())

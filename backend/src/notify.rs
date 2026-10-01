@@ -6,12 +6,34 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 pub async fn test_telegram(db: &Database, client: &reqwest::Client) -> Result<()> {
-    send(
-        db,
+    let settings = queries::raw_telegram_settings(db)
+        .await?
+        .context("尚未配置 Telegram")?;
+    send_telegram(
+        &settings,
         client,
         "NodeFlare 测试通知",
         "NodeFlare",
         "Telegram 通知配置有效。",
+    )
+    .await
+}
+
+pub async fn test_webhook(db: &Database, client: &reqwest::Client) -> Result<()> {
+    let settings = queries::raw_webhook_settings(db)
+        .await?
+        .context("尚未配置 Webhook")?;
+    let site = db::load_settings(db).await?.site_name;
+    crate::webhook::send(
+        client,
+        &settings,
+        &crate::webhook::Message {
+            title: "NodeFlare 测试通知",
+            node: "NodeFlare",
+            message: "Webhook 通知配置有效。",
+            event: "test",
+            site: &site,
+        },
     )
     .await
 }
@@ -225,18 +247,77 @@ fn traffic_milestones(start: i64) -> Vec<i64> {
     milestones
 }
 
-pub async fn deliver_next(db: &Database, client: &reqwest::Client) -> Result<bool> {
+pub async fn deliver_next(
+    db: &Database,
+    client: &reqwest::Client,
+    webhook_client: &reqwest::Client,
+) -> Result<bool> {
+    let telegram = queries::raw_telegram_settings(db)
+        .await?
+        .filter(|settings| settings.enabled);
+    let webhook = queries::raw_webhook_settings(db)
+        .await?
+        .filter(|settings| settings.enabled);
+    let channels = [
+        telegram.as_ref().map(|_| "telegram"),
+        webhook.as_ref().map(|_| "webhook"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if channels.is_empty() {
+        return Ok(false);
+    }
+    let site = db::load_settings(db).await?.site_name;
     deliver_next_with(db, |notification| async move {
-        send(
-            db,
-            client,
-            &notification.title,
-            &notification.server_name,
-            &notification.message,
-        )
+        let telegram = telegram.as_ref();
+        let webhook = webhook.as_ref();
+        let site = &site;
+        let notification = &notification;
+        deliver_channels_with(db, &notification.id, &channels, |channel| async move {
+            match channel {
+                "telegram" => {
+                    send_telegram(
+                        telegram.unwrap(),
+                        client,
+                        &notification.title,
+                        &notification.server_name,
+                        &notification.message,
+                    )
+                    .await
+                }
+                "webhook" => {
+                    crate::webhook::send(
+                        webhook_client,
+                        webhook.unwrap(),
+                        &crate::webhook::Message {
+                            title: &notification.title,
+                            node: &notification.server_name,
+                            message: &notification.message,
+                            event: notification_event(&notification.title),
+                            site,
+                        },
+                    )
+                    .await
+                }
+                _ => unreachable!("known notification channel"),
+            }
+        })
         .await
     })
     .await
+}
+
+fn notification_event(title: &str) -> &'static str {
+    match title {
+        "服务器离线" => "offline",
+        "服务器恢复在线" => "online",
+        "服务器即将到期" => "expiry",
+        "流量告警" => "traffic",
+        "资源告警" => "resource",
+        "资源恢复" => "resource_recovery",
+        _ => "test",
+    }
 }
 
 async fn deliver_next_with<F, Fut>(db: &Database, deliver: F) -> Result<bool>
@@ -251,24 +332,54 @@ where
     let attempts = notification.attempts;
     if let Err(error) = deliver(notification).await {
         queries::retry_notification(db, &id, attempts).await?;
-        tracing::warn!(%error, notification_id = id, "Telegram notification scheduled for retry");
+        tracing::warn!(%error, notification_id = id, "notification scheduled for retry");
         return Ok(false);
     }
     queries::complete_notification(db, &id).await?;
     Ok(true)
 }
 
-async fn send(
+async fn deliver_channels_with<F, Fut>(
     db: &Database,
+    notification_id: &str,
+    channels: &[&'static str],
+    deliver: F,
+) -> Result<()>
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let completed = queries::delivered_notification_channels(db, notification_id).await?;
+    let pending = channels
+        .iter()
+        .copied()
+        .filter(|channel| !completed.iter().any(|done| done == channel));
+    // Attempt every channel even when one is unavailable. Persist successes so
+    // an outage in Webhook cannot repeatedly send the same Telegram notification.
+    let results = futures_util::future::join_all(pending.map(|channel| {
+        let deliver = &deliver;
+        async move {
+            deliver(channel)
+                .await
+                .with_context(|| format!("{channel} notification failed"))?;
+            queries::mark_notification_delivered(db, notification_id, channel).await
+        }
+    }))
+    .await;
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
+async fn send_telegram(
+    settings: &TelegramSettingsView,
     client: &reqwest::Client,
     title: &str,
     server: &str,
     message: &str,
 ) -> Result<()> {
-    let settings = queries::raw_telegram_settings(db)
-        .await?
-        .context("尚未配置 Telegram")?;
-    validate_settings(&settings)?;
+    validate_settings(settings)?;
     let text = render(&settings.template, title, server, message);
     let mut payload = serde_json::json!({
         "chat_id": settings.chat_id,
@@ -358,6 +469,98 @@ fn render(template: &str, title: &str, server: &str, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_failed_channel_does_not_repeat_successful_deliveries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','hash',1,1)")
+            .execute(db.pool()).await.unwrap();
+        crate::db::queries::record_alert(
+            &db,
+            crate::db::queries::AlertObservation {
+                key: "offline:node",
+                server_id: "node",
+                rule_id: None,
+                active: true,
+                details: serde_json::json!({}),
+                notification: Some(crate::db::queries::AlertNotification {
+                    title: "服务器离线",
+                    server_name: "Node",
+                    message: "Offline",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        let pending = crate::db::queries::next_notification(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let telegram_count = AtomicUsize::new(0);
+        let webhook_count = AtomicUsize::new(0);
+        let first =
+            super::deliver_channels_with(&db, &pending.id, &["webhook", "telegram"], |channel| {
+                let telegram_count = &telegram_count;
+                let webhook_count = &webhook_count;
+                async move {
+                    if channel == "webhook" {
+                        webhook_count.fetch_add(1, Ordering::Relaxed);
+                        anyhow::bail!("Webhook is temporarily unavailable");
+                    }
+                    telegram_count.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            })
+            .await;
+        assert!(first.is_err());
+        assert_eq!(telegram_count.load(Ordering::Relaxed), 1);
+        assert_eq!(webhook_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            crate::db::queries::delivered_notification_channels(&db, &pending.id)
+                .await
+                .unwrap(),
+            vec!["telegram"]
+        );
+        super::deliver_next_with(&db, |notification| {
+            let db = &db;
+            let telegram_count = &telegram_count;
+            let webhook_count = &webhook_count;
+            async move {
+                super::deliver_channels_with(
+                    db,
+                    &notification.id,
+                    &["webhook", "telegram"],
+                    |channel| async move {
+                        if channel == "webhook" {
+                            webhook_count.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            telegram_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(telegram_count.load(Ordering::Relaxed), 1);
+        assert_eq!(webhook_count.load(Ordering::Relaxed), 2);
+        assert!(
+            crate::db::queries::next_notification(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::db::queries::delivered_notification_channels(&db, &pending.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     use super::{offline_status, traffic_milestones};
 
     #[tokio::test]

@@ -7,6 +7,7 @@ import { ASSET_CURRENCIES, type AdminServer, type DatabaseMigrationResult, type 
 import { AlertRuleManager } from "../AlertRuleManager";
 import { PasswordInput } from "../PasswordInput";
 import { TelegramSettings } from "../TelegramSettings";
+import { WebhookSettings } from "../WebhookSettings";
 import { ThemeOption, Toggle } from "./controls";
 import { describeLoginDevice, formatSessionTime } from "./shared";
 
@@ -80,6 +81,7 @@ export function SettingsTabs({ tab, locale, settings, servers, busy, saveSite, m
         <div className="form-grid three"><label><span>{ui(locale, "离线告警延迟（分钟）", "Offline alert delay (min)")}</span><input type="number" min="2" max="1440" value={settings.offline_alert_minutes} onChange={(event) => updateSettings("offline_alert_minutes", Number(event.target.value))} /></label><label><span>{ui(locale, "到期提醒（天）", "Expiry reminder (days)")}</span><input type="number" min="0" max="365" value={settings.expiry_alert_days} onChange={(event) => updateSettings("expiry_alert_days", Number(event.target.value))} /></label><label><span>{ui(locale, "流量提醒起始阈值（%）", "Traffic alert threshold (%)")}</span><input type="number" min="50" max="100" value={settings.traffic_alert_percentage} onChange={(event) => updateSettings("traffic_alert_percentage", Number(event.target.value))} /></label></div>
         <p className="settings-hint">{ui(locale, "流量达到起始阈值后，每增加 5 个百分点生成一次事件，最多提醒到 100%。", "After the threshold is reached, an event is created for every additional 5 percentage points, up to 100%.")}</p>
         <TelegramSettings locale={locale} onError={setError} onNotice={setNotice} />
+        <WebhookSettings locale={locale} onError={setError} onNotice={setNotice} />
         <AlertRuleManager locale={locale} servers={servers} onError={setError} onNotice={setNotice} />
       </> : null}
 

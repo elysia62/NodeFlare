@@ -360,22 +360,30 @@ pub(crate) fn connection_counts() -> (i64, i64) {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn disk_usage() -> Vec<DiskMetric> {
-    disk_mounts(&text("/proc/self/mounts"))
-        .filter_map(|(name, mount_point)| {
-            // Ignore file bind mounts such as a container's /etc/hosts.
-            if !Path::new(&mount_point).is_dir() {
-                return None;
-            }
-            let (total, used) = filesystem_space(&mount_point)?;
-            Some(DiskMetric {
+    use std::os::unix::fs::MetadataExt;
+
+    let mounts = text("/proc/self/mounts");
+    let disks = disk_mounts(&mounts).filter_map(|(name, mount_point)| {
+        // Ignore file bind mounts such as a container's /etc/hosts.
+        let metadata = fs::metadata(&mount_point).ok()?;
+        if !metadata.is_dir() {
+            return None;
+        }
+        let (total, used) = filesystem_space(&mount_point)?;
+        Some((
+            metadata.dev(),
+            DiskMetric {
                 name,
                 mount_point,
                 used,
                 total,
                 ..DiskMetric::default()
-            })
-        })
-        .collect()
+            },
+        ))
+    });
+    // Bind mounts and /dev/mapper aliases may name the same filesystem
+    // differently. Deduplicate its kernel device ID before summing capacity.
+    dedupe_disks(dedupe_disks_by(disks))
 }
 
 #[cfg(target_os = "linux")]
@@ -395,11 +403,34 @@ pub(crate) fn disk_mounts(contents: &str) -> impl Iterator<Item = (String, Strin
         if (!source.starts_with('/') && source.contains(':'))
             || source.starts_with("//")
             || excluded_filesystem(filesystem, &mount_point)
+            || (mount_point != "/" && container_device(&source))
         {
             return None;
         }
         Some((source, mount_point))
     })
+}
+
+#[cfg(target_os = "linux")]
+fn container_device(source: &str) -> bool {
+    let Some(name) = source.strip_prefix("/dev/mapper/docker-") else {
+        return false;
+    };
+    let Some((device, remaining)) = name.split_once('-') else {
+        return false;
+    };
+    let Some((major, minor)) = device.split_once(':') else {
+        return false;
+    };
+    let Some((inode, container)) = remaining.split_once('-') else {
+        return false;
+    };
+    // Docker's thin devices use docker-MAJOR:MINOR-INODE-CONTAINER. Do not
+    // exclude an ordinary LVM volume simply named docker-data or docker-pool.
+    [major, minor, inode]
+        .iter()
+        .all(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        && !container.is_empty()
 }
 
 #[cfg(target_os = "linux")]
@@ -459,6 +490,8 @@ pub(crate) fn excluded_filesystem(filesystem: &str, mount_point: &str) -> bool {
         "cgroup",
         "cgroup2",
         "overlay",
+        "fuse.overlayfs",
+        "fuse.fuse-overlayfs",
         "squashfs",
         "efivarfs",
         "pstore",
@@ -472,6 +505,22 @@ pub(crate) fn excluded_filesystem(filesystem: &str, mount_point: &str) -> bool {
         || ["/proc", "/sys", "/run", "/dev"]
             .iter()
             .any(|prefix| mount_point == *prefix || mount_point.starts_with(&format!("{prefix}/")))
+        || container_storage_mount(&mount_point)
+}
+
+#[cfg(target_os = "linux")]
+fn container_storage_mount(mount_point: &str) -> bool {
+    let parts = mount_point.split('/').collect::<Vec<_>>();
+    parts.windows(2).any(|pair| {
+        // Match driver internals even when Docker uses a custom data-root.
+        matches!(pair[0], "overlay2" | "overlay" | "aufs")
+            || (pair[0] == "devicemapper" && pair[1] == "mnt")
+            || pair[0].starts_with("io.containerd.snapshotter.v1.")
+    }) || parts.windows(3).any(|triple| {
+        // Keep the backing /var/lib/docker partition; ignore container mounts
+        // and volume bindings below it, including rootless Docker storage.
+        triple[0] == "docker" && matches!(triple[1], "containers" | "volumes")
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -487,9 +536,19 @@ pub(crate) fn disk_identity(name: &str) -> String {
 
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn dedupe_disks(disks: impl IntoIterator<Item = DiskMetric>) -> Vec<DiskMetric> {
-    let mut unique = HashMap::<String, DiskMetric>::new();
-    for disk in disks {
-        let key = disk_identity(&disk.name);
+    dedupe_disks_by(
+        disks
+            .into_iter()
+            .map(|disk| (disk_identity(&disk.name), disk)),
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn dedupe_disks_by<K: std::hash::Hash + Eq>(
+    disks: impl IntoIterator<Item = (K, DiskMetric)>,
+) -> Vec<DiskMetric> {
+    let mut unique = HashMap::<K, DiskMetric>::new();
+    for (key, disk) in disks {
         let replace = unique.get(&key).is_none_or(|current| {
             disk.total > current.total
                 || (disk.total == current.total
@@ -594,7 +653,7 @@ impl Collector {
                 .count() as i64
         });
         self.slow = SlowMetrics {
-            disks: dedupe_disks(disk_usage()),
+            disks: disk_usage(),
             processes,
             tcp_connections: file_line_count("/proc/net/tcp") + file_line_count("/proc/net/tcp6"),
             udp_connections: file_line_count("/proc/net/udp") + file_line_count("/proc/net/udp6"),

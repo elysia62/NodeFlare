@@ -13,6 +13,17 @@ import type { UiLocale } from "./locale";
  * use `{placeholders}` and are matched by pattern.
  */
 const MESSAGES: Record<string, string> = {
+  "尚未配置 Webhook": "Webhook is not configured",
+  "Webhook URL 无效": "Invalid Webhook URL",
+  "Webhook 请求头过长": "Webhook headers are too long",
+  "Webhook 请求头应为 Name: value 格式": "Webhook headers must use Name: value format",
+  "Webhook 请求头名称无效": "Invalid Webhook header name",
+  "Webhook 请求头内容无效": "Invalid Webhook header value",
+  "Webhook 请求头不能覆盖连接或长度信息": "Webhook headers cannot override connection or length information",
+  "Webhook 请求体必须是有效 JSON，占位符需放在引号内": "Webhook body must be valid JSON with placeholders inside quotes",
+  "Webhook 请求体为空或超过 16 KiB": "Webhook body is empty or exceeds 16 KiB",
+  "Webhook 响应超过 64 KiB": "Webhook response exceeds 64 KiB",
+  "Webhook 返回了无效的服务响应": "Webhook returned an invalid service response",
   "Agent Token 无效": "Invalid Agent token",
   "Cloudflare 人机验证失败，请重试": "Cloudflare verification failed; please try again",
   "ID 无效": "Invalid ID",
@@ -98,6 +109,18 @@ const TEMPLATES: Array<{
   match: RegExp;
   render: (groups: string[]) => string;
 }> = [
+  {
+    match: /^Webhook 地址发生跳转（HTTP (\d+)），请填写最终地址$/,
+    render: g => `Webhook URL redirects (HTTP ${g[0]}); enter the final URL`,
+  },
+  {
+    match: /^Webhook 请求失败（HTTP (\d+)）$/,
+    render: g => `Webhook request failed (HTTP ${g[0]})`,
+  },
+  {
+    match: /^Webhook 服务拒收通知（(.+)）$/,
+    render: g => `Webhook service rejected the notification (${g[0]})`,
+  },
   {
     match: /^Agent 协议不兼容，需要协议版本 (.+)$/,
     render: (g) => `Incompatible Agent protocol; version ${g[0]} is required`,

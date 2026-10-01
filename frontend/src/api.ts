@@ -1,4 +1,4 @@
-import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus } from "./types";
+import type { AdminServer, AlertRule, AlertRuleInput, Bootstrap, DatabaseMigrationResult, DatabaseStats, ExchangeRates, HistoryPoint, LatencySample, LatencyTask, LatencyTaskInput, LatencyTestPoint, LoginSession, RemoteTask, RemoteTaskCreated, RemoteTaskInput, ServerInput, Settings, TelegramSettings, TelegramSettingsInput, Theme, ThemeSettingsSchema, TotpSetup, TotpStatus, WebhookSettingsInput, WebhookSettingsView } from "./types";
 import { localizedError } from "./errors";
 import type { UiLocale } from "./locale";
 
@@ -117,6 +117,11 @@ export const api = {
   saveTelegramSettings: (input: TelegramSettingsInput) =>
     request<void>("/api/admin/telegram", { method: "PUT", body: JSON.stringify(input) }, true),
   testTelegram: () => request<void>("/api/admin/telegram/test", { method: "POST" }, true),
+  webhookSettings: () => request<{ webhook: WebhookSettingsView | null }>("/api/admin/webhook", {}, true),
+  saveWebhookSettings: (input: WebhookSettingsInput) =>
+    request<void>("/api/admin/webhook", { method: "PUT", body: JSON.stringify(input) }, true),
+  testWebhook: () => request<void>("/api/admin/webhook/test", { method: "POST" }, true),
+  clearWebhookSettings: () => request<void>("/api/admin/webhook", { method: "DELETE" }, true),
   themeSettings: () => request<ThemeSettingsSchema>("/api/admin/theme-settings", {}, true),
   themes: () => request<{ themes: Theme[] }>("/api/admin/themes", {}, true),
   addTheme: (input: Pick<Theme, "name" | "url">) =>

@@ -63,6 +63,7 @@ const BACKUP_TABLES: &[&str] = &[
 ];
 
 const CLEAR_TABLES: &[&str] = &[
+    "notification_deliveries",
     "notification_outbox",
     "server_install_tokens",
     "theme_previews",
@@ -90,7 +91,7 @@ const POSTGRES_RESTORE_LOCK: &str = "LOCK TABLE settings, servers, metric_histor
     server_install_tokens, \
     server_latest_state, admin_2fa, remote_tasks, exchange_rates, sessions, dashboard_proofs, \
     server_traffic_state, latency_tasks, latency_task_servers, latency_results, alert_rules, \
-    alert_rule_servers, alert_states, notification_outbox, notification_telegram, themes, theme_previews \
+    alert_rule_servers, alert_states, notification_outbox, notification_deliveries, notification_telegram, themes, theme_previews \
     IN ACCESS EXCLUSIVE MODE";
 
 pub struct DatabaseArchive {
@@ -349,6 +350,7 @@ async fn export(
             "dashboard_proofs".to_string(),
             "theme_previews".to_string(),
             "server_install_tokens".to_string(),
+            "notification_deliveries".to_string(),
         ]
         .into_iter()
         .filter(|table| !tables.contains(&table.as_str()))
@@ -911,6 +913,7 @@ pub async fn restore_archive(db: &Database, theme_dir: &Path, archive: &[u8]) ->
 pub async fn copy_database(source: &Database, target: &Database) -> Result<usize> {
     let mut tables = BACKUP_TABLES.to_vec();
     tables.push("server_install_tokens");
+    tables.push("notification_deliveries");
     let archive = export(source, None, &tables).await?;
     restore(target, archive.file, None, &tables).await
 }
@@ -918,6 +921,91 @@ pub async fn copy_database(source: &Database, target: &Database) -> Result<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn webhook_config_and_channel_receipts_survive_database_migration() {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        source.migrate().await.unwrap();
+        target.migrate().await.unwrap();
+        sqlx::query("INSERT INTO settings(key,value) VALUES ('admin_username','admin'),('admin_password_hash','hash'),('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','hash',1,1)")
+            .execute(source.pool()).await.unwrap();
+        let webhook = crate::models::WebhookSettingsInput {
+            enabled: true,
+            preset: crate::models::WebhookPreset::Bark,
+            url: "https://api.day.app/push".into(),
+            headers: String::new(),
+            body: r#"{"device_key":"private-key","body":"{{message}}"}"#.into(),
+            clear_headers: false,
+        };
+        crate::db::queries::save_webhook_settings(&source, &webhook)
+            .await
+            .unwrap();
+        crate::db::queries::record_alert(
+            &source,
+            crate::db::queries::AlertObservation {
+                key: "offline:node",
+                server_id: "node",
+                rule_id: None,
+                active: true,
+                details: serde_json::json!({}),
+                notification: Some(crate::db::queries::AlertNotification {
+                    title: "服务器离线",
+                    server_name: "Node",
+                    message: "Offline",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        let pending = crate::db::queries::next_notification(&source)
+            .await
+            .unwrap()
+            .unwrap();
+        crate::db::queries::mark_notification_delivered(&source, &pending.id, "telegram")
+            .await
+            .unwrap();
+        copy_database(&source, &target).await.unwrap();
+        assert_eq!(
+            crate::db::queries::raw_webhook_settings(&target)
+                .await
+                .unwrap()
+                .unwrap()
+                .body,
+            webhook.body
+        );
+        assert_eq!(
+            crate::db::queries::delivered_notification_channels(&target, &pending.id)
+                .await
+                .unwrap(),
+            vec!["telegram"]
+        );
+        // File backups preserve settings and queued events, but replay delivery
+        // after an explicit restore, just like the existing outbox policy.
+        let directory = tempfile::tempdir().unwrap();
+        let mut exported = export_archive(&source, directory.path()).await.unwrap();
+        let mut bytes = Vec::new();
+        exported.file.read_to_end(&mut bytes).unwrap();
+        restore_archive(&target, directory.path(), &bytes)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::db::queries::raw_webhook_settings(&target)
+                .await
+                .unwrap()
+                .unwrap()
+                .body,
+            webhook.body
+        );
+        assert!(
+            crate::db::queries::delivered_notification_channels(&target, &pending.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn restores_latency_history_from_before_tiered_storage() {
@@ -1317,7 +1405,7 @@ mod tests {
                 .fetch_all(target.pool())
                 .await
                 .unwrap(),
-            vec![1, 2]
+            vec![1, 2, 3]
         );
         assert!(
             crate::db::queries::agent_identity(&source, "install-token")

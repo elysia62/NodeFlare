@@ -288,13 +288,33 @@ export interface Settings extends Omit<Config, "password_client_salt"> {
 }
 
 export interface TelegramSettings {
+  enabled: boolean;
   bot_token: string;
   chat_id: string;
   message_thread_id: number | null;
   template: string;
 }
 
-export type TelegramSettingsInput = Pick<TelegramSettings, "bot_token" | "chat_id" | "message_thread_id" | "template">;
+export type TelegramSettingsInput = TelegramSettings;
+
+export type WebhookPreset = "custom" | "bark" | "discord" | "slack" | "wecom" | "dingtalk" | "feishu" | "ntfy" | "gotify";
+
+export interface WebhookSettingsInput {
+  enabled: boolean;
+  preset: WebhookPreset;
+  url: string;
+  headers: string;
+  body: string;
+  clear_headers: boolean;
+}
+
+export interface WebhookSettingsView {
+  enabled: boolean;
+  preset: WebhookPreset;
+  url_configured: boolean;
+  headers_configured: boolean;
+  body_configured: boolean;
+}
 
 type AlertMetric = "cpu" | "memory" | "disk" | "net_in" | "net_out";
 type AlertAggregation = "average" | "continuous";

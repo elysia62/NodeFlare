@@ -348,6 +348,28 @@ pub async fn complete_notification(db: &Database, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn delivered_notification_channels(db: &Database, id: &str) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        db.sql("SELECT channel FROM notification_deliveries WHERE notification_id=?"),
+    )
+    .bind(id)
+    .fetch_all(db.pool())
+    .await?)
+}
+
+pub async fn mark_notification_delivered(db: &Database, id: &str, channel: &str) -> Result<()> {
+    sqlx::query(db.sql(
+        "INSERT INTO notification_deliveries(notification_id,channel,delivered_at) VALUES (?,?,?) \
+         ON CONFLICT(notification_id,channel) DO NOTHING",
+    ))
+    .bind(id)
+    .bind(channel)
+    .bind(now())
+    .execute(db.pool())
+    .await?;
+    Ok(())
+}
+
 pub async fn retry_notification(db: &Database, id: &str, attempts: i64) -> Result<()> {
     let delay = (5_i64 << attempts.clamp(0, 10)).min(3600);
     sqlx::query(db.sql("UPDATE notification_outbox SET attempts=?, next_attempt_at=? WHERE id=?"))
