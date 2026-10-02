@@ -6,6 +6,29 @@ const CLEANUP_DELETE_BATCH_ROWS: i64 = 1000;
 const CLEANUP_MAX_PASSES: usize = 10;
 const CLEANUP_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
+// A summary starts no later than its final sample. The indexed timestamp bound
+// skips retained history; the final-sample bound keeps buckets crossing cutoff.
+const CLEANUP_STATEMENTS: [&str; 4] = [
+    "DELETE FROM metric_history WHERE (server_id, timestamp) IN ( \
+       SELECT server_id, timestamp FROM metric_history WHERE \
+       timestamp<? AND last_timestamp<? \
+       ORDER BY timestamp LIMIT ?)",
+    "DELETE FROM latency_results WHERE (task_id, server_id, timestamp) IN ( \
+       SELECT task_id, server_id, timestamp FROM latency_results WHERE \
+       timestamp<? AND COALESCE(last_timestamp,timestamp)<? \
+       ORDER BY timestamp LIMIT ?)",
+    "DELETE FROM remote_tasks WHERE status IN ('success','failed') AND id IN ( \
+       SELECT id FROM remote_tasks WHERE status IN ('success','failed') AND completed_at<? \
+       ORDER BY completed_at LIMIT ?)",
+    "DELETE FROM alert_states WHERE active=0 AND state_key IN ( \
+       SELECT state_key FROM alert_states WHERE active=0 AND updated_at<? \
+       AND NOT EXISTS (SELECT 1 FROM notification_outbox WHERE notification_outbox.state_key=alert_states.state_key) \
+       ORDER BY updated_at LIMIT ?)",
+];
+
+#[cfg(test)]
+mod tests;
+
 pub async fn cleanup_database(db: &Database, retention_days: i64) -> Result<()> {
     cleanup_database_with_budget(db, retention_days, CLEANUP_MAX_PASSES, CLEANUP_TIME_BUDGET).await
 }
@@ -18,22 +41,6 @@ pub(crate) async fn cleanup_database_with_budget(
     let current = now();
     let cutoff = current - retention_days.clamp(1, 3650) * 86_400;
     let active_task_cutoff = current - REMOTE_TASK_ACTIVE_TTL_SECONDS;
-    let statements = [
-        "DELETE FROM metric_history WHERE (server_id, timestamp) IN ( \
-           SELECT server_id, timestamp FROM metric_history WHERE \
-           last_timestamp<? \
-           ORDER BY timestamp LIMIT ?)",
-        "DELETE FROM latency_results WHERE (task_id, server_id, timestamp) IN ( \
-           SELECT task_id, server_id, timestamp FROM latency_results WHERE COALESCE(last_timestamp,timestamp)<? \
-           ORDER BY timestamp LIMIT ?)",
-        "DELETE FROM remote_tasks WHERE status IN ('success','failed') AND id IN ( \
-           SELECT id FROM remote_tasks WHERE status IN ('success','failed') AND completed_at<? \
-           ORDER BY completed_at LIMIT ?)",
-        "DELETE FROM alert_states WHERE active=0 AND state_key IN ( \
-           SELECT state_key FROM alert_states WHERE active=0 AND updated_at<? \
-           AND NOT EXISTS (SELECT 1 FROM notification_outbox WHERE notification_outbox.state_key=alert_states.state_key) \
-           ORDER BY updated_at LIMIT ?)",
-    ];
     let started = std::time::Instant::now();
     let mut done = [false; 5];
     // Each statement commits its own bounded batch; rotate tables so a large
@@ -61,8 +68,11 @@ pub(crate) async fn cleanup_database_with_budget(
                 .await?
                 .rows_affected()
             } else {
-                sqlx::query(db.sql(statements[index - 1]))
-                    .bind(cutoff)
+                let mut query = sqlx::query(db.sql(CLEANUP_STATEMENTS[index - 1])).bind(cutoff);
+                if index <= 2 {
+                    query = query.bind(cutoff);
+                }
+                query
                     .bind(CLEANUP_DELETE_BATCH_ROWS)
                     .execute(db.pool())
                     .await?

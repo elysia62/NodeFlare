@@ -2,6 +2,7 @@ use super::super::{Database, now};
 use anyhow::Result;
 use sqlx::{AssertSqlSafe, Row};
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -12,6 +13,64 @@ const CANDIDATE_LIMIT: i64 = 128;
 // Agents can resend latency samples from the previous two hours. Wait until
 // that window closes before replacing their deduplication keys with summaries.
 const LATE_SAMPLE_WINDOW: i64 = 2 * 3600 + 60;
+const TIERS: [(i64, i64, i64); 3] = [
+    (30 * DAY, 3600, i64::MAX),
+    (7 * DAY, 300, 30 * DAY),
+    (LATE_SAMPLE_WINDOW, 60, 7 * DAY),
+];
+const JOB_COUNT: usize = TIERS.len() * 2;
+const SCAN_WINDOW: i64 = DAY;
+
+/// Ephemeral cursors avoid rescanning already compacted history. They are not
+/// stored in backups: a new connection or a restore starts from retained data.
+pub(crate) struct HistoryCompaction {
+    pub(crate) progress: tokio::sync::Mutex<CompactionProgress>,
+    dirty_since: AtomicI64,
+}
+
+impl Default for HistoryCompaction {
+    fn default() -> Self {
+        Self {
+            progress: tokio::sync::Mutex::new(CompactionProgress::default()),
+            dirty_since: AtomicI64::new(i64::MAX),
+        }
+    }
+}
+
+impl HistoryCompaction {
+    /// Called after history writes, including conservative invalidation when
+    /// a commit is cancelled. Ordinary recent reports do not rewind old tiers.
+    pub(crate) fn mark_dirty_since(&self, timestamp: i64) {
+        self.dirty_since.fetch_min(timestamp, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CompactionProgress {
+    cursors: [Option<i64>; JOB_COUNT],
+    next_job: usize,
+    last_run: Option<(i64, i64)>,
+}
+
+impl CompactionProgress {
+    fn prepare(&mut self, current: i64, retention_days: i64, dirty_since: i64) {
+        if self
+            .last_run
+            .is_some_and(|(previous, retention)| current < previous || retention_days != retention)
+        {
+            *self = Self::default();
+        }
+        self.last_run = Some((current, retention_days));
+        if dirty_since != i64::MAX {
+            for (index, cursor) in self.cursors.iter_mut().enumerate() {
+                if let Some(cursor) = cursor {
+                    let interval = TIERS[index / 2].1;
+                    *cursor = (*cursor).min(dirty_since.div_euclid(interval) * interval);
+                }
+            }
+        }
+    }
+}
 
 pub async fn compact_history(db: &Database, retention_days: i64) -> Result<()> {
     compact_history_at(db, retention_days, now(), Duration::from_secs(2)).await
@@ -24,59 +83,92 @@ pub(super) async fn compact_history_at(
     budget: Duration,
 ) -> Result<()> {
     let started = Instant::now();
-    let retained_since = current - retention_days.clamp(1, 3650) * DAY;
-    // Oldest first: old uncompressed data can go directly to hourly buckets.
-    for (age, interval, younger_than) in [
-        (30 * DAY, 3600, i64::MAX),
-        (7 * DAY, 300, 30 * DAY),
-        (LATE_SAMPLE_WINDOW, 60, 7 * DAY),
-    ] {
+    if budget.is_zero() {
+        return Ok(());
+    }
+    // Clones of Database share cursors. Do not queue duplicate maintenance
+    // passes, or race a restore that is replacing the history underneath us.
+    let Ok(mut progress) = db.history_compaction.progress.try_lock() else {
+        return Ok(());
+    };
+    let retention_days = retention_days.clamp(1, 3650);
+    progress.prepare(
+        current,
+        retention_days,
+        db.history_compaction
+            .dirty_since
+            .swap(i64::MAX, Ordering::Relaxed),
+    );
+    let retained_since = current - retention_days * DAY;
+    let mut idle_jobs = 0;
+    // Start with the oldest tier, then rotate metric/latency work. Remember
+    // the next job across budget exhaustion so a backlog cannot starve one.
+    while started.elapsed() < budget && idle_jobs < JOB_COUNT {
+        let job = progress.next_job;
+        progress.next_job = (job + 1) % JOB_COUNT;
+        let (age, interval, younger_than) = TIERS[job / 2];
+        let latency = job % 2 != 0;
         let end = (current - age).div_euclid(interval) * interval;
-        let start =
+        let lower_bound =
             retained_since.max(current.saturating_sub(younger_than).div_euclid(3600) * 3600);
+        let start = progress.cursors[job]
+            .unwrap_or(lower_bound)
+            .max(lower_bound);
         if start >= end {
+            idle_jobs += 1;
             continue;
         }
-        for latency in [false, true] {
+        idle_jobs = 0;
+        // Bound even an empty candidate search: LIMIT bounds returned rows,
+        // not the aligned rows SQLite/PostgreSQL may have to skip.
+        let window_end = end.min((start + SCAN_WINDOW).div_euclid(interval) * interval);
+        let statement = if latency {
+            db.sql(
+                "SELECT server_id, task_id, timestamp FROM latency_results \
+                WHERE timestamp>=? AND timestamp<? AND timestamp % ? <> 0 \
+                ORDER BY timestamp LIMIT ?",
+            )
+        } else {
+            db.sql(
+                "SELECT server_id, '' AS task_id, timestamp FROM metric_history \
+                WHERE timestamp>=? AND timestamp<? AND timestamp % ? <> 0 \
+                ORDER BY timestamp LIMIT ?",
+            )
+        };
+        let rows = sqlx::query(statement)
+            .bind(start)
+            .bind(window_end)
+            .bind(interval)
+            .bind(CANDIDATE_LIMIT)
+            .fetch_all(db.pool())
+            .await?;
+        let full_page = rows.len() == CANDIDATE_LIMIT as usize;
+        let mut buckets = BTreeSet::new();
+        for row in rows {
+            let timestamp: i64 = row.try_get("timestamp")?;
+            buckets.insert((
+                timestamp.div_euclid(interval) * interval,
+                row.try_get::<String, _>("server_id")?,
+                row.try_get::<String, _>("task_id")?,
+            ));
+        }
+        // Stay at the final bucket on a full page: other nodes/tasks in that
+        // same bucket may not fit in this page and must still be discovered.
+        let resume_at = if full_page {
+            buckets.last().expect("full candidate page").0
+        } else {
+            window_end
+        };
+        for (bucket, server_id, task_id) in buckets {
             if started.elapsed() >= budget {
                 return Ok(());
             }
-            let statement = if latency {
-                db.sql(
-                    "SELECT server_id, task_id, timestamp FROM latency_results \
-                    WHERE timestamp>=? AND timestamp<? AND timestamp % ? <> 0 \
-                    ORDER BY timestamp LIMIT ?",
-                )
-            } else {
-                db.sql(
-                    "SELECT server_id, '' AS task_id, timestamp FROM metric_history \
-                    WHERE timestamp>=? AND timestamp<? AND timestamp % ? <> 0 \
-                    ORDER BY timestamp LIMIT ?",
-                )
-            };
-            let rows = sqlx::query(statement)
-                .bind(start)
-                .bind(end)
-                .bind(interval)
-                .bind(CANDIDATE_LIMIT)
-                .fetch_all(db.pool())
-                .await?;
-            let mut buckets = BTreeSet::new();
-            for row in rows {
-                let timestamp: i64 = row.try_get("timestamp")?;
-                buckets.insert((
-                    timestamp.div_euclid(interval) * interval,
-                    row.try_get::<String, _>("server_id")?,
-                    row.try_get::<String, _>("task_id")?,
-                ));
-            }
-            for (bucket, server_id, task_id) in buckets {
-                if started.elapsed() >= budget {
-                    return Ok(());
-                }
-                compact_bucket(db, &server_id, &task_id, bucket, interval, latency).await?;
-            }
+            compact_bucket(db, &server_id, &task_id, bucket, interval, latency).await?;
         }
+        // Advance only after every selected bucket committed. Errors,
+        // cancellation and budget exhaustion leave this page retryable.
+        progress.cursors[job] = Some(resume_at);
+        tokio::task::yield_now().await;
     }
     Ok(())
 }

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 pub const SECRET_MASK: &str = "********";
@@ -42,6 +42,7 @@ pub struct Database {
     pool: AnyPool,
     kind: DatabaseKind,
     sqlite_path: Option<PathBuf>,
+    pub(crate) history_compaction: Arc<queries::HistoryCompaction>,
 }
 
 #[derive(Debug, Clone)]
@@ -383,6 +384,7 @@ pub async fn connect(database_url: &str) -> Result<Database> {
         pool,
         kind,
         sqlite_path,
+        history_compaction: Arc::default(),
     })
 }
 

@@ -15,6 +15,17 @@ pub(crate) const AGENT_REPORT_MAX_LATENCY_RESULTS: usize = 2048;
 const HISTORY_INSERT_BATCH_ROWS: usize = 500;
 const LATENCY_INSERT_BATCH_ROWS: usize = 500;
 
+struct InvalidateHistory<'a> {
+    db: &'a Database,
+    since: i64,
+}
+
+impl Drop for InvalidateHistory<'_> {
+    fn drop(&mut self) {
+        self.db.history_compaction.mark_dirty_since(self.since);
+    }
+}
+
 pub async fn save_agent_batch(
     db: &Database,
     identity: &AgentIdentity,
@@ -108,9 +119,13 @@ pub async fn save_agent_batch(
     .execute(&mut *transaction)
     .await?;
     save_traffic_state(db, &mut transaction, &identity.server_id, &traffic).await?;
+    // Node metadata is not a heartbeat: last-seen comes from latest_timestamp.
+    // Avoid rewriting this wide row on every persistence batch when its IPs
+    // have not changed. Empty reported addresses still preserve known IPs.
     sqlx::query(db.sql(
         "UPDATE servers SET last_ip=?, ip_v4=CASE WHEN ?='' THEN ip_v4 ELSE ? END, \
-         ip_v6=CASE WHEN ?='' THEN ip_v6 ELSE ? END, updated_at=? WHERE id=?",
+         ip_v6=CASE WHEN ?='' THEN ip_v6 ELSE ? END, updated_at=? WHERE id=? \
+         AND (last_ip<>? OR (?<>'' AND ip_v4<>?) OR (?<>'' AND ip_v6<>?))",
     ))
     .bind(remote_ip)
     .bind(&latest.ip_v4)
@@ -119,8 +134,27 @@ pub async fn save_agent_batch(
     .bind(&latest.ip_v6)
     .bind(current)
     .bind(&identity.server_id)
+    .bind(remote_ip)
+    .bind(&latest.ip_v4)
+    .bind(&latest.ip_v4)
+    .bind(&latest.ip_v6)
+    .bind(&latest.ip_v6)
     .execute(&mut *transaction)
     .await?;
+    // Rewind cached compaction cursors after the commit. A cancelled commit
+    // can still reach the database, so invalidate on Drop even on that path.
+    let _invalidate_history =
+        InvalidateHistory {
+            db,
+            since: history_rows
+                .iter()
+                .map(|row| row.report.timestamp)
+                .chain(reports.iter().flat_map(|report| {
+                    report.latency_results.iter().map(|sample| sample.timestamp)
+                }))
+                .min()
+                .unwrap_or(latest.timestamp),
+        };
     transaction.commit().await?;
     Ok(PersistResult {
         reports,
@@ -711,3 +745,6 @@ mod traffic_tests {
         assert_eq!(state.reset_timezone, "Asia/Tokyo");
     }
 }
+
+#[cfg(test)]
+mod tests;

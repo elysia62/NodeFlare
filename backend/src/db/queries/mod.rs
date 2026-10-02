@@ -69,6 +69,7 @@ pub use maintenance::cleanup_database;
 pub use remote::{
     create_remote_task, mark_remote_task_sent, remote_task, update_remote_task_result,
 };
+pub(crate) use rollup::HistoryCompaction;
 pub use rollup::compact_history;
 pub use servers::{
     agent_config, agent_identity, agent_install_token, all_server_ids, create_server,

@@ -854,6 +854,11 @@ async fn restore<R: Read + Seek + Send>(
     };
     let schema = database_schema(db, tables).await?;
 
+    // Restored rows may precede every cached rollup cursor. Reset before the
+    // transaction so cancellation or an uncertain commit cannot keep stale
+    // progress; exclude compaction until the replacement finishes.
+    let mut history_progress = db.history_compaction.progress.lock().await;
+    *history_progress = Default::default();
     let mut transaction = db.pool().begin().await?;
     if db.is_postgres() {
         sqlx::query(POSTGRES_RESTORE_LOCK)

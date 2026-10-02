@@ -339,3 +339,199 @@ async fn latency_rollup_keeps_failures_and_respects_reassignment() {
     let latest = super::super::list_servers(&db, true).await.unwrap();
     assert_eq!(latest[0].latency[0].timestamp, base + 61);
 }
+
+#[tokio::test]
+async fn completed_cursors_skip_sql_and_clones_share_progress() {
+    let db = crate::db::connect("sqlite::memory:").await.unwrap();
+    setup(&db).await;
+    let current = now().div_euclid(3600) * 3600;
+    compact(&db, current).await;
+    let before = db.history_compaction.progress.lock().await.cursors;
+    for (index, cursor) in before.iter().enumerate() {
+        let (age, interval, _) = TIERS[index / 2];
+        assert_eq!(
+            *cursor,
+            Some((current - age).div_euclid(interval) * interval)
+        );
+    }
+    // An in-memory database has one connection. A completed pass must not
+    // request it: holding it makes any accidental history rescan time out.
+    let connection = db.pool().acquire().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), compact(&db.clone(), current))
+        .await
+        .expect("completed history must not be queried again");
+    assert_eq!(db.history_compaction.progress.lock().await.cursors, before);
+    drop(connection);
+}
+
+#[tokio::test]
+async fn candidate_pages_keep_other_nodes_in_the_same_bucket() {
+    let db = crate::db::connect("sqlite::memory:").await.unwrap();
+    setup(&db).await;
+    let current = now().div_euclid(3600) * 3600;
+    let base = current - 10 * DAY;
+    let nodes = CANDIDATE_LIMIT + 3;
+    let mut transaction = db.pool().begin().await.unwrap();
+    for index in 0..nodes {
+        let id = format!("page-node-{index:03}");
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES (?, 'Node', ?, 1, 1)")
+            .bind(&id).bind(&id).execute(&mut *transaction).await.unwrap();
+        sqlx::query(
+            "INSERT INTO latency_task_servers(task_id,server_id,assigned_at) VALUES ('task',?,1)",
+        )
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        for offset in [1, 61] {
+            let timestamp = base + offset;
+            sqlx::query("INSERT INTO metric_history(server_id,timestamp,first_timestamp,last_timestamp,cpu) VALUES (?,?,?,?,25.0)")
+                .bind(&id).bind(timestamp).bind(timestamp).bind(timestamp)
+                .execute(&mut *transaction).await.unwrap();
+            sqlx::query("INSERT INTO latency_results(task_id,server_id,timestamp,latency_ms,packet_loss) VALUES ('task',?,?,10.0,0.0)")
+                .bind(&id).bind(timestamp).execute(&mut *transaction).await.unwrap();
+        }
+    }
+    transaction.commit().await.unwrap();
+    compact(&db, current).await;
+    for table in ["metric_history", "latency_results"] {
+        let statement = format!(
+            "SELECT COUNT(*),CAST(SUM(sample_count) AS BIGINT),MIN(timestamp),MAX(timestamp) FROM {table}"
+        );
+        let stats: (i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(statement))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(stats, (nodes, nodes * 2, base, base));
+    }
+}
+
+#[tokio::test]
+async fn dirty_history_rewinds_completed_cursors_without_losing_concurrent_marks() {
+    let db = crate::db::connect("sqlite::memory:").await.unwrap();
+    setup(&db).await;
+    let current = now().div_euclid(3600) * 3600;
+    compact(&db, current).await;
+    let base = current - 10 * DAY;
+    seed(&db, base).await;
+    {
+        let mut progress = db.history_compaction.progress.lock().await;
+        progress.prepare(
+            current,
+            365,
+            db.history_compaction
+                .dirty_since
+                .swap(i64::MAX, Ordering::Relaxed),
+        );
+        // A commit that follows this pass's dirty drain must be retained for
+        // the next pass, even if the current pass advances its scan cursors.
+        db.history_compaction.mark_dirty_since(base + 1);
+        db.history_compaction.mark_dirty_since(current);
+    }
+    compact(&db, current).await;
+    for table in ["metric_history", "latency_results"] {
+        let statement = format!("SELECT COUNT(*),CAST(SUM(sample_count) AS BIGINT) FROM {table}");
+        let stats: (i64, i64) = sqlx::query_as(AssertSqlSafe(statement))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(stats, (1, 4));
+    }
+    assert_eq!(
+        db.history_compaction.dirty_since.load(Ordering::Relaxed),
+        i64::MAX
+    );
+}
+
+#[tokio::test]
+async fn newly_aged_buckets_and_expanded_retention_are_not_skipped() {
+    let db = crate::db::connect("sqlite::memory:").await.unwrap();
+    setup(&db).await;
+    let current = now().div_euclid(3600) * 3600;
+    seed(&db, current - 7 * DAY).await;
+    seed(&db, current - 40 * DAY).await;
+    compact_history_at(&db, 30, current, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metric_history")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 5); // Two minute rows and three outside the scan range.
+    compact_history_at(&db, 30, current + 300, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metric_history")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 4);
+    compact(&db, current + 300).await;
+    let counts: (i64, i64) =
+        sqlx::query_as("SELECT COUNT(*),CAST(SUM(sample_count) AS BIGINT) FROM metric_history")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(counts, (2, 8));
+}
+
+#[test]
+fn progress_resets_after_clock_reversal_or_retention_change() {
+    let mut progress = CompactionProgress {
+        cursors: [Some(1000); JOB_COUNT],
+        next_job: 4,
+        last_run: Some((2000, 30)),
+    };
+    progress.prepare(1999, 30, i64::MAX);
+    assert_eq!(progress.cursors, [None; JOB_COUNT]);
+    assert_eq!(progress.next_job, 0);
+    progress.cursors = [Some(1500); JOB_COUNT];
+    progress.prepare(2100, 7, i64::MAX);
+    assert_eq!(progress.cursors, [None; JOB_COUNT]);
+}
+
+#[tokio::test]
+async fn restoring_and_copying_into_a_scanned_database_reset_progress() {
+    use std::io::Read;
+
+    let source = crate::db::connect("sqlite::memory:").await.unwrap();
+    let target = crate::db::connect("sqlite::memory:").await.unwrap();
+    setup(&source).await;
+    setup(&target).await;
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('admin_username','admin'),('admin_password_hash','hash'),('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')")
+        .execute(source.pool()).await.unwrap();
+    let current = now().div_euclid(3600) * 3600;
+    seed(&source, current - 10 * DAY).await;
+    let themes = tempfile::tempdir().unwrap();
+    let mut archive = crate::backup::export_archive(&source, themes.path())
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    archive.file.read_to_end(&mut bytes).unwrap();
+    for copy in [true, false] {
+        compact(&target, current).await;
+        if copy {
+            crate::backup::copy_database(&source, &target)
+                .await
+                .unwrap();
+        } else {
+            crate::backup::restore_archive(&target, themes.path(), &bytes)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            target.history_compaction.progress.lock().await.cursors,
+            [None; JOB_COUNT]
+        );
+        compact(&target, current).await;
+        for table in ["metric_history", "latency_results"] {
+            let statement =
+                format!("SELECT COUNT(*),CAST(SUM(sample_count) AS BIGINT) FROM {table}");
+            let stats: (i64, i64) = sqlx::query_as(AssertSqlSafe(statement))
+                .fetch_one(target.pool())
+                .await
+                .unwrap();
+            assert_eq!(stats, (1, 4));
+        }
+    }
+}
