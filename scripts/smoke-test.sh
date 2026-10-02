@@ -221,7 +221,7 @@ request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/bootstrap
 rm -f -- "$backup_file"
 backup_file=
 
-server_input='{"name":"Smoke Test Node","region":"JP","group_name":"Test","tags":"smoke","hidden":false,"expires_at":1893456000,"traffic_limit":107374182400,"traffic_limit_type":"max","price":9.9,"billing_cycle":30,"currency":"USD","auto_renewal":true,"network_interface":"","reset_day":1,"reset_timezone":"UTC","report_interval":60,"collect_interval":5,"rx_correction":0,"tx_correction":0,"agent_mirror":"https://mirror.example.com","offline_notify_disabled":false,"auto_update":true}'
+server_input='{"name":"Smoke Test Node","region":"JP","group_name":"Test","tags":"smoke","hidden":false,"expires_at":1893456000,"traffic_limit":107374182400,"traffic_limit_type":"max","price":9.9,"billing_cycle":30,"currency":"USD","auto_renewal":true,"network_interface":"","reset_day":1,"reset_timezone":"UTC","report_interval":60,"collect_interval":5,"rx_correction":0,"tx_correction":0,"agent_mirror":"https://mirror.example.com","agent_remote_control":true,"offline_notify_disabled":false,"auto_update":true}'
 
 step "admin resources"
 request -H "Authorization: Bearer $admin_token" \
@@ -232,6 +232,17 @@ invalid_telegram_status=$(monitor_curl --silent --output /dev/null --write-out '
   --data '{"bot_token":"invalid","chat_id":"","message_thread_id":null,"template":"{{message}}"}' \
   "$MONITOR_BASE_URL/api/admin/telegram")
 [ "$invalid_telegram_status" = "400" ]
+request -H "Authorization: Bearer $admin_token" \
+  "$MONITOR_BASE_URL/api/admin/webhooks" | \
+  jq -e '.webhooks | type == "array" and all(.[]; (has("url") or has("headers") or has("body")) | not)' >/dev/null
+invalid_webhook_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X PUT -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+  --data '{"enabled":false,"preset":"custom","url":"invalid","headers":"","body":"{}"}' \
+  "$MONITOR_BASE_URL/api/admin/webhooks")
+[ "$invalid_webhook_status" = "400" ]
+invalid_channel_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X POST -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/webhooks/unknown/test")
+[ "$invalid_channel_status" = "400" ]
 latency_task_json=$(request -H "Authorization: Bearer $admin_token" \
   -H 'Content-Type: application/json' \
   --data '{"name":"Smoke TCP","task_type":"tcp","target":"example.com","port":443,"interval_seconds":60,"default_enabled":true,"server_ids":[]}' \

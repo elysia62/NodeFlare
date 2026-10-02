@@ -25,6 +25,7 @@ import { chartGapLimit, chartTimeLabel, insertTimelineGaps } from "../chart";
 import { demoHistory, demoLatencyHistory, demoLatencyTasks } from "../demo";
 import { averageOf } from "../latency";
 import { liveLatencySamples } from "../live";
+import { appendRealtimePoint, loadChartPoints, mergeLoadHistory, type LoadChartPoint, type LoadHistoryPoint } from "../loadHistory";
 import { displayGpuDevices, formatBytes, formatCpuName, formatSpeed, formatUptime, isOnline, number } from "../format";
 import type { HistoryPoint, LatencySample, LatencyTestPoint, LiveLatencyResult, Server } from "../types";
 import { Flag, regionDisplayName } from "./Flag";
@@ -34,8 +35,6 @@ import { ui } from "../locale";
 type ChartType = "load" | "latency";
 
 const LATENCY_COLORS = ["#2563eb", "#db2777", "#ea7b1b", "#0f766e", "#7c3aed", "#0891b2"];
-const REALTIME_WINDOW_SECONDS = 60 * 60;
-const MAX_REALTIME_POINTS = 720;
 const MAX_LATENCY_HISTORY_ROWS = 4000;
 
 function historyPointFromServer(server: Server): HistoryPoint | null {
@@ -67,15 +66,6 @@ function historyPointFromServer(server: Server): HistoryPoint | null {
     disk_await_ms: number(server.disk_await_ms),
     disk_utilization: number(server.disk_utilization),
   };
-}
-
-function appendRealtimePoint(points: HistoryPoint[], point: HistoryPoint | null): HistoryPoint[] {
-  if (!point) return points;
-  const cutoff = point.timestamp - REALTIME_WINDOW_SECONDS;
-  const next = points.filter((current) => current.timestamp >= cutoff && current.timestamp !== point.timestamp);
-  next.push(point);
-  next.sort((left, right) => left.timestamp - right.timestamp);
-  return next.slice(-MAX_REALTIME_POINTS);
 }
 
 function InfoItem({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
@@ -149,51 +139,10 @@ interface LatencyChartPoint {
   value: number | null;
 }
 
-interface LoadChartPoint {
-  timestamp: number;
-  cpu: number | null;
-  mem_used: number | null;
-  mem_total: number;
-  disk_used: number | null;
-  disk_total: number;
-  net_in: number | null;
-  net_out: number | null;
-}
-
 function insertLatencyGaps(points: LatencyChartPoint[], hours: number): LatencyChartPoint[] {
   return insertTimelineGaps(
     points,
     (timestamp) => ({ timestamp, value: null }),
-    { minGap: 10_000, maxGap: chartGapLimit(hours) },
-  );
-}
-
-function insertLoadGaps(points: HistoryPoint[], hours: number): LoadChartPoint[] {
-  const mapped = points
-    .filter((point) => Number.isFinite(point.timestamp) && point.timestamp > 0)
-    .sort((left, right) => left.timestamp - right.timestamp)
-    .map((point) => ({
-      timestamp: point.timestamp * 1000,
-      cpu: Number.isFinite(point.cpu) ? point.cpu : null,
-      mem_used: Number.isFinite(point.mem_used) ? point.mem_used : null,
-      mem_total: Math.max(0, number(point.mem_total)),
-      disk_used: Number.isFinite(point.disk_used) ? point.disk_used : null,
-      disk_total: Math.max(0, number(point.disk_total)),
-      net_in: Number.isFinite(point.net_in) ? point.net_in : null,
-      net_out: Number.isFinite(point.net_out) ? point.net_out : null,
-    }));
-  return insertTimelineGaps(
-    mapped,
-    (timestamp) => ({
-      timestamp,
-      cpu: null,
-      mem_used: null,
-      mem_total: 0,
-      disk_used: null,
-      disk_total: 0,
-      net_in: null,
-      net_out: null,
-    }),
     { minGap: 10_000, maxGap: chartGapLimit(hours) },
   );
 }
@@ -217,7 +166,7 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
   const [loadHours, setLoadHours] = useState(0);
   const [latencyHours, setLatencyHours] = useState(1);
   const [chartType, setChartType] = useState<ChartType>("load");
-  const [points, setPoints] = useState<HistoryPoint[]>([]);
+  const [points, setPoints] = useState<LoadHistoryPoint[]>([]);
   const [latencyPoints, setLatencyPoints] = useState<LatencySample[]>([]);
   const [latencyTasks, setLatencyTasks] = useState<LatencyTestPoint[]>([]);
   const [hiddenLatencyTaskIds, setHiddenLatencyTaskIds] = useState<Set<string>>(() => new Set());
@@ -240,8 +189,8 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
     let active = true;
     api.history(server.id, requestHours)
       .then((history) => {
-        if (active) setPoints(loadHours === 0
-          ? appendRealtimePoint(history.points, historyPointFromServer(latestServerRef.current))
+        if (active) setPoints((current) => loadHours === 0
+          ? mergeLoadHistory(history.points, current, historyPointFromServer(latestServerRef.current))
           : history.points);
       })
       .catch((reason) => { if (active) { setPoints([]); setLoadError(reason instanceof Error ? reason.message : ui(locale, "历史数据加载失败", "Unable to load history")); } })
@@ -305,7 +254,7 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
   const hours = chartType === "load" ? loadHours : latencyHours;
   const loadChartHours = loadHours === 0 ? 1 : loadHours;
   const data = useMemo(
-    () => insertLoadGaps(points, loadChartHours),
+    () => loadChartPoints(points, loadChartHours),
     [loadChartHours, points],
   );
   const networkMaximum = useMemo(() => networkAxisMaximum(data), [data]);

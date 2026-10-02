@@ -14,6 +14,7 @@ import type { UiLocale } from "./locale";
  */
 const MESSAGES: Record<string, string> = {
   "尚未配置 Webhook": "Webhook is not configured",
+  "通知渠道配置无效": "Invalid notification channel configuration",
   "Webhook URL 无效": "Invalid Webhook URL",
   "Webhook 请求头过长": "Webhook headers are too long",
   "Webhook 请求头应为 Name: value 格式": "Webhook headers must use Name: value format",

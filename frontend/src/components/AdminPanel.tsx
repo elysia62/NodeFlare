@@ -19,11 +19,13 @@ import { LoginForm } from "./LoginForm";
 import { useDialog } from "./useDialog";
 import { SiteLogo } from "./SiteLogo";
 import { LatencyManager } from "./LatencyManager";
+import { NotificationSettings } from "./NotificationSettings";
 import { useVerification } from "./useVerification";
 import { AboutTab } from "./admin/AboutTab";
 import { RemoteTab } from "./admin/RemoteTab";
 import { ServersTab } from "./admin/ServersTab";
 import { InstallDialog } from "./admin/InstallDialog";
+import { Select } from "./admin/Select";
 import { SettingsTabs } from "./admin/SettingsTabs";
 import { ThemesTab } from "./admin/ThemesTab";
 import { Toggle } from "./admin/controls";
@@ -265,7 +267,7 @@ export function AdminPanel({
     try {
       if (editing === "new") {
         const result = await api.createServer(payload);
-        setInstall({ agent_token: result.agent_token, agent_mirror: form.agent_mirror });
+        setInstall({ agent_token: result.agent_token, agent_mirror: form.agent_mirror, agent_remote_control: form.agent_remote_control });
       } else if (editing) {
         await api.updateServer(editing.id, payload);
       }
@@ -300,7 +302,7 @@ export function AdminPanel({
     setError("");
     try {
       const { agent_token } = await api.createAgentInstallToken(server.id);
-      setInstall({ agent_token, agent_mirror: server.agent_mirror });
+      setInstall({ agent_token, agent_mirror: server.agent_mirror, agent_remote_control: server.agent_remote_control });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : ui(locale, "生成 Agent 安装命令失败", "Failed to generate the Agent install command"));
     } finally {
@@ -898,20 +900,20 @@ export function AdminPanel({
                   onAdd={addTheme}
                   onError={setError}
                 />
-              ) : settings && (tab === "appearance" || tab === "themeSettings" || tab === "alerts" || tab === "security" || tab === "data") ? (
+              ) : tab === "alerts" && settings ? (
+                <NotificationSettings locale={locale} settings={settings} servers={servers} updateSettings={updateSettings}
+                  onSaved={(next) => { setSettings(next); onChanged(); }} onError={setError} onNotice={setNotice} />
+              ) : settings && (tab === "appearance" || tab === "themeSettings" || tab === "security" || tab === "data") ? (
                 <SettingsTabs
                   tab={tab}
                   locale={locale}
                   settings={settings}
-                  servers={servers}
                   busy={busy}
                   saveSite={saveSite}
                   migrateDatabase={migrateDatabase}
                   updateSettings={updateSettings}
                   themeSettingsSchema={themeSettingsSchema}
                   updateThemeOption={updateThemeOption}
-                  setError={setError}
-                  setNotice={setNotice}
                   newPasswordConfirmation={newPasswordConfirmation}
                   setNewPasswordConfirmation={setNewPasswordConfirmation}
                   twoFactorStatus={twoFactorStatus}
@@ -980,13 +982,18 @@ export function AdminPanel({
           <label><span>{ui(locale, "流量限额（0 不限）", "Traffic limit (0 = unlimited)")}</span><input placeholder={ui(locale, "如 100 G，不带单位按 GB；0 不限", "e.g. 100 G; bare numbers mean GB; 0 = unlimited")} {...sizeInputProps(trafficLimitText, setTrafficLimitText, (bytes) => updateForm("traffic_limit", bytes), form.traffic_limit)} /></label>
           <label><span>{ui(locale, "流量口径", "Traffic accounting")}</span><select value={form.traffic_limit_type} onChange={(event) => updateForm("traffic_limit_type", event.target.value as ServerInput["traffic_limit_type"])}><option value="sum">{ui(locale, "上下行合计", "Up + down")}</option><option value="max">{ui(locale, "取较大值", "Larger of the two")}</option><option value="min">{ui(locale, "取较小值", "Smaller of the two")}</option><option value="up">{ui(locale, "仅上行", "Upload only")}</option><option value="down">{ui(locale, "仅下行", "Download only")}</option></select></label>
           <label><span>{ui(locale, "流量重置日", "Traffic reset day")}</span><input min="1" max="31" type="number" value={form.reset_day} onChange={(event) => updateForm("reset_day", Number(event.target.value))} /></label>
-          <label><span>{ui(locale, "流量重置时区", "Traffic reset timezone")}</span><input required maxLength={64} list="traffic-reset-timezones" value={form.reset_timezone} onChange={(event) => updateForm("reset_timezone", event.target.value)} placeholder="UTC / Asia/Shanghai" /><datalist id="traffic-reset-timezones">{trafficTimezones(locale).map((zone) => <option key={zone.value} value={zone.value}>{zone.label}</option>)}</datalist></label>
+          <Select label={ui(locale, "流量重置时区", "Traffic reset timezone")} value={form.reset_timezone} options={trafficTimezones(locale, form.reset_timezone)} onChange={(value) => updateForm("reset_timezone", value)} />
         </div>
-        <p className="settings-hint">{ui(locale, "按所选时区每月重置日的零点重置，短月份取最后一天；地区时区自动处理夏令时。修改重置日或时区会在下一次上报时重新开始累计。", "Resets at midnight in this timezone on the chosen day each month, clamped to the last day of shorter months. Regional timezones follow DST. Changing the reset day or timezone starts a new counter on the next report.")}</p>
         <div className="form-grid three"><label><span>{ui(locale, "价格（0 免费）", "Price (0 = free)")}</span><input type="number" min="0" max="1000000000" step="any" inputMode="decimal" value={priceText} onChange={(event) => updatePriceText(event.target.value)} onBlur={() => setPriceText(String(form.price))} /></label><label><span>{ui(locale, "币种", "Currency")}</span><select value={form.currency} onChange={(event) => updateForm("currency", event.target.value)}>{ASSET_CURRENCIES.map((code) => <option key={code}>{code}</option>)}</select></label><label><span>{ui(locale, "计费周期", "Billing cycle")}</span><select value={String(form.billing_cycle)} onChange={(event) => updateForm("billing_cycle", Number(event.target.value))}>{billingCycles(locale).map((cycle) => <option key={cycle.days} value={cycle.days}>{cycle.label}</option>)}{billingCycles(locale).every((cycle) => cycle.days !== form.billing_cycle) ? <option value={form.billing_cycle}>{ui(locale, `${form.billing_cycle} 天`, `${form.billing_cycle} days`)}</option> : null}</select></label></div>
         <div className="form-grid three"><label><span>{ui(locale, "到期日期", "Expiry date")}</span><input type="date" value={formatDate(form.expires_at)} onChange={(event) => updateForm("expires_at", event.target.value ? Math.floor(new Date(`${event.target.value}T00:00:00Z`).getTime() / 1000) : null)} /></label><label><span>{ui(locale, "历史写入间隔（秒）", "History write interval (s)")}</span><input min="15" max="3600" type="number" value={form.report_interval} onChange={(event) => updateForm("report_interval", Number(event.target.value))} /></label><label><span>{ui(locale, "实时上传间隔（秒，每秒采样）", "Live upload interval (s, sampled every second)")}</span><input min="3" max="60" type="number" value={form.collect_interval} onChange={(event) => updateForm("collect_interval", Number(event.target.value))} /></label></div>
         <div className="form-grid"><label><span>{ui(locale, "统计网卡（支持 * 通配和 ! 排除，留空自动）", "Network interface (* wildcard and ! exclusion; empty = auto)")}</span><input value={form.network_interface} onChange={(event) => updateForm("network_interface", event.target.value)} placeholder="eth*,!eth1" /></label><label><span>{ui(locale, "Agent 下载加速（可选）", "Agent download mirror (optional)")}</span><input value={form.agent_mirror} onChange={(event) => updateForm("agent_mirror", event.target.value.trim())} placeholder="https://ghproxy.net" /></label><label><span>{ui(locale, "上行流量当前值", "Current upload traffic")}</span><input placeholder={ui(locale, "如 500 G", "e.g. 500 G")} {...sizeInputProps(txCurrentText, setTxCurrentText, setTxCurrentBytes, txCurrentBytes)} /></label><label><span>{ui(locale, "下行流量当前值", "Current download traffic")}</span><input placeholder={ui(locale, "如 500 G", "e.g. 500 G")} {...sizeInputProps(rxCurrentText, setRxCurrentText, setRxCurrentBytes, rxCurrentBytes)} /></label></div>
-        <div className="settings-toggles editor-toggles"><Toggle label={form.billing_cycle <= 0 ? ui(locale, "自动续费（一次性不适用）", "Auto-renew (N/A for one-time)") : ui(locale, "自动续费", "Auto-renew")} checked={form.auto_renewal} onChange={(value) => updateForm("auto_renewal", value)} /><Toggle label={ui(locale, "Agent 自动更新", "Agent auto-update")} checked={form.auto_update} onChange={(value) => updateForm("auto_update", value)} /><Toggle label={ui(locale, "隐藏节点", "Hide server")} checked={form.hidden} onChange={(value) => updateForm("hidden", value)} /><Toggle label={ui(locale, "关闭离线告警", "Disable offline alerts")} checked={form.offline_notify_disabled} onChange={(value) => updateForm("offline_notify_disabled", value)} /></div>
+        <div className="settings-toggles editor-toggles">
+          <Toggle label={form.billing_cycle <= 0 ? ui(locale, "自动续费（一次性不适用）", "Auto-renew (N/A for one-time)") : ui(locale, "自动续费", "Auto-renew")} checked={form.auto_renewal} onChange={(value) => updateForm("auto_renewal", value)} />
+          <Toggle label={ui(locale, "Agent 自动更新", "Agent auto-update")} checked={form.auto_update} onChange={(value) => updateForm("auto_update", value)} />
+          <Toggle label={ui(locale, "隐藏节点", "Hide server")} checked={form.hidden} onChange={(value) => updateForm("hidden", value)} />
+          <Toggle label={ui(locale, "关闭离线告警", "Disable offline alerts")} checked={form.offline_notify_disabled} onChange={(value) => updateForm("offline_notify_disabled", value)} />
+          <Toggle label={ui(locale, "允许远程执行", "Allow remote execution")} checked={form.agent_remote_control} onChange={(value) => updateForm("agent_remote_control", value)} />
+        </div>
         <div className="form-actions"><button type="button" className="secondary-btn" onClick={() => setEditing(null)}>{ui(locale, "取消", "Cancel")}</button><button className="primary-btn" disabled={busy}><Save size={15} />{ui(locale, "保存节点", "Save server")}</button></div>
       </form></div> : null}
 

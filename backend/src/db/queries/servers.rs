@@ -74,7 +74,7 @@ pub async fn list_servers_with_live(
          s.traffic_limit, s.traffic_limit_type, s.price, s.billing_cycle, s.currency, \
          s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, s.reset_timezone, \
          s.report_interval, s.collect_interval, s.rx_correction, s.tx_correction, \
-         s.agent_mirror, s.offline_notify_disabled, s.auto_update, \
+         s.agent_mirror, s.agent_remote_control, s.offline_notify_disabled, s.auto_update, \
          l.latest_json \
          FROM servers s LEFT JOIN server_latest_state l ON l.server_id=s.id \
          ORDER BY s.sort_order, s.created_at"
@@ -83,7 +83,7 @@ pub async fn list_servers_with_live(
          s.traffic_limit, s.traffic_limit_type, s.price, s.billing_cycle, s.currency, \
          s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, s.reset_timezone, \
          s.report_interval, s.collect_interval, s.rx_correction, s.tx_correction, \
-         s.agent_mirror, s.offline_notify_disabled, s.auto_update, \
+         s.agent_mirror, s.agent_remote_control, s.offline_notify_disabled, s.auto_update, \
          l.latest_json \
          FROM servers s LEFT JOIN server_latest_state l ON l.server_id=s.id \
          WHERE s.hidden=0 ORDER BY s.sort_order, s.created_at"
@@ -138,6 +138,7 @@ pub async fn list_servers_with_live(
                 rx_correction: row.try_get("rx_correction")?,
                 tx_correction: row.try_get("tx_correction")?,
                 agent_mirror: row.try_get("agent_mirror")?,
+                agent_remote_control: row.try_get::<i64, _>("agent_remote_control")? != 0,
                 offline_notify_disabled: row.try_get::<i64, _>("offline_notify_disabled")? != 0,
                 auto_update: row.try_get::<i64, _>("auto_update")? != 0,
                 timestamp: report.as_ref().map(|report| report.timestamp),
@@ -204,9 +205,9 @@ pub async fn create_server(db: &Database, input: &ServerInput) -> Result<(String
          id, token_hash, name, region, group_name, tags, hidden, expires_at, traffic_limit, \
          traffic_limit_type, price, billing_cycle, currency, auto_renewal, last_ip, ip_v4, ip_v6, \
          network_interface, reset_day, reset_timezone, report_interval, collect_interval, rx_correction, \
-         tx_correction, agent_mirror, offline_notify_disabled, auto_update, created_at, updated_at, \
+         tx_correction, agent_mirror, agent_remote_control, offline_notify_disabled, auto_update, created_at, updated_at, \
          sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?, ?, ?, \
-         ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM servers))",
+         ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM servers))",
     ))
     .bind(&id)
     .bind(&token_hash)
@@ -235,6 +236,7 @@ pub async fn create_server(db: &Database, input: &ServerInput) -> Result<(String
     .bind(input.rx_correction)
     .bind(input.tx_correction)
     .bind(input.agent_mirror.trim().trim_end_matches('/'))
+    .bind(i64::from(input.agent_remote_control))
     .bind(i64::from(input.offline_notify_disabled))
     .bind(i64::from(input.auto_update))
     .bind(timestamp)
@@ -260,7 +262,7 @@ pub async fn update_server(db: &Database, id: &str, input: &ServerInput) -> Resu
         "UPDATE servers SET name=?, region=?, group_name=?, tags=?, hidden=?, expires_at=?, \
          traffic_limit=?, traffic_limit_type=?, price=?, billing_cycle=?, currency=?, auto_renewal=?, \
          network_interface=?, reset_day=?, reset_timezone=?, report_interval=?, collect_interval=?, rx_correction=?, \
-         tx_correction=?, agent_mirror=?, offline_notify_disabled=?, auto_update=?, updated_at=? \
+         tx_correction=?, agent_mirror=?, agent_remote_control=?, offline_notify_disabled=?, auto_update=?, updated_at=? \
          WHERE id=?",
     ))
     .bind(input.name.trim())
@@ -288,6 +290,7 @@ pub async fn update_server(db: &Database, id: &str, input: &ServerInput) -> Resu
     .bind(input.rx_correction)
     .bind(input.tx_correction)
     .bind(input.agent_mirror.trim().trim_end_matches('/'))
+    .bind(i64::from(input.agent_remote_control))
     .bind(i64::from(input.offline_notify_disabled))
     .bind(i64::from(input.auto_update))
     .bind(timestamp)

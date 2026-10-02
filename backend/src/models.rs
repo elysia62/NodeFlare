@@ -45,6 +45,8 @@ pub struct ServerInput {
     pub rx_correction: i64,
     pub tx_correction: i64,
     pub agent_mirror: String,
+    // Installation preference only; the live Agent's local flag remains authoritative.
+    pub agent_remote_control: bool,
     pub offline_notify_disabled: bool,
     pub auto_update: bool,
 }
@@ -171,6 +173,7 @@ pub struct ServerView {
     pub rx_correction: i64,
     pub tx_correction: i64,
     pub agent_mirror: String,
+    pub agent_remote_control: bool,
     pub offline_notify_disabled: bool,
     pub auto_update: bool,
     pub timestamp: Option<i64>,
@@ -371,6 +374,22 @@ pub enum WebhookPreset {
     Gotify,
 }
 
+impl WebhookPreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::Bark => "bark",
+            Self::Discord => "discord",
+            Self::Slack => "slack",
+            Self::Wecom => "wecom",
+            Self::Dingtalk => "dingtalk",
+            Self::Feishu => "feishu",
+            Self::Ntfy => "ntfy",
+            Self::Gotify => "gotify",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct WebhookSettingsView {
     pub enabled: bool,
@@ -378,6 +397,18 @@ pub struct WebhookSettingsView {
     pub url_configured: bool,
     pub headers_configured: bool,
     pub body_configured: bool,
+}
+
+impl From<&WebhookSettingsInput> for WebhookSettingsView {
+    fn from(settings: &WebhookSettingsInput) -> Self {
+        Self {
+            enabled: settings.enabled,
+            preset: settings.preset,
+            url_configured: !settings.url.is_empty(),
+            headers_configured: !settings.headers.is_empty(),
+            body_configured: !settings.body.is_empty(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

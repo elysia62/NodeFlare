@@ -299,7 +299,7 @@ mod tests {
     /// `PUBLIC_SERVER_FIELDS` and this list together must cover every struct
     /// field; `public_projection_keeps_private_server_fields_out` fails when a
     /// new field lands in neither, so publishing it stays a deliberate choice.
-    const PRIVATE_SERVER_FIELDS: [&str; 15] = [
+    const PRIVATE_SERVER_FIELDS: [&str; 16] = [
         "hidden",
         "last_ip",
         "ip_v4",
@@ -308,6 +308,7 @@ mod tests {
         "reset_day",
         "reset_timezone",
         "remote_control",
+        "agent_remote_control",
         "report_interval",
         "collect_interval",
         "rx_correction",
@@ -344,6 +345,7 @@ mod tests {
             rx_correction: 0,
             tx_correction: 0,
             agent_mirror: "https://mirror.example.com".to_string(),
+            agent_remote_control: true,
             offline_notify_disabled: true,
             auto_update: false,
             timestamp: Some(9),

@@ -1130,7 +1130,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_03_defaults_existing_traffic_to_utc_without_resetting_usage() {
+    async fn migration_03_preserves_existing_notification_settings_and_traffic() {
         let db = connect("sqlite::memory:").await.unwrap();
         let previous = Migrator::with_migrations(
             SQLITE_MIGRATOR
@@ -1144,8 +1144,41 @@ mod tests {
             .execute(db.pool()).await.unwrap();
         sqlx::query("INSERT INTO server_traffic_state(server_id,cycle_key,reset_day,timestamp,raw_rx,raw_tx,used_rx,used_tx) VALUES ('node',24320,1,1789000000,1000,2000,123,456)")
             .execute(db.pool()).await.unwrap();
+        let webhook = r#"{"enabled":true,"preset":"bark","url":"https://example.com/push","headers":"X-Key: private","body":"{\"message\":\"{{message}}\"}"}"#;
+        set_setting(&db, "notification_webhook", webhook)
+            .await
+            .unwrap();
         db.migrate().await.unwrap();
         db.migrate().await.unwrap();
+        assert!(
+            get_setting(&db, "notification_webhook")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            get_setting(&db, "notification_webhook/bark")
+                .await
+                .unwrap()
+                .unwrap(),
+            webhook
+        );
+        assert!(
+            queries::raw_webhook_settings(&db, crate::models::WebhookPreset::Bark)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT agent_remote_control FROM servers WHERE id='node'"
+            )
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            0
+        );
         assert_eq!(
             sqlx::query_scalar::<_, String>("SELECT reset_timezone FROM servers WHERE id='node'")
                 .fetch_one(db.pool())

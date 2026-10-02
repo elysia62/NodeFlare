@@ -4,7 +4,8 @@ use crate::db::SECRET_MASK;
 use crate::middleware::AuthenticatedUser;
 use crate::models::{
     AlertRuleInput, LatencyTaskInput, ServerBatchInput, ServerInput, ServerOrderInput,
-    SettingsInput, TelegramSettingsInput, ThemeInput, ThemeUploadInput, WebhookSettingsInput,
+    SettingsInput, TelegramSettingsInput, ThemeInput, ThemeUploadInput, WebhookPreset,
+    WebhookSettingsInput, WebhookSettingsView,
 };
 use axum::Json;
 use axum::body::{Body, to_bytes};
@@ -398,10 +399,10 @@ pub async fn telegram_test(State(state): State<Arc<AppState>>) -> Result<Respons
 }
 
 pub async fn webhook_get(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    let webhook = crate::db::queries::webhook_settings(&state.db)
+    let webhooks = crate::db::queries::webhook_settings(&state.db)
         .await
         .map_err(ApiResponse::internal)?;
-    Ok(Json(serde_json::json!({"webhook": webhook})).into_response())
+    Ok(Json(serde_json::json!({"webhooks": webhooks})).into_response())
 }
 
 pub async fn webhook_put(
@@ -416,18 +417,24 @@ pub async fn webhook_put(
     crate::db::queries::save_webhook_settings(&state.db, &input)
         .await
         .map_err(ApiResponse::internal)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(Json(WebhookSettingsView::from(&input)).into_response())
 }
 
-pub async fn webhook_delete(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    crate::db::queries::delete_webhook_settings(&state.db)
+pub async fn webhook_delete(
+    State(state): State<Arc<AppState>>,
+    Path(preset): Path<WebhookPreset>,
+) -> Result<Response, ApiResponse> {
+    crate::db::queries::delete_webhook_settings(&state.db, preset)
         .await
         .map_err(ApiResponse::internal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-pub async fn webhook_test(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    crate::notify::test_webhook(&state.db, &state.webhook_http)
+pub async fn webhook_test(
+    State(state): State<Arc<AppState>>,
+    Path(preset): Path<WebhookPreset>,
+) -> Result<Response, ApiResponse> {
+    crate::notify::test_webhook(&state.db, &state.webhook_http, preset)
         .await
         .map_err(|error| ApiResponse::error(StatusCode::BAD_GATEWAY, error.to_string()))?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1191,7 +1198,7 @@ mod server_validation_tests {
             "traffic_limit_type": "sum", "price": 0, "billing_cycle": 30,
             "currency": "CNY", "auto_renewal": false, "network_interface": "",
             "reset_day": 1, "reset_timezone": "UTC", "report_interval": 60, "collect_interval": 3,
-            "rx_correction": 0, "tx_correction": 0, "agent_mirror": "",
+            "rx_correction": 0, "tx_correction": 0, "agent_mirror": "", "agent_remote_control": false,
             "offline_notify_disabled": false, "auto_update": true
         }))
         .unwrap();

@@ -132,4 +132,13 @@ describe("insertTimelineGaps", () => {
     const points = [{ timestamp: 0 }, { timestamp: 60 }, { timestamp: 120 }, { timestamp: 900 }];
     expect(typicalInterval(points)).toBe(60);
   });
+
+  test("a clamped threshold still places the gap strictly between real samples", () => {
+    const points = [{ timestamp: 0, value: 1 as number | null }, { timestamp: 600, value: 2 }];
+    const result = insertTimelineGaps(points, (timestamp) => ({ timestamp, value: null }), { minGap: 10, maxGap: 300 });
+    expect(result).toHaveLength(3);
+    expect(result[1].value).toBeNull();
+    expect(result[1].timestamp).toBeGreaterThan(points[0].timestamp);
+    expect(result[1].timestamp).toBeLessThan(points[1].timestamp);
+  });
 });

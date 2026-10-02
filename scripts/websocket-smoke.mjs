@@ -406,7 +406,7 @@ try {
       expires_at: null, traffic_limit: 0, traffic_limit_type: "max", price: 0,
       billing_cycle: 30, currency: "USD", auto_renewal: false, network_interface: "",
       reset_day: 1, reset_timezone: "UTC", report_interval: 60, collect_interval: 3, rx_correction: 0,
-      tx_correction: 0, agent_mirror: "", offline_notify_disabled: true, auto_update: false,
+      tx_correction: 0, agent_mirror: "", agent_remote_control: false, offline_notify_disabled: true, auto_update: false,
     }),
   });
   assert.equal(offlineResponse.status, 201, await offlineResponse.clone().text());
@@ -428,6 +428,7 @@ try {
   });
   assert(serversResponse.ok, await serversResponse.clone().text());
   const monitorOnlyServer = (await serversResponse.json()).servers.find((server) => server.id === serverId);
+  assert.equal(monitorOnlyServer.agent_remote_control, true, "The saved install preference must not override local Agent permission");
   assert.equal(monitorOnlyServer.remote_control, false, "Admin must see the Agent's local permission");
   const disabledOnly = await fetch(new URL("/api/admin/remote/task", baseUrl), {
     method: "POST",

@@ -12,6 +12,7 @@ export type AgentPlatform = "linux" | "windows" | "macos" | "freebsd";
 export interface AgentInstallInfo {
   agent_token: string;
   agent_mirror: string;
+  agent_remote_control: boolean;
 }
 
 export function adminPages(locale: UiLocale | string | undefined): Record<AdminTab, { title: string; description: string }> {
@@ -21,7 +22,7 @@ export function adminPages(locale: UiLocale | string | undefined): Record<AdminT
     appearance: { title: ui(locale, "站点设置", "Site settings"), description: ui(locale, "调整站点信息、公开内容和前台显示项目", "Adjust site info, public content and dashboard display options") },
     themes: { title: ui(locale, "主题商店", "Theme store"), description: ui(locale, "选择内置主题或安装本地主题包", "Choose the built-in theme or install a local theme package") },
     themeSettings: { title: ui(locale, "主题设置", "Theme settings"), description: ui(locale, "调整当前前端主题提供的显示选项", "Adjust display options provided by the active frontend theme") },
-    alerts: { title: ui(locale, "通知", "Notifications"), description: ui(locale, "配置 Telegram、Webhook 通知和资源告警阈值", "Configure Telegram, Webhook and resource alert thresholds") },
+    alerts: { title: ui(locale, "通知", "Notifications"), description: ui(locale, "配置通知渠道和资源告警阈值", "Configure notification channels and resource alert thresholds") },
     security: { title: ui(locale, "登录与安全", "Sign-in & security"), description: ui(locale, "管理管理员账号、登录设备和安全验证", "Manage the admin account, signed-in devices and security checks") },
     data: { title: ui(locale, "数据库", "Database"), description: ui(locale, "查看空间、备份恢复和迁移数据库", "Inspect usage, back up, restore and migrate the database") },
     remote: { title: ui(locale, "远程执行", "Remote execution"), description: ui(locale, "输入命令并执行", "Enter a command and run it") },
@@ -34,7 +35,7 @@ export function adminNavigation(locale: UiLocale | string | undefined) {
     { tab: "servers" as const, label: ui(locale, "服务器", "Servers"), icon: ServerCog },
     { tab: "latency" as const, label: ui(locale, "延迟检测", "Latency"), icon: RadioTower },
     { tab: "remote" as const, label: ui(locale, "远程执行", "Remote"), icon: Terminal },
-    { tab: "alerts" as const, label: ui(locale, "通知", "Alerts"), icon: AlertTriangle },
+    { tab: "alerts" as const, label: ui(locale, "通知", "Notifications"), icon: AlertTriangle },
     { tab: "themes" as const, label: ui(locale, "主题商店", "Themes"), icon: Palette },
     { tab: "themeSettings" as const, label: ui(locale, "主题设置", "Theme"), icon: SlidersHorizontal },
     { tab: "appearance" as const, label: ui(locale, "站点设置", "Site"), icon: Eye },
@@ -75,6 +76,7 @@ export const emptyServer: ServerInput = {
   rx_correction: 0,
   tx_correction: 0,
   agent_mirror: "",
+  agent_remote_control: false,
   offline_notify_disabled: false,
   auto_update: false,
 };
@@ -102,6 +104,7 @@ export function toInput(server: AdminServer): ServerInput {
     rx_correction: server.rx_correction,
     tx_correction: server.tx_correction,
     agent_mirror: server.agent_mirror,
+    agent_remote_control: server.agent_remote_control,
     offline_notify_disabled: server.offline_notify_disabled,
     auto_update: server.auto_update,
   };
@@ -117,8 +120,8 @@ export function billingCycles(locale: UiLocale | string | undefined): Array<{ da
   ];
 }
 
-export function trafficTimezones(locale: UiLocale | string | undefined) {
-  return [
+export function trafficTimezones(locale: UiLocale | string | undefined, current = "UTC") {
+  const options = [
     { value: "UTC", label: "UTC" },
     { value: "Asia/Shanghai", label: ui(locale, "北京时间（UTC+8）", "Beijing (UTC+8)") },
     { value: "Asia/Hong_Kong", label: ui(locale, "香港（UTC+8）", "Hong Kong (UTC+8)") },
@@ -133,6 +136,11 @@ export function trafficTimezones(locale: UiLocale | string | undefined) {
     { value: "Europe/Berlin", label: ui(locale, "德国（含夏令时）", "Germany (with DST)") },
     { value: "Australia/Sydney", label: ui(locale, "悉尼（含夏令时）", "Sydney (with DST)") },
   ];
+  // Keep a previously configured IANA timezone selectable even if it is not a preset.
+  if (current && !options.some((option) => option.value === current)) {
+    options.push({ value: current, label: current });
+  }
+  return options;
 }
 
 

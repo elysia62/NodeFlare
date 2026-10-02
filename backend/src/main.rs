@@ -275,12 +275,17 @@ async fn main() -> Result<()> {
             post(routes::admin::telegram_test),
         )
         .route(
-            "/api/admin/webhook",
-            get(routes::admin::webhook_get)
-                .put(routes::admin::webhook_put)
-                .delete(routes::admin::webhook_delete),
+            "/api/admin/webhooks",
+            get(routes::admin::webhook_get).put(routes::admin::webhook_put),
         )
-        .route("/api/admin/webhook/test", post(routes::admin::webhook_test))
+        .route(
+            "/api/admin/webhooks/{preset}",
+            axum::routing::delete(routes::admin::webhook_delete),
+        )
+        .route(
+            "/api/admin/webhooks/{preset}/test",
+            post(routes::admin::webhook_test),
+        )
         .route(
             "/api/admin/themes",
             get(routes::admin::themes_get).post(routes::admin::themes_post),

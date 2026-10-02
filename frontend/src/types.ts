@@ -204,6 +204,7 @@ export interface Server extends ServerSummary {
 
 export interface AdminServer extends ServerSummary {
   remote_control: boolean | null;
+  agent_remote_control: boolean;
   hidden: boolean;
   last_ip: string;
   ip_v4: string;
@@ -272,6 +273,7 @@ export interface ServerInput {
   rx_correction: number;
   tx_correction: number;
   agent_mirror: string;
+  agent_remote_control: boolean;
   offline_notify_disabled: boolean;
   auto_update: boolean;
 }

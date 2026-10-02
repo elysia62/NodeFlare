@@ -784,13 +784,18 @@ async fn restore_table<R: Read + Seek + Send>(
             "latency_sample_count",
             "last_timestamp",
         ]);
-    // A backup taken before reset timezones were added uses UTC by default.
-    let default_timezone = matches!(table, "servers" | "server_traffic_state")
-        && columns
-            .last()
-            .is_some_and(|column| column.name == "reset_timezone")
-        && header.columns == columns[..columns.len() - 1];
-    if header.table != table || (header.columns != columns && !legacy_latency && !default_timezone)
+    // Only these trailing additions may be omitted; restore their schema defaults.
+    let defaulted_columns: &[&str] = match table {
+        "servers" => &["reset_timezone", "agent_remote_control"],
+        "server_traffic_state" => &["reset_timezone"],
+        _ => &[],
+    };
+    let default_settings = header.columns.len() < columns.len()
+        && columns.starts_with(&header.columns)
+        && columns[header.columns.len()..]
+            .iter()
+            .all(|column| defaulted_columns.contains(&column.name.as_str()));
+    if header.table != table || (header.columns != columns && !legacy_latency && !default_settings)
     {
         bail!("{table} 备份结构无效");
     }
@@ -948,11 +953,18 @@ mod tests {
         target.migrate().await.unwrap();
         sqlx::query("INSERT INTO settings(key,value) VALUES ('admin_username','admin'),('admin_password_hash','hash'),('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')")
             .execute(source.pool()).await.unwrap();
-        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,reset_timezone) VALUES ('node','Node','hash',1,1,'Asia/Shanghai')")
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,reset_timezone,agent_remote_control) VALUES ('node','Node','hash',1,1,'Asia/Shanghai',1)")
             .execute(source.pool()).await.unwrap();
         sqlx::query("INSERT INTO server_traffic_state(server_id,used_rx,reset_timezone) VALUES ('node',123,'Asia/Shanghai')")
             .execute(source.pool()).await.unwrap();
         copy_database(&source, &target).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT agent_remote_control FROM servers")
+                .fetch_one(target.pool())
+                .await
+                .unwrap(),
+            1
+        );
         for table in ["servers", "server_traffic_state"] {
             let timezone = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
                 "SELECT reset_timezone FROM {table}"
@@ -982,6 +994,10 @@ mod tests {
         );
         let old_source = crate::db::connect("sqlite::memory:").await.unwrap();
         old_source.migrate().await.unwrap();
+        sqlx::query("ALTER TABLE servers DROP COLUMN agent_remote_control")
+            .execute(old_source.pool())
+            .await
+            .unwrap();
         for table in ["servers", "server_traffic_state"] {
             sqlx::query(AssertSqlSafe(format!(
                 "ALTER TABLE {table} DROP COLUMN reset_timezone"
@@ -999,6 +1015,13 @@ mod tests {
             .await
             .unwrap();
         copy_database(&old_source, &target).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT agent_remote_control FROM servers")
+                .fetch_one(target.pool())
+                .await
+                .unwrap(),
+            0
+        );
         for table in ["servers", "server_traffic_state"] {
             let timezone = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
                 "SELECT reset_timezone FROM {table}"
@@ -1038,6 +1061,16 @@ mod tests {
         crate::db::queries::save_webhook_settings(&source, &webhook)
             .await
             .unwrap();
+        let discord = crate::models::WebhookSettingsInput {
+            enabled: false,
+            preset: crate::models::WebhookPreset::Discord,
+            url: "https://discord.example/private".into(),
+            body: r#"{"content":"{{message}}"}"#.into(),
+            ..webhook.clone()
+        };
+        crate::db::queries::save_webhook_settings(&source, &discord)
+            .await
+            .unwrap();
         crate::db::queries::record_alert(
             &source,
             crate::db::queries::AlertObservation {
@@ -1062,9 +1095,12 @@ mod tests {
         crate::db::queries::mark_notification_delivered(&source, &pending.id, "telegram")
             .await
             .unwrap();
+        crate::db::queries::mark_notification_delivered(&source, &pending.id, "bark")
+            .await
+            .unwrap();
         copy_database(&source, &target).await.unwrap();
         assert_eq!(
-            crate::db::queries::raw_webhook_settings(&target)
+            crate::db::queries::raw_webhook_settings(&target, crate::models::WebhookPreset::Bark)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1075,7 +1111,7 @@ mod tests {
             crate::db::queries::delivered_notification_channels(&target, &pending.id)
                 .await
                 .unwrap(),
-            vec!["telegram"]
+            vec!["bark", "telegram"]
         );
         // File backups preserve settings and queued events, but replay delivery
         // after an explicit restore, just like the existing outbox policy.
@@ -1087,7 +1123,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            crate::db::queries::raw_webhook_settings(&target)
+            crate::db::queries::raw_webhook_settings(&target, crate::models::WebhookPreset::Bark)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1100,6 +1136,17 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let restored = crate::db::queries::list_raw_webhook_settings(&target)
+            .await
+            .unwrap();
+        assert_eq!(restored.len(), 2);
+        let restored_discord = restored
+            .iter()
+            .find(|item| item.preset == crate::models::WebhookPreset::Discord)
+            .unwrap();
+        assert!(!restored_discord.enabled);
+        assert_eq!(restored_discord.url, discord.url);
+        assert_eq!(restored_discord.body, discord.body);
     }
 
     #[tokio::test]

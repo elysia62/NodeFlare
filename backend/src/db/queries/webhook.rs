@@ -1,37 +1,50 @@
 use super::super::{Database, get_setting, set_setting};
-use crate::models::{WebhookSettingsInput, WebhookSettingsView};
-use anyhow::Result;
+use crate::models::{WebhookPreset, WebhookSettingsInput, WebhookSettingsView};
+use anyhow::{Result, ensure};
+use sqlx::Row;
 
-const SETTINGS_KEY: &str = "notification_webhook";
+fn settings_key(preset: WebhookPreset) -> String {
+    format!("notification_webhook/{}", preset.as_str())
+}
 
-pub async fn raw_webhook_settings(db: &Database) -> Result<Option<WebhookSettingsInput>> {
-    get_setting(db, SETTINGS_KEY)
+pub async fn raw_webhook_settings(
+    db: &Database,
+    preset: WebhookPreset,
+) -> Result<Option<WebhookSettingsInput>> {
+    get_setting(db, &settings_key(preset))
         .await?
-        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .map(|value| {
+            let settings: WebhookSettingsInput = serde_json::from_str(&value)?;
+            ensure!(settings.preset == preset, "通知渠道配置无效");
+            Ok(settings)
+        })
         .transpose()
 }
 
-pub async fn webhook_settings(db: &Database) -> Result<Option<WebhookSettingsView>> {
-    Ok(raw_webhook_settings(db)
+pub async fn list_raw_webhook_settings(db: &Database) -> Result<Vec<WebhookSettingsInput>> {
+    sqlx::query("SELECT key,value FROM settings WHERE key LIKE 'notification!_webhook/%' ESCAPE '!' ORDER BY key")
+        .fetch_all(db.pool()).await?
+        .into_iter().map(|row| {
+            let settings: WebhookSettingsInput = serde_json::from_str(row.try_get("value")?)?;
+            ensure!(row.try_get::<&str, _>("key")? == settings_key(settings.preset), "通知渠道配置无效");
+            Ok(settings)
+        }).collect()
+}
+
+pub async fn webhook_settings(db: &Database) -> Result<Vec<WebhookSettingsView>> {
+    Ok(list_raw_webhook_settings(db)
         .await?
-        .map(|settings| WebhookSettingsView {
-            enabled: settings.enabled,
-            preset: settings.preset,
-            url_configured: !settings.url.is_empty(),
-            headers_configured: !settings.headers.is_empty(),
-            body_configured: !settings.body.is_empty(),
-        }))
+        .iter()
+        .map(Into::into)
+        .collect())
 }
 
 pub async fn resolve_webhook_settings(
     db: &Database,
     mut input: WebhookSettingsInput,
 ) -> Result<WebhookSettingsInput> {
-    // A newly selected service must not silently reuse the previous service's
-    // URL, headers or credentials embedded in its body.
-    let current = raw_webhook_settings(db)
-        .await?
-        .filter(|settings| settings.preset == input.preset);
+    // Blank fields may only reuse credentials from this exact channel.
+    let current = raw_webhook_settings(db, input.preset).await?;
     input.url = input.url.trim().to_string();
     input.headers = input.headers.trim().to_string();
     input.body = input.body.trim().to_string();
@@ -58,12 +71,17 @@ pub async fn resolve_webhook_settings(
 }
 
 pub async fn save_webhook_settings(db: &Database, input: &WebhookSettingsInput) -> Result<()> {
-    set_setting(db, SETTINGS_KEY, &serde_json::to_string(input)?).await
+    set_setting(
+        db,
+        &settings_key(input.preset),
+        &serde_json::to_string(input)?,
+    )
+    .await
 }
 
-pub async fn delete_webhook_settings(db: &Database) -> Result<()> {
+pub async fn delete_webhook_settings(db: &Database, preset: WebhookPreset) -> Result<()> {
     sqlx::query(db.sql("DELETE FROM settings WHERE key=?"))
-        .bind(SETTINGS_KEY)
+        .bind(settings_key(preset))
         .execute(db.pool())
         .await?;
     Ok(())
@@ -75,10 +93,84 @@ mod tests {
     use crate::models::WebhookPreset;
 
     #[tokio::test]
+    async fn channels_keep_separate_credentials_enabled_states_and_deletion() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let bark = WebhookSettingsInput {
+            enabled: true,
+            preset: WebhookPreset::Bark,
+            url: "https://bark.example/push".into(),
+            headers: "X-Key: bark-secret".into(),
+            body: r#"{"body":"{{message}}","device_key":"bark-secret"}"#.into(),
+            clear_headers: false,
+        };
+        let discord = WebhookSettingsInput {
+            enabled: true,
+            preset: WebhookPreset::Discord,
+            url: "https://discord.example/secret".into(),
+            headers: "X-Key: discord-secret".into(),
+            body: r#"{"content":"{{message}}"}"#.into(),
+            clear_headers: false,
+        };
+        let (a, b) = tokio::join!(
+            save_webhook_settings(&db, &bark),
+            save_webhook_settings(&db, &discord)
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(webhook_settings(&db).await.unwrap().len(), 2);
+        let disabled = resolve_webhook_settings(
+            &db,
+            WebhookSettingsInput {
+                enabled: false,
+                preset: WebhookPreset::Bark,
+                url: String::new(),
+                headers: String::new(),
+                body: String::new(),
+                clear_headers: false,
+            },
+        )
+        .await
+        .unwrap();
+        save_webhook_settings(&db, &disabled).await.unwrap();
+        let saved_bark = raw_webhook_settings(&db, WebhookPreset::Bark)
+            .await
+            .unwrap()
+            .unwrap();
+        let saved_discord = raw_webhook_settings(&db, WebhookPreset::Discord)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved_bark.enabled);
+        assert_eq!(saved_bark.url, bark.url);
+        assert_eq!(saved_bark.headers, bark.headers);
+        assert!(saved_discord.enabled);
+        assert_eq!(saved_discord.url, discord.url);
+        assert_eq!(saved_discord.body, discord.body);
+        delete_webhook_settings(&db, WebhookPreset::Bark)
+            .await
+            .unwrap();
+        assert!(
+            raw_webhook_settings(&db, WebhookPreset::Bark)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            raw_webhook_settings(&db, WebhookPreset::Discord)
+                .await
+                .unwrap()
+                .unwrap()
+                .headers,
+            discord.headers
+        );
+    }
+
+    #[tokio::test]
     async fn credentials_are_write_only_and_blank_fields_preserve_saved_values() {
         let db = crate::db::connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();
-        assert!(webhook_settings(&db).await.unwrap().is_none());
+        assert!(webhook_settings(&db).await.unwrap().is_empty());
         let original = WebhookSettingsInput {
             enabled: true,
             preset: WebhookPreset::Bark,
@@ -104,7 +196,13 @@ mod tests {
         assert_eq!(resolved.headers, original.headers);
         assert_eq!(resolved.body, original.body);
         save_webhook_settings(&db, &resolved).await.unwrap();
-        assert!(!raw_webhook_settings(&db).await.unwrap().unwrap().enabled);
+        assert!(
+            !raw_webhook_settings(&db, WebhookPreset::Bark)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
         let changed_preset = resolve_webhook_settings(
             &db,
             WebhookSettingsInput {
@@ -129,7 +227,14 @@ mod tests {
         .unwrap();
         assert!(cleared.headers.is_empty());
         save_webhook_settings(&db, &cleared).await.unwrap();
-        delete_webhook_settings(&db).await.unwrap();
-        assert!(raw_webhook_settings(&db).await.unwrap().is_none());
+        delete_webhook_settings(&db, WebhookPreset::Bark)
+            .await
+            .unwrap();
+        assert!(
+            raw_webhook_settings(&db, WebhookPreset::Bark)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -82,8 +82,8 @@ pub use themes::{
 };
 pub use totp::{get_totp_secret, save_totp_secret, set_totp_enabled};
 pub use webhook::{
-    delete_webhook_settings, raw_webhook_settings, resolve_webhook_settings, save_webhook_settings,
-    webhook_settings,
+    delete_webhook_settings, list_raw_webhook_settings, raw_webhook_settings,
+    resolve_webhook_settings, save_webhook_settings, webhook_settings,
 };
 
 #[cfg(test)]
@@ -202,6 +202,7 @@ mod tests {
             rx_correction: 0,
             tx_correction: 0,
             agent_mirror: String::new(),
+            agent_remote_control: false,
             offline_notify_disabled: false,
             auto_update: true,
         }
@@ -213,6 +214,27 @@ mod tests {
         let (_, token) = create_server(&db, &server_input(0)).await.unwrap();
         let identity = agent_identity(&db, &token).await.unwrap().unwrap();
         (db, identity)
+    }
+
+    #[tokio::test]
+    async fn agent_install_permission_is_saved_without_becoming_a_remote_agent_setting() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let mut input = server_input(0);
+        let (id, _) = create_server(&db, &input).await.unwrap();
+        assert!(!list_servers(&db, true).await.unwrap()[0].agent_remote_control);
+        let original_config = agent_config(&db, &id).await.unwrap().unwrap();
+        for enabled in [true, false] {
+            input.agent_remote_control = enabled;
+            assert!(update_server(&db, &id, &input).await.unwrap());
+            let server = list_servers(&db, true).await.unwrap().remove(0);
+            assert_eq!(server.agent_remote_control, enabled);
+            assert_eq!(server.remote_control, None);
+            assert_eq!(
+                agent_config(&db, &id).await.unwrap().unwrap(),
+                original_config
+            );
+        }
     }
 
     #[tokio::test]

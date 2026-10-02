@@ -1,13 +1,10 @@
-import { AlertTriangle, ArrowRightLeft, Check, ChevronDown, ChevronUp, CircleCheck, Coins, Copy, Download, Eye, LogOut, MonitorSmartphone, Power, RotateCw, Save, ShieldCheck, SlidersHorizontal, Upload } from "lucide-react";
+import { ArrowRightLeft, Check, ChevronDown, ChevronUp, CircleCheck, Coins, Copy, Download, Eye, LogOut, MonitorSmartphone, Power, RotateCw, Save, ShieldCheck, SlidersHorizontal, Upload } from "lucide-react";
 import type { Dispatch, FormEvent, RefObject, SetStateAction } from "react";
 import type { AdminTab } from "../../adminRoutes";
 import { formatBytes } from "../../format";
 import { ui, type UiLocale } from "../../locale";
-import { ASSET_CURRENCIES, type AdminServer, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type Settings, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../../types";
-import { AlertRuleManager } from "../AlertRuleManager";
+import { ASSET_CURRENCIES, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type Settings, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../../types";
 import { PasswordInput } from "../PasswordInput";
-import { TelegramSettings } from "../TelegramSettings";
-import { WebhookSettings } from "../WebhookSettings";
 import { ThemeOption, Toggle } from "./controls";
 import { describeLoginDevice, formatSessionTime } from "./shared";
 
@@ -15,15 +12,12 @@ export interface SettingsTabsProps {
   tab: AdminTab;
   locale: UiLocale | string | undefined;
   settings: Settings;
-  servers: AdminServer[];
   busy: boolean;
   saveSite: (event: FormEvent) => void;
   migrateDatabase: () => void;
   updateSettings: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
   themeSettingsSchema: ThemeSettingsSchema | null;
   updateThemeOption: (key: string, value: ThemeSettingValue) => void;
-  setError: (message: string) => void;
-  setNotice: (message: string) => void;
   newPasswordConfirmation: string;
   setNewPasswordConfirmation: (value: string) => void;
   twoFactorStatus: TotpStatus | null;
@@ -54,7 +48,7 @@ export interface SettingsTabsProps {
   refreshExchangeRates: () => void;
 }
 
-export function SettingsTabs({ tab, locale, settings, servers, busy, saveSite, migrateDatabase, updateSettings, themeSettingsSchema, updateThemeOption, setError, setNotice, newPasswordConfirmation, setNewPasswordConfirmation, twoFactorStatus, twoFactorSetup, twoFactorSecretCopied, copyTwoFactorSecret, setupTwoFactor, enableTwoFactor, disableTwoFactor, loginSessions, loginSessionsLoaded, loadLoginSessions, revokeLoginSession, revokingSessionId, database, databaseRestoreInputRef, databaseMigrationUrl, setDatabaseMigrationUrl, databaseMigrationResult, exportDatabaseBackup, restoreDatabaseBackup, reclaimDatabase, restarting, restartAfterDatabaseMigration, exchangeRates, exchangeRatesExpanded, setExchangeRatesExpanded, refreshExchangeRates }: SettingsTabsProps) {
+export function SettingsTabs({ tab, locale, settings, busy, saveSite, migrateDatabase, updateSettings, themeSettingsSchema, updateThemeOption, newPasswordConfirmation, setNewPasswordConfirmation, twoFactorStatus, twoFactorSetup, twoFactorSecretCopied, copyTwoFactorSecret, setupTwoFactor, enableTwoFactor, disableTwoFactor, loginSessions, loginSessionsLoaded, loadLoginSessions, revokeLoginSession, revokingSessionId, database, databaseRestoreInputRef, databaseMigrationUrl, setDatabaseMigrationUrl, databaseMigrationResult, exportDatabaseBackup, restoreDatabaseBackup, reclaimDatabase, restarting, restartAfterDatabaseMigration, exchangeRates, exchangeRatesExpanded, setExchangeRatesExpanded, refreshExchangeRates }: SettingsTabsProps) {
   return (
     <form className="settings-form" onSubmit={tab === "data" ? (event) => { event.preventDefault(); void migrateDatabase(); } : saveSite}>
       {tab === "appearance" ? <>
@@ -73,16 +67,6 @@ export function SettingsTabs({ tab, locale, settings, servers, busy, saveSite, m
         <div className="section-subtitle">{ui(locale, "当前主题选项", "Active theme options")}</div><div className="theme-option-grid"><Toggle label={ui(locale, "公开仪表盘", "Public dashboard")} checked={settings.public_dashboard} onChange={(value) => updateSettings("public_dashboard", value)} />{themeSettingsSchema?.settings.map((field) => <ThemeOption key={field.key} field={field} value={settings.theme_options[field.key] ?? field.default} onChange={(value) => updateThemeOption(field.key, value)} />)}</div>
         <div className="section-subtitle">{ui(locale, "公开界面元素", "Public UI elements")}</div>
         <div className="settings-toggles"><Toggle label={ui(locale, "显示搜索", "Show search")} checked={settings.show_search} onChange={(value) => updateSettings("show_search", value)} /><Toggle label={ui(locale, "显示分组", "Show groups")} checked={settings.show_groups} onChange={(value) => updateSettings("show_groups", value)} /><Toggle label={ui(locale, "总览统计", "Overview stats")} checked={settings.show_stats} onChange={(value) => updateSettings("show_stats", value)} /><Toggle label={ui(locale, "资产统计", "Asset stats")} checked={settings.show_assets} onChange={(value) => updateSettings("show_assets", value)} /><Toggle label={ui(locale, "累计流量", "Total traffic")} checked={settings.show_traffic} onChange={(value) => updateSettings("show_traffic", value)} /><Toggle label={ui(locale, "实时网速", "Live speed")} checked={settings.show_speed} onChange={(value) => updateSettings("show_speed", value)} /><Toggle label={ui(locale, "价格信息", "Price info")} checked={settings.show_price} onChange={(value) => updateSettings("show_price", value)} /><Toggle label={ui(locale, "到期信息", "Expiry info")} checked={settings.show_expiry} onChange={(value) => updateSettings("show_expiry", value)} /><Toggle label={ui(locale, "延迟与丢包", "Latency & loss")} checked={settings.show_latency} onChange={(value) => updateSettings("show_latency", value)} /><Toggle label={ui(locale, "在线时长", "Uptime")} checked={settings.show_uptime} onChange={(value) => updateSettings("show_uptime", value)} /></div>
-      </> : null}
-
-      {tab === "alerts" ? <>
-        <div className="section-title"><AlertTriangle size={15} />{ui(locale, "通知与告警", "Notifications & alerts")}</div>
-        <Toggle label={ui(locale, "启用通知与告警", "Enable notifications & alerts")} checked={settings.notification_enabled} onChange={(value) => updateSettings("notification_enabled", value)} />
-        <div className="form-grid three"><label><span>{ui(locale, "离线告警延迟（分钟）", "Offline alert delay (min)")}</span><input type="number" min="2" max="1440" value={settings.offline_alert_minutes} onChange={(event) => updateSettings("offline_alert_minutes", Number(event.target.value))} /></label><label><span>{ui(locale, "到期提醒（天）", "Expiry reminder (days)")}</span><input type="number" min="0" max="365" value={settings.expiry_alert_days} onChange={(event) => updateSettings("expiry_alert_days", Number(event.target.value))} /></label><label><span>{ui(locale, "流量提醒起始阈值（%）", "Traffic alert threshold (%)")}</span><input type="number" min="50" max="100" value={settings.traffic_alert_percentage} onChange={(event) => updateSettings("traffic_alert_percentage", Number(event.target.value))} /></label></div>
-        <p className="settings-hint">{ui(locale, "流量达到起始阈值后，每增加 5 个百分点生成一次事件，最多提醒到 100%。", "After the threshold is reached, an event is created for every additional 5 percentage points, up to 100%.")}</p>
-        <TelegramSettings locale={locale} onError={setError} onNotice={setNotice} />
-        <WebhookSettings locale={locale} onError={setError} onNotice={setNotice} />
-        <AlertRuleManager locale={locale} servers={servers} onError={setError} onNotice={setNotice} />
       </> : null}
 
       {tab === "security" ? <>

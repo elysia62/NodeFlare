@@ -6,7 +6,7 @@
 
 English | [简体中文](../README.md)
 
-NodeFlare is a lightweight, self-hosted server monitoring panel: view server status in a web UI while a small agent collects and pushes telemetry. It supports live metrics, TCP/ICMP probing, Telegram / Webhook alerts with a Bark preset, remote command execution, TOTP two-factor authentication, theme customization, and SQLite / PostgreSQL backup, restore, and online migration.
+NodeFlare is a lightweight, self-hosted server monitoring panel: view server status in a web UI while a small agent collects and pushes telemetry. It supports live metrics, TCP/ICMP probing, multi-channel alerts (Telegram, Bark, Discord and more), remote command execution, TOTP two-factor authentication, theme customization, and SQLite / PostgreSQL backup, restore, and online migration.
 
 > [!WARNING]
 > NodeFlare is a self-hosted monitoring and control program and should only be deployed on systems you own or are authorized to manage. Deploying, accessing, or executing commands on unauthorized systems is at the deployer's own responsibility.
@@ -27,7 +27,7 @@ NodeFlare is a lightweight, self-hosted server monitoring panel: view server sta
 
 - **Live metrics**: CPU, memory, and network speed sampled every second and uploaded in compressed batches every 3 seconds by default; slower metrics such as disks, GPU, and connection counts cached separately
 - **Latency probing**: TCP and ICMP tasks assigned per node, with per-carrier (China Telecom / Unicom / Mobile) display
-- **Alerts**: resource thresholds, offline, expiry, and traffic alerts pushed through Telegram and configurable Webhooks, with Bark and other presets, retries and customizable message templates
+- **Alerts**: resource, offline, expiry, and traffic alerts; select any combination of Telegram, Bark, Discord, Slack, WeCom, DingTalk, Feishu, ntfy, Gotify and custom Webhook in Notifications. Each channel has its own settings, test and retries; deselecting a channel preserves its configuration
 - **Theme store**: built-in themes, one-click install from GitHub repositories, local ZIP upload, and per-theme settings
 - **Secure by default**: TOTP two-factor authentication, Cloudflare Turnstile, login rate limiting, and session management; the server listens on `127.0.0.1` only, and the agent connects outbound with no inbound ports
 - **Data ownership**: SQLite and PostgreSQL with online migration between them, one-click backup and restore, and automatic history cleanup by retention days
@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent
 
 Updating: re-run the install script. Config and data are preserved and a failed update rolls back automatically.
 
-**Allow remote control** is unchecked by default in the Agent installation dialog. The generated install command includes `--disable-remote` (`-DisableRemote` for the Windows installer), which is saved in the local service startup arguments. Monitoring and latency checks continue, but the backend cannot re-enable remote execution. To enable it, check the option and reinstall using the new command, or remove the disable flag locally and restart. Existing agents without the flag keep remote control enabled without reconfiguration.
+**Allow remote execution** is unchecked by default in the node configuration. After saving, **Download Agent** generates its command from that node's setting: unchecked includes `--disable-remote` (`-DisableRemote` for the Windows installer), which is saved in the local service startup arguments. Monitoring and latency checks continue. Saving the node only changes the installation preference and cannot override the Agent's local restriction. To enable remote execution, check and save the option, then reinstall using the new command, or remove the disable flag locally and restart. Existing agents without the flag keep remote control enabled without reconfiguration.
 
 The Agent refuses remote commands when started with `--disable-remote` and allows them without it; no extra environment variable or permission file is needed. On systemd, edit `ExecStart` in the service file, then run `sudo systemctl daemon-reload` and `sudo systemctl restart nodeflare-agent`. OpenRC / FreeBSD use `command_args`, macOS uses launchd's `ProgramArguments`, and Windows uses `-DisableRemote` in its scheduled task arguments; restart the corresponding service or task afterward. Manual Agent updates (`--update`, or `-Update` on Windows) preserve the installed disable flag.
 

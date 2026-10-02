@@ -16,18 +16,24 @@ export function typicalInterval(points: readonly TimedPoint[]): number | null {
 export function insertTimelineGaps<T extends TimedPoint>(
   points: readonly T[],
   createGap: (timestamp: number) => T,
-  { minGap, maxGap }: { minGap: number; maxGap: number },
+  { minGap, maxGap, intervalForPair }: {
+    minGap: number;
+    maxGap: number;
+    intervalForPair?: (previous: T, current: T) => number;
+  },
 ): T[] {
   if (points.length < 2) return [...points];
-  const interval = typicalInterval(points);
-  if (interval === null) return [...points];
-  const threshold = Math.min(Math.max(minGap, interval * 1.5), maxGap);
+  const inferredInterval = intervalForPair ? null : typicalInterval(points);
+  if (!intervalForPair && inferredInterval === null) return [...points];
   const result: T[] = [points[0]];
   for (let index = 1; index < points.length; index += 1) {
     const previous = points[index - 1];
     const current = points[index];
-    if (current.timestamp - previous.timestamp > threshold) {
-      result.push(createGap(previous.timestamp + interval));
+    const interval = intervalForPair ? intervalForPair(previous, current) : inferredInterval!;
+    const threshold = Math.min(Math.max(minGap, interval * 1.5), maxGap);
+    const elapsed = current.timestamp - previous.timestamp;
+    if (elapsed > threshold) {
+      result.push(createGap(previous.timestamp + Math.min(interval, elapsed / 2)));
     }
     result.push(current);
   }

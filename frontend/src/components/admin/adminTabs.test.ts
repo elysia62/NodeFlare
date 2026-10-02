@@ -6,6 +6,7 @@ import type { AdminServer } from "../../types";
 const install: AgentInstallInfo = {
   agent_token: "secret-token",
   agent_mirror: "",
+  agent_remote_control: false,
 };
 
 describe("Agent install command builder", () => {
@@ -61,20 +62,45 @@ describe("Agent install command builder", () => {
       .toContain(`'tok'\\''en'`);
   });
 
-  test("new install commands disable remote control unless explicitly allowed", () => {
+  test("install commands follow the saved node permission on every platform", () => {
     for (const platform of ["linux", "macos", "freebsd", "windows"] as const) {
       const flag = platform === "windows" ? "-DisableRemote" : "--disable-remote";
       expect(installCommandFor(install, platform, "https://panel.example.com")).toEndWith(flag);
-      const disabled = installCommandFor(install, platform, "https://panel.example.com", false);
+      const disabled = installCommandFor({ ...install, agent_remote_control: false }, platform, "https://panel.example.com");
       expect(disabled).toEndWith(flag);
-      const enabled = installCommandFor(install, platform, "https://panel.example.com", true);
+      const enabled = installCommandFor({ ...install, agent_remote_control: true }, platform, "https://panel.example.com");
       expect(enabled).not.toContain(flag);
       expect(enabled).toEndWith("-t 'secret-token'");
     }
   });
 });
 
+test("node remote permission defaults off and is independent of the live Agent capability", () => {
+  expect(emptyServer.agent_remote_control).toBe(false);
+  for (const agent_remote_control of [true, false]) {
+    for (const remote_control of [true, false, null]) {
+      const server = { ...emptyServer, agent_remote_control, remote_control } as AdminServer;
+      const input = toInput(server);
+      expect(input.agent_remote_control).toBe(agent_remote_control);
+      expect(input).not.toHaveProperty("remote_control");
+    }
+  }
+});
+
 describe("node traffic timezone", () => {
+  test("lists UTC first without duplicating the selected preset", () => {
+    const options = trafficTimezones("zh-CN", "Asia/Shanghai");
+    expect(options[0].value).toBe("UTC");
+    expect(options.filter((option) => option.value === "Asia/Shanghai")).toHaveLength(1);
+    expect(new Set(options.map((option) => option.value)).size).toBe(options.length);
+  });
+
+  test("keeps a configured timezone outside the presets selectable", () => {
+    const options = trafficTimezones("zh-CN", "America/Toronto");
+    expect(options).toContainEqual({ value: "America/Toronto", label: "America/Toronto" });
+    expect(trafficTimezones("en", "").some((option) => !option.value)).toBe(false);
+  });
+
   test("defaults to UTC and preserves the configured timezone when editing", () => {
     expect(emptyServer.reset_timezone).toBe("UTC");
     const server = { ...emptyServer, reset_timezone: "America/Los_Angeles" } as AdminServer;

@@ -1,5 +1,5 @@
 use crate::db::{self, Database, Settings, queries};
-use crate::models::TelegramSettingsView;
+use crate::models::{TelegramSettingsView, WebhookPreset};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -19,8 +19,12 @@ pub async fn test_telegram(db: &Database, client: &reqwest::Client) -> Result<()
     .await
 }
 
-pub async fn test_webhook(db: &Database, client: &reqwest::Client) -> Result<()> {
-    let settings = queries::raw_webhook_settings(db)
+pub async fn test_webhook(
+    db: &Database,
+    client: &reqwest::Client,
+    preset: WebhookPreset,
+) -> Result<()> {
+    let settings = queries::raw_webhook_settings(db, preset)
         .await?
         .context("尚未配置 Webhook")?;
     let site = db::load_settings(db).await?.site_name;
@@ -255,23 +259,25 @@ pub async fn deliver_next(
     let telegram = queries::raw_telegram_settings(db)
         .await?
         .filter(|settings| settings.enabled);
-    let webhook = queries::raw_webhook_settings(db)
+    let webhooks = queries::list_raw_webhook_settings(db)
         .await?
-        .filter(|settings| settings.enabled);
-    let channels = [
-        telegram.as_ref().map(|_| "telegram"),
-        webhook.as_ref().map(|_| "webhook"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
+        .into_iter()
+        .filter(|settings| settings.enabled)
+        .map(|settings| (settings.preset.as_str(), settings))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let channels = telegram
+        .as_ref()
+        .map(|_| "telegram")
+        .into_iter()
+        .chain(webhooks.keys().copied())
+        .collect::<Vec<_>>();
     if channels.is_empty() {
         return Ok(false);
     }
     let site = db::load_settings(db).await?.site_name;
     deliver_next_with(db, |notification| async move {
         let telegram = telegram.as_ref();
-        let webhook = webhook.as_ref();
+        let webhooks = &webhooks;
         let site = &site;
         let notification = &notification;
         deliver_channels_with(db, &notification.id, &channels, |channel| async move {
@@ -286,10 +292,10 @@ pub async fn deliver_next(
                     )
                     .await
                 }
-                "webhook" => {
+                channel => {
                     crate::webhook::send(
                         webhook_client,
-                        webhook.unwrap(),
+                        &webhooks[channel],
                         &crate::webhook::Message {
                             title: &notification.title,
                             node: &notification.server_name,
@@ -300,7 +306,6 @@ pub async fn deliver_next(
                     )
                     .await
                 }
-                _ => unreachable!("known notification channel"),
             }
         })
         .await
@@ -355,7 +360,7 @@ where
         .copied()
         .filter(|channel| !completed.iter().any(|done| done == channel));
     // Attempt every channel even when one is unavailable. Persist successes so
-    // an outage in Webhook cannot repeatedly send the same Telegram notification.
+    // an outage in any one service does not repeat successful notifications.
     let results = futures_util::future::join_all(pending.map(|channel| {
         let deliver = &deliver;
         async move {
@@ -470,6 +475,127 @@ fn render(template: &str, title: &str, server: &str, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn enabled_services_receive_the_same_event_and_only_failures_are_retried() {
+        use axum::{
+            Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::post,
+        };
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let fail_discord = Arc::new(AtomicBool::new(true));
+        let app = Router::new().route(
+            "/{channel}",
+            post(
+                move |Path(channel): Path<String>, Json(body): Json<serde_json::Value>| {
+                    captured.lock().unwrap().push((channel.clone(), body));
+                    let fail = channel == "discord" && fail_discord.swap(false, Ordering::Relaxed);
+                    async move {
+                        if fail {
+                            StatusCode::SERVICE_UNAVAILABLE.into_response()
+                        } else {
+                            Json(serde_json::json!({"code": 200})).into_response()
+                        }
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        for (preset, enabled) in [
+            (super::WebhookPreset::Bark, true),
+            (super::WebhookPreset::Discord, true),
+            (super::WebhookPreset::Slack, false),
+        ] {
+            crate::db::queries::save_webhook_settings(
+                &db,
+                &crate::models::WebhookSettingsInput {
+                    enabled,
+                    preset,
+                    url: format!("http://{address}/{}", preset.as_str()),
+                    headers: String::new(),
+                    body: r#"{"title":"{{title}}","message":"{{message}}","event":"{{event}}"}"#
+                        .into(),
+                    clear_headers: false,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','hash',1,1)")
+            .execute(db.pool()).await.unwrap();
+        crate::db::queries::record_alert(
+            &db,
+            crate::db::queries::AlertObservation {
+                key: "offline:node",
+                server_id: "node",
+                rule_id: None,
+                active: true,
+                details: serde_json::json!({}),
+                notification: Some(crate::db::queries::AlertNotification {
+                    title: "服务器离线",
+                    server_name: "Node",
+                    message: "Offline \"quoted\"\nNext line",
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        let pending = crate::db::queries::next_notification(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        assert!(!super::deliver_next(&db, &http, &http).await.unwrap());
+        assert_eq!(
+            crate::db::queries::delivered_notification_channels(&db, &pending.id)
+                .await
+                .unwrap(),
+            vec!["bark"]
+        );
+        sqlx::query("UPDATE notification_outbox SET next_attempt_at=0")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert!(super::deliver_next(&db, &http, &http).await.unwrap());
+        assert!(
+            crate::db::queries::next_notification(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let received = received.lock().unwrap();
+        assert_eq!(
+            received
+                .iter()
+                .filter(|(channel, _)| channel == "bark")
+                .count(),
+            1
+        );
+        assert_eq!(
+            received
+                .iter()
+                .filter(|(channel, _)| channel == "discord")
+                .count(),
+            2
+        );
+        assert_eq!(received.len(), 3);
+        for (_, body) in received.iter() {
+            assert_eq!(body["message"], "Offline \"quoted\"\nNext line");
+            assert_eq!(body["event"], "offline");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn a_failed_channel_does_not_repeat_successful_deliveries() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let db = crate::db::connect("sqlite::memory:").await.unwrap();
@@ -498,42 +624,55 @@ mod tests {
             .unwrap()
             .unwrap();
         let telegram_count = AtomicUsize::new(0);
-        let webhook_count = AtomicUsize::new(0);
-        let first =
-            super::deliver_channels_with(&db, &pending.id, &["webhook", "telegram"], |channel| {
+        let bark_count = AtomicUsize::new(0);
+        let discord_count = AtomicUsize::new(0);
+        let first = super::deliver_channels_with(
+            &db,
+            &pending.id,
+            &["discord", "telegram", "bark"],
+            |channel| {
                 let telegram_count = &telegram_count;
-                let webhook_count = &webhook_count;
+                let bark_count = &bark_count;
+                let discord_count = &discord_count;
                 async move {
-                    if channel == "webhook" {
-                        webhook_count.fetch_add(1, Ordering::Relaxed);
-                        anyhow::bail!("Webhook is temporarily unavailable");
+                    if channel == "discord" {
+                        discord_count.fetch_add(1, Ordering::Relaxed);
+                        anyhow::bail!("Discord is temporarily unavailable");
+                    } else if channel == "bark" {
+                        bark_count.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        telegram_count.fetch_add(1, Ordering::Relaxed);
                     }
-                    telegram_count.fetch_add(1, Ordering::Relaxed);
                     Ok(())
                 }
-            })
-            .await;
+            },
+        )
+        .await;
         assert!(first.is_err());
         assert_eq!(telegram_count.load(Ordering::Relaxed), 1);
-        assert_eq!(webhook_count.load(Ordering::Relaxed), 1);
+        assert_eq!(bark_count.load(Ordering::Relaxed), 1);
+        assert_eq!(discord_count.load(Ordering::Relaxed), 1);
         assert_eq!(
             crate::db::queries::delivered_notification_channels(&db, &pending.id)
                 .await
                 .unwrap(),
-            vec!["telegram"]
+            vec!["bark", "telegram"]
         );
         super::deliver_next_with(&db, |notification| {
             let db = &db;
             let telegram_count = &telegram_count;
-            let webhook_count = &webhook_count;
+            let bark_count = &bark_count;
+            let discord_count = &discord_count;
             async move {
                 super::deliver_channels_with(
                     db,
                     &notification.id,
-                    &["webhook", "telegram"],
+                    &["discord", "telegram", "bark"],
                     |channel| async move {
-                        if channel == "webhook" {
-                            webhook_count.fetch_add(1, Ordering::Relaxed);
+                        if channel == "discord" {
+                            discord_count.fetch_add(1, Ordering::Relaxed);
+                        } else if channel == "bark" {
+                            bark_count.fetch_add(1, Ordering::Relaxed);
                         } else {
                             telegram_count.fetch_add(1, Ordering::Relaxed);
                         }
@@ -546,7 +685,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(telegram_count.load(Ordering::Relaxed), 1);
-        assert_eq!(webhook_count.load(Ordering::Relaxed), 2);
+        assert_eq!(bark_count.load(Ordering::Relaxed), 1);
+        assert_eq!(discord_count.load(Ordering::Relaxed), 2);
         assert!(
             crate::db::queries::next_notification(&db)
                 .await

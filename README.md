@@ -6,7 +6,7 @@
 
 [English](./docs/README.en.md) | 简体中文
 
-NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web 界面查看服务器状态，由轻量 Agent 采集数据并主动上报。支持实时监控、TCP/ICMP 拨测、Telegram / Webhook 告警（含 Bark 预设）、远程执行、TOTP 两步验证、主题定制，以及 SQLite / PostgreSQL 的备份恢复与在线迁移。
+NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web 界面查看服务器状态，由轻量 Agent 采集数据并主动上报。支持实时监控、TCP/ICMP 拨测、多渠道告警通知（Telegram、Bark、Discord 等）、远程执行、TOTP 两步验证、主题定制，以及 SQLite / PostgreSQL 的备份恢复与在线迁移。
 
 > [!WARNING]
 > NodeFlare 是一款自托管的监控/控制程序，仅应部署在你拥有或已获得授权管理的系统上。在未获授权的系统上部署、访问或执行命令，由部署者自行承担责任。
@@ -27,7 +27,7 @@ NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web
 
 - **实时监控**：CPU、内存、网速每秒采样，默认每 3 秒压缩批量上传；磁盘、GPU、连接数等慢指标单独缓存
 - **延迟拨测**：TCP 与 ICMP 任务按节点分配，支持电信 / 联通 / 移动分线展示
-- **告警通知**：资源阈值、离线、到期、流量告警，Telegram 和通用 Webhook 可同时启用；提供 Bark 等服务预设，支持失败重试和自定义消息模板
+- **告警通知**：资源阈值、离线、到期、流量告警；在“通知”的下拉框中可同时勾选 Telegram、Bark、Discord、Slack、企业微信、钉钉、飞书、ntfy、Gotify 和自定义 Webhook，各渠道独立配置、测试与失败重试，取消勾选保留配置
 - **主题商店**：内置主题、仓库主题一键安装、本地 ZIP 上传、主题参数自定义
 - **安全可控**：TOTP 两步验证、Cloudflare Turnstile 人机验证、登录限速与会话管理；服务端默认只监听 `127.0.0.1`，Agent 仅出站连接、无需开放入站端口
 - **数据自持**：SQLite 与 PostgreSQL 双支持、在线迁移、一键备份恢复、历史数据按保留天数自动清理
@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent
 
 更新：重新运行安装脚本即可，配置数据保留，失败自动回滚。
 
-「下载 Agent」弹窗的「允许远程控制」默认不勾选，生成的安装命令带 `--disable-remote`（Windows 安装脚本为 `-DisableRemote`）。安装脚本将禁用参数写入本机服务启动配置，监控和延迟检测不受影响，后台不能重新开启远程执行。勾选后执行新命令重新安装，或在主机上移除禁用参数并重启，即可允许远程控制。不带禁用参数的现有 Agent 保持允许远程控制，无需二次配置。
+节点配置中的「允许远程执行」默认不勾选，保存后「下载 Agent」按该节点的设置生成安装命令：未勾选时带 `--disable-remote`（Windows 安装脚本为 `-DisableRemote`）。安装脚本将禁用参数写入本机服务启动配置，监控和延迟检测不受影响。保存节点只改变安装选项，不能覆盖 Agent 的本地限制；勾选并保存后，需执行新命令重新安装，或在主机上移除禁用参数并重启，才能允许远程执行。不带禁用参数的现有 Agent 保持允许远程控制，无需二次配置。
 
 Agent 启动命令带 `--disable-remote` 就禁止远程执行，不带就允许，无需额外环境变量或权限配置文件。Linux systemd 修改服务文件中的 `ExecStart`，随后执行 `sudo systemctl daemon-reload` 和 `sudo systemctl restart nodeflare-agent`；OpenRC / FreeBSD 修改 `command_args`，macOS 修改 launchd 的 `ProgramArguments`，Windows 修改计划任务启动参数中的 `-DisableRemote`，再重启对应服务或任务。Agent 手动更新参数 `--update`（Windows 为 `-Update`）保留已安装的禁用参数。
 
