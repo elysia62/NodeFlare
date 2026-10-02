@@ -182,5 +182,5 @@ export function remainingAssetValue(price: number, billingCycle: number, expires
   const days = daysUntil(expiresAt);
   if (days === null || days <= 0) return 0;
   if (billingCycle <= 0) return price;
-  return price * Math.min(days / billingCycle, 1);
+  return price * days / billingCycle;
 }
