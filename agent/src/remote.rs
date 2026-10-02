@@ -271,11 +271,16 @@ pub(crate) struct RemoteExecutor {
     pub(crate) task_order: VecDeque<String>,
     pub(crate) last_sent: HashMap<String, Instant>,
     pub(crate) journal_path: PathBuf,
-    pub(crate) disabled: bool,
+    pub(crate) disabled_reason: Option<&'static str>,
 }
 
 impl RemoteExecutor {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(remote_control: bool) -> Result<Self> {
+        if !remote_control {
+            return Ok(Self::disabled(
+                "Agent 本地配置已关闭远程控制，请在主机上修改配置并重启 Agent",
+            ));
+        }
         Self::new_at(remote_task_journal_path()?)
     }
 
@@ -330,7 +335,7 @@ impl RemoteExecutor {
             task_order,
             last_sent: HashMap::new(),
             journal_path,
-            disabled: false,
+            disabled_reason: None,
         };
         if !executor.completed.is_empty() {
             executor.persist_snapshot(None)?;
@@ -338,7 +343,7 @@ impl RemoteExecutor {
         Ok(executor)
     }
 
-    pub(crate) fn disabled() -> Self {
+    pub(crate) fn disabled(reason: &'static str) -> Self {
         let (task_tx, task_rx) = mpsc::sync_channel(1);
         let (result_tx, result_rx) = mpsc::channel();
         drop(task_rx);
@@ -351,16 +356,13 @@ impl RemoteExecutor {
             task_order: VecDeque::new(),
             last_sent: HashMap::new(),
             journal_path: PathBuf::new(),
-            disabled: true,
+            disabled_reason: Some(reason),
         }
     }
 
     pub(crate) fn enqueue(&mut self, task: RemoteTaskMessage) -> Option<TaskResultMessage> {
-        if self.disabled {
-            return Some(remote_task_rejected(
-                task.task_id,
-                "Agent 任务日志异常，远程执行已禁用",
-            ));
+        if let Some(reason) = self.disabled_reason {
+            return Some(remote_task_rejected(task.task_id, reason));
         }
         if self.completed.contains_key(&task.task_id) {
             self.last_sent.remove(&task.task_id);

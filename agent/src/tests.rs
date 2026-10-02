@@ -46,6 +46,66 @@ fn auto_updates_require_server_opt_in() {
 }
 
 #[test]
+fn remote_control_is_a_local_permission() {
+    let arguments = ["agent", "-t", "test-token", "-e", "http://127.0.0.1:2206"];
+    let options = CliOptions::try_parse_from(arguments).unwrap();
+    assert!(super::runtime_config(&options).unwrap().remote_control);
+    let options =
+        CliOptions::try_parse_from(arguments.into_iter().chain(["--disable-remote"])).unwrap();
+    let mut config = super::runtime_config(&options).unwrap();
+    assert!(!config.remote_control);
+    for invalid in [
+        ["--disable-remote", "false"],
+        ["--disable-remote", "--disable-remote"],
+    ] {
+        assert!(CliOptions::try_parse_from(arguments.into_iter().chain(invalid)).is_err());
+    }
+    let remote = super::RemoteConfig {
+        report_interval: 60,
+        collect_interval: 3,
+        network_interface: String::new(),
+        agent_mirror: String::new(),
+        auto_update: true,
+        latency_tasks: vec![],
+    };
+    super::apply_remote(&mut config, &remote);
+    assert!(!config.remote_control);
+    assert!(
+        serde_json::from_value::<super::RemoteConfig>(serde_json::json!({
+            "report_interval":60, "collect_interval":3, "network_interface":"",
+            "agent_mirror":"", "auto_update":false, "latency_tasks":[], "remote_control":true,
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<super::RemoteConfig>(serde_json::json!({
+            "report_interval":60, "collect_interval":3, "network_interface":"",
+            "agent_mirror":"", "auto_update":false, "latency_tasks":[], "disable_remote":false,
+        }))
+        .is_err()
+    );
+    assert!(!super::agent_capabilities(false).contains("remote-exec-v1"));
+    assert!(super::agent_capabilities(true).contains("remote-exec-v1"));
+}
+
+#[test]
+fn local_disabled_executor_never_starts_or_queues_commands() {
+    let mut executor = RemoteExecutor::new(false).unwrap();
+    let result = executor
+        .enqueue(RemoteTaskMessage {
+            message_type: "remote_task".into(),
+            task_id: "blocked-task".into(),
+            command: "echo must-not-run".into(),
+        })
+        .unwrap();
+    assert_eq!(result.status, "failed");
+    assert!(result.result.contains("本地配置已关闭"));
+    assert!(executor.active.is_empty());
+    assert!(executor.journal_path.as_os_str().is_empty());
+    assert!(executor.due_results().is_empty());
+}
+
+#[test]
 fn parses_family_matched_public_ips() {
     let v4: std::net::IpAddr = "203.0.113.7".parse().unwrap();
     let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();

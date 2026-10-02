@@ -142,6 +142,8 @@
 .checkbox-control svg { width: 14px; height: 14px; color: var(--primary-foreground); opacity: 0; pointer-events: none; stroke-width: 3; }
 .checkbox-control:has(input:checked) { border-color: var(--primary); background: var(--primary); }
 .checkbox-control:has(input:checked) svg { opacity: 1; }
+.checkbox-control:has(input:disabled) { opacity: .5; }
+.checkbox-control input:disabled { cursor: not-allowed; }
 .checkbox-control:has(input:focus-visible) { outline: 2px solid color-mix(in srgb, var(--primary) 35%, transparent); outline-offset: 2px; }
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
 .section-title { display: flex; align-items: center; gap: 7px; margin: 1px 0 2px; color: var(--admin-text); font-size: 16px; font-weight: 700; }

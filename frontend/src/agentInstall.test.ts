@@ -13,13 +13,13 @@ for (const platform of ["macos", "freebsd"] as const) {
   }).join("\n");
 
   describe(`${platform} agent update`, () => {
-    function parse(args: string[], config: "valid" | "missing" | "incomplete" = "valid") {
+    function parse(args: string[], config: "valid" | "missing" | "incomplete" = "valid", disabled = false) {
       const directory = mkdtempSync(join(tmpdir(), "nodeflare-agent-update-"));
       const file = join(directory, "service");
       try {
         if (config !== "missing") {
           writeFileSync(file, [
-            'command_args="-P ${pidfile} -r -R 10 -S -T ${name} /usr/local/libexec/nodeflare/agent -e https://monitor.example.com -i 120"',
+            'command_args="-P ${pidfile} -r -R 10 -S -T ${name} /usr/local/libexec/nodeflare/agent -e https://monitor.example.com -i 120' + (disabled ? ' --disable-remote"' : '"'),
             config === "valid" ? 'export NODEFLARE_AGENT_TOKEN="existing-token"' : "",
           ].join("\n"));
         }
@@ -39,13 +39,16 @@ for (const platform of ["macos", "freebsd"] as const) {
               EnvironmentVariables:NODEFLARE_AGENT_TOKEN)
                 [ "$TEST_CONFIG" = valid ] || return 1
                 printf '%s' 'existing-token' ;;
+              ProgramArguments:5)
+                [ "$TEST_DISABLED" = true ] || return 1
+                printf '%s' '--disable-remote' ;;
               *) return 1 ;;
             esac
           }
           parse_agent_args "$@"
-          printf '%s|%s|%s|%s' "$endpoint" "$token" "$interval" "$mirror"
+          printf '%s|%s|%s|%s|%s' "$endpoint" "$token" "$interval" "$mirror" "$disable_remote"
         `, "agent-test", ...args], {
-          env: { ...process.env, TEST_SERVICE_FILE: file, TEST_CONFIG: config }, encoding: "utf8",
+          env: { ...process.env, TEST_SERVICE_FILE: file, TEST_CONFIG: config, TEST_DISABLED: String(disabled) }, encoding: "utf8",
         });
       } finally {
         rmSync(directory, { recursive: true, force: true });
@@ -61,14 +64,14 @@ for (const platform of ["macos", "freebsd"] as const) {
       for (const args of [["--update"], ["--update", "-m", "https://mirror.example.com"]]) {
         const result = parse(args);
         expect(result.status).toBe(0);
-        expect(result.stdout).toBe(`https://monitor.example.com|existing-token|120|${args[2] ?? ""}`);
+        expect(result.stdout).toBe(`https://monitor.example.com|existing-token|120|${args[2] ?? ""}|false`);
       }
     });
 
     test("still parses a fresh installation", () => {
       const result = parse(["-e", "https://new.example.com", "-t", "new-token", "-i", "45"]);
       expect(result.status).toBe(0);
-      expect(result.stdout).toBe("https://new.example.com|new-token|45|");
+      expect(result.stdout).toBe("https://new.example.com|new-token|45||false");
     });
 
     test("rejects missing or incomplete installed configuration", () => {
@@ -78,6 +81,20 @@ for (const platform of ["macos", "freebsd"] as const) {
         expect(result.stdout).toBe("");
         expect(result.stderr).not.toContain("existing-token");
       }
+    });
+
+    test("preserves local remote-control permission during updates", () => {
+      for (const disabled of [true, false]) {
+        const result = parse(["--update"], "valid", disabled);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe(`https://monitor.example.com|existing-token|120||${disabled}`);
+      }
+      const fresh = parse(["-e", "https://new.example.com", "-t", "new-token", "--disable-remote"]);
+      expect(fresh.status).toBe(0);
+      expect(fresh.stdout).toBe("https://new.example.com|new-token|60||true");
+      expect(parse(["--update", "--disable-remote"], "valid", false).status).toBe(1);
+      expect(parse(["--disable-remote", "false"]).status).toBe(1);
+      expect(parse(["--disable-remote", "--disable-remote"]).status).toBe(1);
     });
 
     test("update cannot silently replace credentials or accept malformed options", () => {

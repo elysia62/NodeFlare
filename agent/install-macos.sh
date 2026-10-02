@@ -67,7 +67,7 @@ usage() {
 NodeFlare Agent macOS 安装脚本
 
 用法：
-  install-macos.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>]
+  install-macos.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>] [--disable-remote]
   install-macos.sh --update [-m <下载加速前缀>]
   install-macos.sh --status
   install-macos.sh --uninstall
@@ -75,6 +75,7 @@ NodeFlare Agent macOS 安装脚本
 仅支持 Apple Silicon（arm64）。Agent Token 请勿泄露。
 -m 为可选的 GitHub 下载加速前缀（如 https://ghproxy.net）。
 --update 手动更新 Agent。
+--disable-remote 在服务启动参数中禁用远程控制；不带此参数则允许。
 EOF
 }
 
@@ -94,6 +95,13 @@ load_installed_agent_config() {
   endpoint=$(plist_value ProgramArguments:2) || fail "无法读取已安装 Agent 的服务地址"
   interval=$(plist_value ProgramArguments:4) || fail "无法读取已安装 Agent 的历史保存间隔"
   token=$(plist_value EnvironmentVariables:NODEFLARE_AGENT_TOKEN) || fail "无法读取已安装 Agent 的 Token"
+  disable_remote=false
+  argument_index=5
+  while argument=$(plist_value "ProgramArguments:$argument_index" 2>/dev/null); do
+    [ "$argument" = "--disable-remote" ] && [ "$disable_remote" = false ] || fail "无法识别已安装 Agent 的启动参数"
+    disable_remote=true
+    argument_index=$((argument_index + 1))
+  done
   [ -n "$endpoint" ] && [ -n "$token" ] && [ -n "$interval" ] || fail "已安装 Agent 的服务配置不完整"
 }
 
@@ -104,6 +112,7 @@ parse_agent_args() {
   interval_set=false
   mirror=""
   mirror_set=false
+  disable_remote=false
   update=false
   if [ "${1:-}" = "--update" ]; then
     update=true
@@ -115,6 +124,12 @@ parse_agent_args() {
       fail "--update 仅接受可选的 -m 下载加速前缀"
     fi
     case "$option" in
+      --disable-remote)
+        [ "$disable_remote" = false ] || fail "参数 $option 重复"
+        disable_remote=true
+        shift
+        continue
+        ;;
       -t|-e|-i|-m)
         [ "$#" -ge 2 ] && [ -n "$2" ] || fail "参数 $option 缺少值"
         value="$2"
@@ -163,6 +178,8 @@ command -v curl >/dev/null || fail "缺少 curl"
 command -v shasum >/dev/null || fail "缺少 shasum，无法校验下载文件"
 log "正在检查运行环境"
 parse_agent_args "$@"
+disable_remote_argument=""
+[ "$disable_remote" = false ] || disable_remote_argument="<string>--disable-remote</string>"
 [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
 endpoint=${endpoint%/}
 [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
@@ -262,7 +279,7 @@ cat > "$PLIST_FILE" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>$LABEL</string>
-<key>ProgramArguments</key><array><string>$AGENT_FILE</string><string>-e</string><string>$endpoint</string><string>-i</string><string>$interval</string></array>
+<key>ProgramArguments</key><array><string>$AGENT_FILE</string><string>-e</string><string>$endpoint</string><string>-i</string><string>$interval</string>$disable_remote_argument</array>
 <key>EnvironmentVariables</key><dict><key>NODEFLARE_AGENT_TOKEN</key><string>$token</string><key>NODEFLARE_STATE_DIR</key><string>$STATE_DIR</string></dict>
 <key>KeepAlive</key><true/><key>RunAtLoad</key><true/>
 <key>StandardOutPath</key><string>/var/log/nodeflare-agent.log</string>

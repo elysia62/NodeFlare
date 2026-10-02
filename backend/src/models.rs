@@ -39,6 +39,7 @@ pub struct ServerInput {
     pub auto_renewal: bool,
     pub network_interface: String,
     pub reset_day: i64,
+    pub reset_timezone: String,
     pub report_interval: i64,
     pub collect_interval: i64,
     pub rx_correction: i64,
@@ -145,6 +146,7 @@ pub struct LoginSessionView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerView {
+    pub remote_control: Option<bool>,
     pub id: String,
     pub name: String,
     pub region: String,
@@ -163,6 +165,7 @@ pub struct ServerView {
     pub ip_v6: String,
     pub network_interface: String,
     pub reset_day: i64,
+    pub reset_timezone: String,
     pub report_interval: i64,
     pub collect_interval: i64,
     pub rx_correction: i64,

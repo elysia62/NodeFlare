@@ -98,9 +98,11 @@ pub async fn create_task(
         if !server_ids.iter().any(|id| {
             agents
                 .get(id)
-                .is_some_and(|agent| !agent.sender.is_closed())
+                .is_some_and(|agent| !agent.sender.is_closed() && agent.remote_control)
         }) {
-            return Err(ApiResponse::bad_request("所选节点均未连接，命令未下发"));
+            return Err(ApiResponse::bad_request(
+                "所选节点均未连接或已在 Agent 本地关闭远程控制，命令未下发",
+            ));
         }
     }
 

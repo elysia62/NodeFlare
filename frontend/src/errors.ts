@@ -53,8 +53,8 @@ const MESSAGES: Record<string, string> = {
   "当前主题不存在": "The current theme does not exist",
   "当前密码错误": "Incorrect current password",
   "当前没有等待生效的数据库迁移": "No database migration is pending",
-  "所选节点均未连接，命令未下发":
-    "None of the selected servers are connected; the command was not sent",
+  "所选节点均未连接或已在 Agent 本地关闭远程控制，命令未下发":
+    "None of the selected servers are connected with remote control enabled locally; the command was not sent",
   "排序列表必须包含全部节点": "The order list must contain every server",
   "接口不存在": "Endpoint not found",
   "数据库备份 ZIP 不能超过 512 MiB": "The database backup ZIP cannot exceed 512 MiB",
@@ -69,6 +69,8 @@ const MESSAGES: Record<string, string> = {
   "最多可创建 20 条资源告警规则": "At most 20 resource alert rules can be created",
   "此仪表盘需要登录后访问": "This dashboard requires signing in",
   "活动主题不存在": "The active theme does not exist",
+  "流量重置时区无效，请使用 UTC、Asia/Shanghai 等 IANA 时区名称":
+    "Invalid traffic reset timezone; use an IANA timezone such as UTC or Asia/Shanghai",
   "用户名或密码错误": "Incorrect username or password",
   "登录状态已过期": "The session has expired",
   "登录设备 ID 无效": "Invalid login device ID",

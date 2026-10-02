@@ -1130,6 +1130,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_03_defaults_existing_traffic_to_utc_without_resetting_usage() {
+        let db = connect("sqlite::memory:").await.unwrap();
+        let previous = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|migration| migration.version < 3)
+                .cloned()
+                .collect(),
+        );
+        previous.run(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','token',1,1)")
+            .execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO server_traffic_state(server_id,cycle_key,reset_day,timestamp,raw_rx,raw_tx,used_rx,used_tx) VALUES ('node',24320,1,1789000000,1000,2000,123,456)")
+            .execute(db.pool()).await.unwrap();
+        db.migrate().await.unwrap();
+        db.migrate().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT reset_timezone FROM servers WHERE id='node'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            "UTC"
+        );
+        let state = sqlx::query("SELECT reset_timezone,used_rx,used_tx FROM server_traffic_state WHERE server_id='node'")
+            .fetch_one(db.pool()).await.unwrap();
+        assert_eq!(state.get::<String, _>("reset_timezone"), "UTC");
+        assert_eq!(state.get::<i64, _>("used_rx"), 123);
+        assert_eq!(state.get::<i64, _>("used_tx"), 456);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(db.pool())
+                .await
+                .unwrap(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
     async fn initial_schema_keeps_visibility_independent_and_rejects_negative_prices() {
         let db = connect("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();

@@ -10,6 +10,7 @@ param(
   [Parameter(ParameterSetName = "Install", Mandatory = $true)][Alias("t")][string]$Token,
   [Parameter(ParameterSetName = "Install", Mandatory = $true)][Alias("e")][string]$Endpoint,
   [Parameter(ParameterSetName = "Install")][Alias("i")][ValidateRange(15, 3600)][int]$Interval = 60,
+  [Parameter(ParameterSetName = "Install")][switch]$DisableRemote,
   [Parameter(ParameterSetName = "Install")][Parameter(ParameterSetName = "Update")][Alias("m")][string]$Mirror = "",
   [Parameter(ParameterSetName = "Update", Mandatory = $true)][switch]$Update,
   [Parameter(ParameterSetName = "Uninstall", Mandatory = $true)][switch]$Uninstall,
@@ -90,6 +91,14 @@ function Read-AgentConfig {
   return $Saved
 }
 
+function Read-RemoteDisabled {
+  $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+  $Actions = @($Task.Actions)
+  if ($Actions.Count -ne 1) { Write-InstallError "无法识别已安装 Agent 的启动参数" }
+  $Flag = [regex]::Match($Actions[0].Arguments, '(?i)(?:^|\s)-DisableRemote(?::(\$true|\$false))?(?=\s|$)')
+  return $Flag.Success -and $Flag.Groups[1].Value -ine '$false'
+}
+
 function Assert-Endpoint([string]$Value) {
   $Parsed = $null
   $SecureScheme = $false
@@ -164,6 +173,7 @@ if ($Update) {
   $Endpoint = $SavedConfig.endpoint
   $Token = $SavedConfig.token
   $Interval = [int]$SavedConfig.interval
+  $DisableRemote = Read-RemoteDisabled
 }
 Assert-Safe "Token" $Token
 Assert-Endpoint $Endpoint
@@ -239,13 +249,16 @@ try {
   }
   $AgentConfig | ConvertTo-Json -Compress | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
   $Launcher = @'
+param([switch]$DisableRemote)
 $ErrorActionPreference = "Stop"
 $InstallRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AgentFile = Join-Path $InstallRoot "agent.exe"
 $ConfigFile = Join-Path $env:ProgramData "NodeFlare\Agent\config.json"
 $Config = Get-Content -LiteralPath $ConfigFile -Raw | ConvertFrom-Json
 $env:NODEFLARE_AGENT_TOKEN = [string]$Config.token
-& $AgentFile -e ([string]$Config.endpoint) -i ([int]$Config.interval)
+$AgentArguments = @('-e', [string]$Config.endpoint, '-i', [string]$Config.interval)
+if ($DisableRemote) { $AgentArguments += '--disable-remote' }
+& $AgentFile @AgentArguments
 exit $LASTEXITCODE
 '@
   [IO.File]::WriteAllText($LauncherFile, $Launcher, [Text.UTF8Encoding]::new($false))
@@ -256,6 +269,7 @@ exit $LASTEXITCODE
   $Token = ""
   $PowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
   $TaskArguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$LauncherFile`""
+  if ($DisableRemote) { $TaskArguments += ' -DisableRemote' }
   Write-Step "正在注册并启动 Windows 计划任务"
   $TaskAction = New-ScheduledTaskAction -Execute $PowerShell -Argument $TaskArguments
   $Trigger = New-ScheduledTaskTrigger -AtStartup

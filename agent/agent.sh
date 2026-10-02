@@ -21,7 +21,7 @@ usage() {
 NodeFlare Agent 安装脚本
 
 用法：
-  agent.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>]
+  agent.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>] [--disable-remote]
   agent.sh --update [-m <下载加速前缀>]
   agent.sh --status
   agent.sh --uninstall
@@ -31,6 +31,7 @@ NodeFlare Agent 安装脚本
   -t  后台生成的 Agent Token（必填，请勿泄露）
   -i  初始历史保存间隔，15-3600 秒（默认 60）
   -m  GitHub 下载加速前缀（可选，如 https://ghproxy.net）
+  --disable-remote  在服务启动参数中禁用远程控制；不带此参数则允许
 EOF
 }
 
@@ -200,19 +201,22 @@ explain_exec_failure() {
   fi
 }
 
-install_agent() {
-  [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限运行安装命令"
-  log "正在检查运行环境"
-  ensure_curl
-  command -v sha256sum >/dev/null || fail "缺少 sha256sum，无法校验下载文件"
+parse_agent_args() {
   token=""
   endpoint=""
   interval=60
   interval_set=false
   mirror=""
+  disable_remote=false
   while [ "$#" -gt 0 ]; do
     option="$1"
     case "$option" in
+      --disable-remote)
+        [ "$disable_remote" = false ] || fail "参数 $option 重复"
+        disable_remote=true
+        shift
+        continue
+        ;;
       -t|-e|-i|-m)
         [ "$#" -ge 2 ] || { echo "参数 $option 缺少值" >&2; usage; exit 1; }
         value="$2"
@@ -227,6 +231,16 @@ install_agent() {
       -m) [ -z "$mirror" ] || fail "参数 $option 重复"; mirror="$value" ;;
     esac
   done
+}
+
+install_agent() {
+  [ "$(id -u)" -eq 0 ] || fail "请使用 root 权限运行安装命令"
+  log "正在检查运行环境"
+  parse_agent_args "$@"
+  disable_remote_arg=""
+  [ "$disable_remote" = false ] || disable_remote_arg=" --disable-remote"
+  ensure_curl
+  command -v sha256sum >/dev/null || fail "缺少 sha256sum，无法校验下载文件"
   [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
   endpoint=${endpoint%/}
   [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
@@ -355,7 +369,7 @@ install_agent() {
     '' \
     '[Service]' \
     'Type=simple' \
-    "ExecStart=$AGENT_FILE -e $endpoint -i $interval" \
+    "ExecStart=$AGENT_FILE -e $endpoint -i $interval$disable_remote_arg" \
     'Restart=always' \
     'RestartSec=10' \
     'NoNewPrivileges=true' \
@@ -376,7 +390,7 @@ install_agent() {
       '#!/sbin/openrc-run' \
       "name=\"$SERVICE_NAME\"" \
       "command=\"$AGENT_FILE\"" \
-      "command_args=\"-e $endpoint -i $interval\"" \
+      "command_args=\"-e $endpoint -i $interval$disable_remote_arg\"" \
       "command_user=\"root\"" \
       "export NODEFLARE_AGENT_TOKEN=\"$token\"" \
       "export NODEFLARE_STATE_DIR=\"$STATE_DIR\"" \
@@ -401,22 +415,22 @@ load_installed_agent_config() {
   case "$init_system" in
     systemd)
       [ -f "$SERVICE_FILE" ] || fail "未找到 Agent 服务配置，请先完成安装"
-      service_exec=$(sed -n 's/^ExecStart=//p' "$SERVICE_FILE" | head -n 1)
-      endpoint=$(printf '%s\n' "$service_exec" | sed -n 's/.* -e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\1/p')
-      interval=$(printf '%s\n' "$service_exec" | sed -n 's/.* -e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\2/p')
+      installed_args=$(sed -n 's/^ExecStart=//p' "$SERVICE_FILE" | head -n 1)
       token=$(sed -n 's/^Environment=NODEFLARE_AGENT_TOKEN=//p' "$SERVICE_FILE" | head -n 1)
       ;;
     openrc)
       [ -f "$OPENRC_FILE" ] || fail "未找到 Agent 服务配置，请先完成安装"
-      command_args=$(sed -n 's/^command_args="\([^"]*\)"$/\1/p' "$OPENRC_FILE" | head -n 1)
-      endpoint=$(printf '%s\n' "$command_args" | sed -n 's/^-e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\1/p')
-      interval=$(printf '%s\n' "$command_args" | sed -n 's/^-e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\2/p')
+      installed_args=$(sed -n 's/^command_args="\([^"]*\)"$/\1/p' "$OPENRC_FILE" | head -n 1)
       token=$(sed -n 's/^export NODEFLARE_AGENT_TOKEN="\([^"]*\)"$/\1/p' "$OPENRC_FILE" | head -n 1)
       ;;
     *)
       fail "未检测到正在运行的 systemd 或 OpenRC，无法自动读取 Agent 配置"
       ;;
   esac
+  disable_remote=$(printf '%s\n' "$installed_args" | awk 'BEGIN { disabled="false" } { for (i=1; i<=NF; i++) if ($i=="--disable-remote") disabled="true" } END { print disabled }')
+  installed_args=$(printf '%s\n' "$installed_args" | awk '{ for (i=1; i<=NF; i++) if ($i!="--disable-remote") printf "%s%s", (n++ ? " " : ""), $i }')
+  endpoint=$(printf '%s\n' "$installed_args" | sed -n 's/.*-e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\1/p')
+  interval=$(printf '%s\n' "$installed_args" | sed -n 's/.*-e \([^[:space:]]*\) -i \([0-9][0-9]*\)$/\2/p')
   [ -n "${endpoint:-}" ] && [ -n "${token:-}" ] && [ -n "${interval:-}" ] || {
     fail "无法读取现有 Agent 配置，请改用安装参数 -e 和 -t"
   }
@@ -444,11 +458,10 @@ update_agent() {
   done
   init_system=$(detect_init_system)
   load_installed_agent_config
-  if [ -n "$mirror" ]; then
-    install_agent -e "$endpoint" -t "$token" -i "$interval" -m "$mirror"
-  else
-    install_agent -e "$endpoint" -t "$token" -i "$interval"
-  fi
+  set -- -e "$endpoint" -t "$token" -i "$interval"
+  [ -z "$mirror" ] || set -- "$@" -m "$mirror"
+  [ "$disable_remote" = false ] || set -- "$@" --disable-remote
+  install_agent "$@"
 }
 
 status_agent() {

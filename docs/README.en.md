@@ -74,10 +74,16 @@ Create a node on the **Servers** page of the admin panel and run the install com
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent.sh \
-  | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token'
+  | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token' --disable-remote
 ```
 
 Updating: re-run the install script. Config and data are preserved and a failed update rolls back automatically.
+
+**Allow remote control** is unchecked by default in the Agent installation dialog. The generated install command includes `--disable-remote` (`-DisableRemote` for the Windows installer), which is saved in the local service startup arguments. Monitoring and latency checks continue, but the backend cannot re-enable remote execution. To enable it, check the option and reinstall using the new command, or remove the disable flag locally and restart. Existing agents without the flag keep remote control enabled without reconfiguration.
+
+The Agent refuses remote commands when started with `--disable-remote` and allows them without it; no extra environment variable or permission file is needed. On systemd, edit `ExecStart` in the service file, then run `sudo systemctl daemon-reload` and `sudo systemctl restart nodeflare-agent`. OpenRC / FreeBSD use `command_args`, macOS uses launchd's `ProgramArguments`, and Windows uses `-DisableRemote` in its scheduled task arguments; restart the corresponding service or task afterward. Manual Agent updates (`--update`, or `-Update` on Windows) preserve the installed disable flag.
+
+Each node's traffic reset timezone defaults to `UTC`. In the node editor, select or enter an IANA timezone such as `Asia/Shanghai` or `America/Los_Angeles`. Traffic resets at midnight on the configured day each month, respecting regional daylight-saving rules. Changing the reset day or timezone starts a new counter on the next report.
 
 > [!TIP]
 > Script options, per-platform agent scripts, and uninstall steps are documented in [Install the Server](https://elysia62.github.io/NodeFlareWiki/en/guide/quick-start.html) · [Install the Agent](https://elysia62.github.io/NodeFlareWiki/en/guide/agent.html) · [Uninstall](https://elysia62.github.io/NodeFlareWiki/en/guide/uninstall.html).

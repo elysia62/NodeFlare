@@ -69,6 +69,7 @@ export const emptyServer: ServerInput = {
   auto_renewal: false,
   network_interface: "",
   reset_day: 1,
+  reset_timezone: "UTC",
   report_interval: 60,
   collect_interval: 3,
   rx_correction: 0,
@@ -95,6 +96,7 @@ export function toInput(server: AdminServer): ServerInput {
     auto_renewal: server.auto_renewal,
     network_interface: server.network_interface,
     reset_day: server.reset_day,
+    reset_timezone: server.reset_timezone,
     report_interval: server.report_interval,
     collect_interval: server.collect_interval,
     rx_correction: server.rx_correction,
@@ -112,6 +114,24 @@ export function billingCycles(locale: UiLocale | string | undefined): Array<{ da
     { days: 180, label: ui(locale, "半年", "Semi-annually") },
     { days: 365, label: ui(locale, "年", "Yearly") },
     { days: 0, label: ui(locale, "一次性", "One-time") },
+  ];
+}
+
+export function trafficTimezones(locale: UiLocale | string | undefined) {
+  return [
+    { value: "UTC", label: "UTC" },
+    { value: "Asia/Shanghai", label: ui(locale, "北京时间（UTC+8）", "Beijing (UTC+8)") },
+    { value: "Asia/Hong_Kong", label: ui(locale, "香港（UTC+8）", "Hong Kong (UTC+8)") },
+    { value: "Asia/Singapore", label: ui(locale, "新加坡（UTC+8）", "Singapore (UTC+8)") },
+    { value: "Asia/Tokyo", label: ui(locale, "日本（UTC+9）", "Japan (UTC+9)") },
+    { value: "Asia/Kolkata", label: ui(locale, "印度（UTC+5:30）", "India (UTC+5:30)") },
+    { value: "America/Los_Angeles", label: ui(locale, "美国太平洋时间（含夏令时）", "US Pacific (with DST)") },
+    { value: "America/Denver", label: ui(locale, "美国山地时间（含夏令时）", "US Mountain (with DST)") },
+    { value: "America/Chicago", label: ui(locale, "美国中部时间（含夏令时）", "US Central (with DST)") },
+    { value: "America/New_York", label: ui(locale, "美国东部时间（含夏令时）", "US Eastern (with DST)") },
+    { value: "Europe/London", label: ui(locale, "英国（含夏令时）", "UK (with DST)") },
+    { value: "Europe/Berlin", label: ui(locale, "德国（含夏令时）", "Germany (with DST)") },
+    { value: "Australia/Sydney", label: ui(locale, "悉尼（含夏令时）", "Sydney (with DST)") },
   ];
 }
 

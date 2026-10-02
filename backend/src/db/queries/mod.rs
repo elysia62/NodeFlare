@@ -8,6 +8,7 @@ pub struct AgentIdentity {
     pub hidden: bool,
     pub report_interval: i64,
     pub reset_day: i64,
+    pub reset_timezone: chrono_tz::Tz,
     pub rx_correction: i64,
     pub tx_correction: i64,
 }
@@ -24,6 +25,7 @@ pub struct PersistResult {
 pub(crate) struct TrafficState {
     cycle_key: i64,
     reset_day: i64,
+    reset_timezone: String,
     pub timestamp: i64,
     raw_rx: i64,
     raw_tx: i64,
@@ -194,6 +196,7 @@ mod tests {
             auto_renewal: false,
             network_interface: String::new(),
             reset_day: 1,
+            reset_timezone: "UTC".to_string(),
             report_interval: 60,
             collect_interval: 5,
             rx_correction: 0,
@@ -210,6 +213,38 @@ mod tests {
         let (_, token) = create_server(&db, &server_input(0)).await.unwrap();
         let identity = agent_identity(&db, &token).await.unwrap().unwrap();
         (db, identity)
+    }
+
+    #[tokio::test]
+    async fn traffic_timezone_survives_node_updates_and_persistence() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let mut input = server_input(0);
+        input.reset_timezone = "Asia/Shanghai".into();
+        let (id, token) = create_server(&db, &input).await.unwrap();
+        assert_eq!(
+            list_servers(&db, true).await.unwrap()[0].reset_timezone,
+            input.reset_timezone
+        );
+        input.reset_timezone = "America/Los_Angeles".into();
+        update_server(&db, &id, &input).await.unwrap();
+        let identity = agent_identity(&db, &token).await.unwrap().unwrap();
+        assert_eq!(identity.reset_timezone, chrono_tz::America::Los_Angeles);
+        let mut traffic = TrafficState::default();
+        let mut report = AgentReport {
+            timestamp: now(),
+            net_rx_total: 123,
+            ..Default::default()
+        };
+        apply_traffic(&mut report, &mut traffic, &identity);
+        let mut transaction = db.pool().begin().await.unwrap();
+        ingest::save_traffic_state(&db, &mut transaction, &id, &traffic)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let stored = agent_traffic_state(&db, &id).await.unwrap();
+        assert_eq!(stored.reset_timezone, input.reset_timezone);
+        assert_eq!(stored.used_rx, 123);
     }
 
     #[tokio::test]

@@ -784,7 +784,14 @@ async fn restore_table<R: Read + Seek + Send>(
             "latency_sample_count",
             "last_timestamp",
         ]);
-    if header.table != table || (header.columns != columns && !legacy_latency) {
+    // A backup taken before reset timezones were added uses UTC by default.
+    let default_timezone = matches!(table, "servers" | "server_traffic_state")
+        && columns
+            .last()
+            .is_some_and(|column| column.name == "reset_timezone")
+        && header.columns == columns[..columns.len() - 1];
+    if header.table != table || (header.columns != columns && !legacy_latency && !default_timezone)
+    {
         bail!("{table} 备份结构无效");
     }
     let columns = header.columns.as_slice();
@@ -812,6 +819,17 @@ async fn restore_table<R: Read + Seek + Send>(
     if !batch.is_empty() {
         insert_rows(db, transaction, table, columns, &batch).await?;
         restored += batch.len();
+    }
+    if matches!(table, "servers" | "server_traffic_state") {
+        let query = format!("SELECT DISTINCT reset_timezone FROM {table}");
+        let timezones = sqlx::query_scalar::<_, String>(AssertSqlSafe(query))
+            .fetch_all(&mut **transaction)
+            .await?;
+        for timezone in timezones {
+            if timezone.parse::<chrono_tz::Tz>().is_err() {
+                bail!("{table} 备份包含无效的流量重置时区");
+            }
+        }
     }
     Ok(restored)
 }
@@ -921,6 +939,83 @@ pub async fn copy_database(source: &Database, target: &Database) -> Result<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn traffic_timezones_restore_with_utc_defaults_and_reject_invalid_values() {
+        let source = crate::db::connect("sqlite::memory:").await.unwrap();
+        let target = crate::db::connect("sqlite::memory:").await.unwrap();
+        source.migrate().await.unwrap();
+        target.migrate().await.unwrap();
+        sqlx::query("INSERT INTO settings(key,value) VALUES ('admin_username','admin'),('admin_password_hash','hash'),('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,reset_timezone) VALUES ('node','Node','hash',1,1,'Asia/Shanghai')")
+            .execute(source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO server_traffic_state(server_id,used_rx,reset_timezone) VALUES ('node',123,'Asia/Shanghai')")
+            .execute(source.pool()).await.unwrap();
+        copy_database(&source, &target).await.unwrap();
+        for table in ["servers", "server_traffic_state"] {
+            let timezone = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+                "SELECT reset_timezone FROM {table}"
+            )))
+            .fetch_one(target.pool())
+            .await
+            .unwrap();
+            assert_eq!(timezone, "Asia/Shanghai");
+        }
+        sqlx::query("UPDATE servers SET reset_timezone='invalid/timezone'")
+            .execute(source.pool())
+            .await
+            .unwrap();
+        assert!(
+            copy_database(&source, &target)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("时区")
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT reset_timezone FROM servers")
+                .fetch_one(target.pool())
+                .await
+                .unwrap(),
+            "Asia/Shanghai"
+        );
+        let old_source = crate::db::connect("sqlite::memory:").await.unwrap();
+        old_source.migrate().await.unwrap();
+        for table in ["servers", "server_traffic_state"] {
+            sqlx::query(AssertSqlSafe(format!(
+                "ALTER TABLE {table} DROP COLUMN reset_timezone"
+            )))
+            .execute(old_source.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO settings(key,value) VALUES ('admin_username','admin'),('admin_password_hash','hash'),('password_client_salt','salt'),('password_scheme','argon2-client-pbkdf2-v1')")
+            .execute(old_source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','hash',1,1)")
+            .execute(old_source.pool()).await.unwrap();
+        sqlx::query("INSERT INTO server_traffic_state(server_id,used_rx) VALUES ('node',123)")
+            .execute(old_source.pool())
+            .await
+            .unwrap();
+        copy_database(&old_source, &target).await.unwrap();
+        for table in ["servers", "server_traffic_state"] {
+            let timezone = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+                "SELECT reset_timezone FROM {table}"
+            )))
+            .fetch_one(target.pool())
+            .await
+            .unwrap();
+            assert_eq!(timezone, "UTC");
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT used_rx FROM server_traffic_state")
+                .fetch_one(target.pool())
+                .await
+                .unwrap(),
+            123
+        );
+    }
 
     #[tokio::test]
     async fn webhook_config_and_channel_receipts_survive_database_migration() {

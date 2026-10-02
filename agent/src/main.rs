@@ -114,6 +114,8 @@ struct RuntimeConfig {
     network_interface: String,
     agent_mirror: String,
     auto_update: bool,
+    // Local permission only; never accepted from backend configuration.
+    remote_control: bool,
     latency_tasks: Vec<LatencyTask>,
 }
 
@@ -129,6 +131,9 @@ struct CliOptions {
     /// Initial report interval in seconds (15-3600)
     #[arg(short = 'i', value_name = "SECONDS", default_value_t = 60)]
     interval: u64,
+    /// Disable remote commands; can only be changed in the local startup arguments
+    #[arg(long)]
+    disable_remote: bool,
     /// Submit one report and exit
     #[arg(long, conflicts_with = "collect")]
     once: bool,
@@ -483,6 +488,7 @@ fn runtime_config(options: &CliOptions) -> Result<RuntimeConfig> {
         agent_mirror: String::new(),
         // Wait for the server to explicitly enable automatic updates.
         auto_update: false,
+        remote_control: !options.disable_remote,
         latency_tasks: Vec::new(),
     })
 }

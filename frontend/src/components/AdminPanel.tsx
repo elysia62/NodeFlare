@@ -37,6 +37,7 @@ import {
   formatDate,
   settingPatch,
   toInput,
+  trafficTimezones,
   waitForDatabaseSwitch,
   type AgentInstallInfo,
 } from "./admin/shared";
@@ -115,7 +116,7 @@ export function AdminPanel({
         api.twoFactorStatus(),
       ]);
       setServers(serverResult.servers);
-      const serverIds = new Set(serverResult.servers.map((server) => server.id));
+      const serverIds = new Set(serverResult.servers.filter((server) => server.remote_control !== false).map((server) => server.id));
       setRemoteSelectedIds((current) => current.filter((id) => serverIds.has(id)));
       setThemes(themesResult.themes);
       setSettings(settingsResult);
@@ -665,9 +666,12 @@ export function AdminPanel({
     return servers.filter((server) => `${server.name} ${server.ip_v4} ${server.ip_v6} ${server.last_ip}`.toLowerCase().includes(keyword));
   }, [remoteQuery, servers]);
   const remoteServerById = useMemo(() => new Map(servers.map((server) => [server.id, server])), [servers]);
-  const remoteAllSelected = servers.length > 0 && remoteSelectedIds.length === servers.length;
+  const remoteSelectableServers = servers.filter((server) => server.remote_control !== false);
+  const remoteAllSelected = remoteSelectableServers.length > 0
+    && remoteSelectableServers.every((server) => remoteSelectedIds.includes(server.id));
 
   const toggleRemoteServer = (serverId: string) => {
+    if (remoteServerById.get(serverId)?.remote_control === false) return;
     setRemoteSelectedIds((current) => current.includes(serverId)
       ? current.filter((id) => id !== serverId)
       : [...current, serverId]);
@@ -972,7 +976,13 @@ export function AdminPanel({
       {editing ? <div className="submodal-backdrop" role="presentation" onMouseDown={serverDialog.onBackdropMouseDown}><form ref={serverDialog.dialogRef} className="editor-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="server-editor-title" tabIndex={-1} onSubmit={saveServer}>
         <header><div><span className="eyebrow">{ui(locale, "节点配置", "Server configuration")}</span><h3 id="server-editor-title">{editing === "new" ? ui(locale, "添加节点", "Add server") : ui(locale, `编辑 · ${editing.name}`, `Edit · ${editing.name}`)}</h3></div></header>
         <div className="form-grid"><label><span>{ui(locale, "名称", "Name")}</span><input autoFocus required value={form.name} onChange={(event) => updateForm("name", event.target.value)} /></label><label><span>{ui(locale, "地区代码", "Region code")}</span><input maxLength={16} placeholder="CN / JP / DE" value={form.region} onChange={(event) => updateForm("region", event.target.value.toUpperCase())} /></label><label><span>{ui(locale, "分组", "Group")}</span><input value={form.group_name} onChange={(event) => updateForm("group_name", event.target.value)} /></label><label><span>{ui(locale, "标签", "Tags")}</span><input placeholder={ui(locale, "主力, 线路:BGP", "primary, line:BGP")} value={form.tags} onChange={(event) => updateForm("tags", event.target.value)} /></label></div>
-        <div className="form-grid three"><label><span>{ui(locale, "流量限额（0 不限）", "Traffic limit (0 = unlimited)")}</span><input placeholder={ui(locale, "如 100 G，不带单位按 GB；0 不限", "e.g. 100 G; bare numbers mean GB; 0 = unlimited")} {...sizeInputProps(trafficLimitText, setTrafficLimitText, (bytes) => updateForm("traffic_limit", bytes), form.traffic_limit)} /></label><label><span>{ui(locale, "流量口径", "Traffic accounting")}</span><select value={form.traffic_limit_type} onChange={(event) => updateForm("traffic_limit_type", event.target.value as ServerInput["traffic_limit_type"])}><option value="sum">{ui(locale, "上下行合计", "Up + down")}</option><option value="max">{ui(locale, "取较大值", "Larger of the two")}</option><option value="min">{ui(locale, "取较小值", "Smaller of the two")}</option><option value="up">{ui(locale, "仅上行", "Upload only")}</option><option value="down">{ui(locale, "仅下行", "Download only")}</option></select></label><label><span>{ui(locale, "流量重置日", "Traffic reset day")}</span><input min="1" max="31" type="number" value={form.reset_day} onChange={(event) => updateForm("reset_day", Number(event.target.value))} /></label></div>
+        <div className="form-grid">
+          <label><span>{ui(locale, "流量限额（0 不限）", "Traffic limit (0 = unlimited)")}</span><input placeholder={ui(locale, "如 100 G，不带单位按 GB；0 不限", "e.g. 100 G; bare numbers mean GB; 0 = unlimited")} {...sizeInputProps(trafficLimitText, setTrafficLimitText, (bytes) => updateForm("traffic_limit", bytes), form.traffic_limit)} /></label>
+          <label><span>{ui(locale, "流量口径", "Traffic accounting")}</span><select value={form.traffic_limit_type} onChange={(event) => updateForm("traffic_limit_type", event.target.value as ServerInput["traffic_limit_type"])}><option value="sum">{ui(locale, "上下行合计", "Up + down")}</option><option value="max">{ui(locale, "取较大值", "Larger of the two")}</option><option value="min">{ui(locale, "取较小值", "Smaller of the two")}</option><option value="up">{ui(locale, "仅上行", "Upload only")}</option><option value="down">{ui(locale, "仅下行", "Download only")}</option></select></label>
+          <label><span>{ui(locale, "流量重置日", "Traffic reset day")}</span><input min="1" max="31" type="number" value={form.reset_day} onChange={(event) => updateForm("reset_day", Number(event.target.value))} /></label>
+          <label><span>{ui(locale, "流量重置时区", "Traffic reset timezone")}</span><input required maxLength={64} list="traffic-reset-timezones" value={form.reset_timezone} onChange={(event) => updateForm("reset_timezone", event.target.value)} placeholder="UTC / Asia/Shanghai" /><datalist id="traffic-reset-timezones">{trafficTimezones(locale).map((zone) => <option key={zone.value} value={zone.value}>{zone.label}</option>)}</datalist></label>
+        </div>
+        <p className="settings-hint">{ui(locale, "按所选时区每月重置日的零点重置，短月份取最后一天；地区时区自动处理夏令时。修改重置日或时区会在下一次上报时重新开始累计。", "Resets at midnight in this timezone on the chosen day each month, clamped to the last day of shorter months. Regional timezones follow DST. Changing the reset day or timezone starts a new counter on the next report.")}</p>
         <div className="form-grid three"><label><span>{ui(locale, "价格（0 免费）", "Price (0 = free)")}</span><input type="number" min="0" max="1000000000" step="any" inputMode="decimal" value={priceText} onChange={(event) => updatePriceText(event.target.value)} onBlur={() => setPriceText(String(form.price))} /></label><label><span>{ui(locale, "币种", "Currency")}</span><select value={form.currency} onChange={(event) => updateForm("currency", event.target.value)}>{ASSET_CURRENCIES.map((code) => <option key={code}>{code}</option>)}</select></label><label><span>{ui(locale, "计费周期", "Billing cycle")}</span><select value={String(form.billing_cycle)} onChange={(event) => updateForm("billing_cycle", Number(event.target.value))}>{billingCycles(locale).map((cycle) => <option key={cycle.days} value={cycle.days}>{cycle.label}</option>)}{billingCycles(locale).every((cycle) => cycle.days !== form.billing_cycle) ? <option value={form.billing_cycle}>{ui(locale, `${form.billing_cycle} 天`, `${form.billing_cycle} days`)}</option> : null}</select></label></div>
         <div className="form-grid three"><label><span>{ui(locale, "到期日期", "Expiry date")}</span><input type="date" value={formatDate(form.expires_at)} onChange={(event) => updateForm("expires_at", event.target.value ? Math.floor(new Date(`${event.target.value}T00:00:00Z`).getTime() / 1000) : null)} /></label><label><span>{ui(locale, "历史写入间隔（秒）", "History write interval (s)")}</span><input min="15" max="3600" type="number" value={form.report_interval} onChange={(event) => updateForm("report_interval", Number(event.target.value))} /></label><label><span>{ui(locale, "实时上传间隔（秒，每秒采样）", "Live upload interval (s, sampled every second)")}</span><input min="3" max="60" type="number" value={form.collect_interval} onChange={(event) => updateForm("collect_interval", Number(event.target.value))} /></label></div>
         <div className="form-grid"><label><span>{ui(locale, "统计网卡（支持 * 通配和 ! 排除，留空自动）", "Network interface (* wildcard and ! exclusion; empty = auto)")}</span><input value={form.network_interface} onChange={(event) => updateForm("network_interface", event.target.value)} placeholder="eth*,!eth1" /></label><label><span>{ui(locale, "Agent 下载加速（可选）", "Agent download mirror (optional)")}</span><input value={form.agent_mirror} onChange={(event) => updateForm("agent_mirror", event.target.value.trim())} placeholder="https://ghproxy.net" /></label><label><span>{ui(locale, "上行流量当前值", "Current upload traffic")}</span><input placeholder={ui(locale, "如 500 G", "e.g. 500 G")} {...sizeInputProps(txCurrentText, setTxCurrentText, setTxCurrentBytes, txCurrentBytes)} /></label><label><span>{ui(locale, "下行流量当前值", "Current download traffic")}</span><input placeholder={ui(locale, "如 500 G", "e.g. 500 G")} {...sizeInputProps(rxCurrentText, setRxCurrentText, setRxCurrentBytes, rxCurrentBytes)} /></label></div>

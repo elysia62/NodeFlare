@@ -4,3 +4,6 @@ CREATE TABLE notification_deliveries (
   delivered_at INTEGER NOT NULL,
   PRIMARY KEY(notification_id, channel)
 ) WITHOUT ROWID;
+
+ALTER TABLE servers ADD COLUMN reset_timezone TEXT NOT NULL DEFAULT 'UTC';
+ALTER TABLE server_traffic_state ADD COLUMN reset_timezone TEXT NOT NULL DEFAULT 'UTC';

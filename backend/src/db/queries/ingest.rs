@@ -225,7 +225,7 @@ pub(crate) async fn load_traffic_state(
     server_id: &str,
 ) -> Result<TrafficState> {
     let row = sqlx::query(db.sql(
-        "SELECT cycle_key, reset_day, timestamp, raw_rx, raw_tx, used_rx, used_tx \
+        "SELECT cycle_key, reset_day, reset_timezone, timestamp, raw_rx, raw_tx, used_rx, used_tx \
          FROM server_traffic_state WHERE server_id=?",
     ))
     .bind(server_id)
@@ -235,6 +235,7 @@ pub(crate) async fn load_traffic_state(
         Ok::<TrafficState, sqlx::Error>(TrafficState {
             cycle_key: row.try_get("cycle_key")?,
             reset_day: row.try_get("reset_day")?,
+            reset_timezone: row.try_get("reset_timezone")?,
             timestamp: row.try_get("timestamp")?,
             raw_rx: row.try_get("raw_rx")?,
             raw_tx: row.try_get("raw_tx")?,
@@ -264,11 +265,18 @@ pub(crate) fn apply_traffic(
         report.net_tx_total = state.used_tx.saturating_add(identity.tx_correction).max(0);
         return;
     }
-    let cycle_key = traffic_cycle_key(report.timestamp, identity.reset_day);
+    let cycle_key = traffic_cycle_key(
+        report.timestamp,
+        identity.reset_day,
+        identity.reset_timezone,
+    );
     if state.timestamp == 0 {
         state.used_rx = report.net_rx_total.max(0);
         state.used_tx = report.net_tx_total.max(0);
-    } else if state.cycle_key != cycle_key || state.reset_day != identity.reset_day {
+    } else if state.cycle_key != cycle_key
+        || state.reset_day != identity.reset_day
+        || state.reset_timezone != identity.reset_timezone.name()
+    {
         state.used_rx = 0;
         state.used_tx = 0;
     } else {
@@ -287,6 +295,7 @@ pub(crate) fn apply_traffic(
     }
     state.cycle_key = cycle_key;
     state.reset_day = identity.reset_day;
+    state.reset_timezone = identity.reset_timezone.name().to_string();
     state.timestamp = report.timestamp;
     state.raw_rx = report.net_rx_total.max(0);
     state.raw_tx = report.net_tx_total.max(0);
@@ -300,15 +309,17 @@ pub(crate) async fn save_traffic_state(
     state: &TrafficState,
 ) -> Result<()> {
     sqlx::query(db.sql(
-        "INSERT INTO server_traffic_state(server_id, cycle_key, reset_day, timestamp, raw_rx, \
-         raw_tx, used_rx, used_tx) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO server_traffic_state(server_id, cycle_key, reset_day, reset_timezone, timestamp, raw_rx, \
+         raw_tx, used_rx, used_tx) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(server_id) DO UPDATE SET cycle_key=excluded.cycle_key, \
-         reset_day=excluded.reset_day, timestamp=excluded.timestamp, raw_rx=excluded.raw_rx, \
+         reset_day=excluded.reset_day, reset_timezone=excluded.reset_timezone, \
+         timestamp=excluded.timestamp, raw_rx=excluded.raw_rx, \
          raw_tx=excluded.raw_tx, used_rx=excluded.used_rx, used_tx=excluded.used_tx",
     ))
     .bind(server_id)
     .bind(state.cycle_key)
     .bind(state.reset_day)
+    .bind(&state.reset_timezone)
     .bind(state.timestamp)
     .bind(state.raw_rx)
     .bind(state.raw_tx)
@@ -571,13 +582,14 @@ pub(crate) async fn save_latency_rows(
     }
     Ok(())
 }
-pub(crate) fn traffic_cycle_key(timestamp: i64, reset_day: i64) -> i64 {
-    let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(timestamp) else {
+pub(crate) fn traffic_cycle_key(timestamp: i64, reset_day: i64, timezone: chrono_tz::Tz) -> i64 {
+    use chrono::Datelike;
+    let Some(datetime) = chrono::DateTime::from_timestamp(timestamp, 0) else {
         return 0;
     };
-    let date = datetime.date();
+    let date = datetime.with_timezone(&timezone).date_naive();
     let year = i64::from(date.year());
-    let month = date.month() as i64;
+    let month = i64::from(date.month());
     let day = i64::from(date.day());
     let boundary = reset_day.clamp(1, 31).min(days_in_month(year, month));
     let current_month = year * 12 + month - 1;
@@ -593,5 +605,109 @@ pub(crate) fn days_in_month(year: i64, month: i64) -> i64 {
         2 => 28,
         4 | 6 | 9 | 11 => 30,
         _ => 31,
+    }
+}
+
+#[cfg(test)]
+mod traffic_tests {
+    use super::*;
+
+    fn timestamp(value: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .timestamp()
+    }
+
+    #[test]
+    fn reset_uses_the_nodes_timezone_not_the_hosts_timezone() {
+        let utc = chrono_tz::UTC;
+        let shanghai = chrono_tz::Asia::Shanghai;
+        let before = timestamp("2026-09-30T15:59:59Z");
+        let boundary = before + 1;
+        assert_eq!(
+            traffic_cycle_key(before, 1, utc),
+            traffic_cycle_key(boundary, 1, utc)
+        );
+        assert_eq!(
+            traffic_cycle_key(before, 1, shanghai) + 1,
+            traffic_cycle_key(boundary, 1, shanghai)
+        );
+        let utc_boundary = timestamp("2026-10-01T00:00:00Z");
+        assert_eq!(
+            traffic_cycle_key(utc_boundary - 1, 1, utc) + 1,
+            traffic_cycle_key(utc_boundary, 1, utc)
+        );
+        // Non-integer-hour timezones also reset at their own midnight.
+        let india_boundary = timestamp("2026-09-30T18:30:00Z");
+        let india = chrono_tz::Asia::Kolkata;
+        assert_eq!(
+            traffic_cycle_key(india_boundary - 1, 1, india) + 1,
+            traffic_cycle_key(india_boundary, 1, india)
+        );
+    }
+
+    #[test]
+    fn reset_follows_daylight_saving_and_short_months() {
+        let pacific = chrono_tz::America::Los_Angeles;
+        for value in ["2026-01-15T08:00:00Z", "2026-07-15T07:00:00Z"] {
+            let boundary = timestamp(value);
+            assert_eq!(
+                traffic_cycle_key(boundary - 1, 15, pacific) + 1,
+                traffic_cycle_key(boundary, 15, pacific)
+            );
+        }
+        for value in [
+            "2026-02-28T00:00:00+08:00",
+            "2028-02-29T00:00:00+08:00",
+            "2026-04-30T00:00:00+08:00",
+        ] {
+            let boundary = timestamp(value);
+            assert_eq!(
+                traffic_cycle_key(boundary - 1, 31, chrono_tz::Asia::Shanghai) + 1,
+                traffic_cycle_key(boundary, 31, chrono_tz::Asia::Shanghai)
+            );
+        }
+    }
+
+    #[test]
+    fn traffic_resets_once_at_local_midnight_and_remembers_timezone_changes() {
+        let mut identity = AgentIdentity {
+            server_id: "node".into(),
+            hidden: false,
+            report_interval: 60,
+            reset_day: 1,
+            reset_timezone: chrono_tz::Asia::Shanghai,
+            rx_correction: 0,
+            tx_correction: 0,
+        };
+        let boundary = timestamp("2026-09-30T16:00:00Z");
+        let mut state = TrafficState::default();
+        for (ts, raw, used) in [
+            (boundary - 1, 100, 100),
+            (boundary, 150, 0),
+            (boundary + 1, 180, 30),
+        ] {
+            let mut report = AgentReport {
+                timestamp: ts,
+                net_rx_total: raw,
+                net_tx_total: raw * 2,
+                ..Default::default()
+            };
+            apply_traffic(&mut report, &mut state, &identity);
+            assert_eq!(report.net_rx_total, used);
+            assert_eq!(report.net_tx_total, used * 2);
+        }
+        assert_eq!(state.reset_timezone, "Asia/Shanghai");
+        // Tokyo is in the same month, but changing the configured reset rule
+        // must still create a fresh baseline, just like changing reset_day.
+        identity.reset_timezone = chrono_tz::Asia::Tokyo;
+        let mut report = AgentReport {
+            timestamp: boundary + 2,
+            net_rx_total: 200,
+            ..Default::default()
+        };
+        apply_traffic(&mut report, &mut state, &identity);
+        assert_eq!(report.net_rx_total, 0);
+        assert_eq!(state.reset_timezone, "Asia/Tokyo");
     }
 }

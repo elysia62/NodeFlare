@@ -74,10 +74,16 @@ Unblock-File "$env:TEMP\nodeflare-install.ps1"
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/agent.sh \
-  | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token'
+  | sudo sh -s -- -e 'https://nodeflare.example.com' -t 'Agent Token' --disable-remote
 ```
 
 更新：重新运行安装脚本即可，配置数据保留，失败自动回滚。
+
+「下载 Agent」弹窗的「允许远程控制」默认不勾选，生成的安装命令带 `--disable-remote`（Windows 安装脚本为 `-DisableRemote`）。安装脚本将禁用参数写入本机服务启动配置，监控和延迟检测不受影响，后台不能重新开启远程执行。勾选后执行新命令重新安装，或在主机上移除禁用参数并重启，即可允许远程控制。不带禁用参数的现有 Agent 保持允许远程控制，无需二次配置。
+
+Agent 启动命令带 `--disable-remote` 就禁止远程执行，不带就允许，无需额外环境变量或权限配置文件。Linux systemd 修改服务文件中的 `ExecStart`，随后执行 `sudo systemctl daemon-reload` 和 `sudo systemctl restart nodeflare-agent`；OpenRC / FreeBSD 修改 `command_args`，macOS 修改 launchd 的 `ProgramArguments`，Windows 修改计划任务启动参数中的 `-DisableRemote`，再重启对应服务或任务。Agent 手动更新参数 `--update`（Windows 为 `-Update`）保留已安装的禁用参数。
+
+节点的流量重置时区默认 `UTC`，可在编辑节点时选择或输入 `Asia/Shanghai`、`America/Los_Angeles` 等 IANA 时区。按该时区每月指定日零点重置，地区时区自动处理夏令时；修改重置日或时区会在下一次上报时重新开始累计。
 
 > [!TIP]
 > 安装脚本参数、各平台 Agent 脚本与卸载方法见文档：[安装服务端](https://elysia62.github.io/NodeFlareWiki/guide/quick-start.html) · [安装 Agent](https://elysia62.github.io/NodeFlareWiki/guide/agent.html) · [卸载](https://elysia62.github.io/NodeFlareWiki/guide/uninstall.html)。

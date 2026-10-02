@@ -405,7 +405,7 @@ try {
       name: "Offline remote smoke", region: "", group_name: "", tags: "", hidden: true,
       expires_at: null, traffic_limit: 0, traffic_limit_type: "max", price: 0,
       billing_cycle: 30, currency: "USD", auto_renewal: false, network_interface: "",
-      reset_day: 1, report_interval: 60, collect_interval: 3, rx_correction: 0,
+      reset_day: 1, reset_timezone: "UTC", report_interval: 60, collect_interval: 3, rx_correction: 0,
       tx_correction: 0, agent_mirror: "", offline_notify_disabled: true, auto_update: false,
     }),
   });
@@ -417,6 +417,28 @@ try {
     body: JSON.stringify({ command: "printf offline", server_ids: [offlineServer.id], totp_code: await currentTotp(setup.secret) }),
   });
   assert.equal(offlineOnly.status, 400, "All-offline execution must fail immediately");
+
+  await closeSocket(agent);
+  agent = await openSocket("/api/agent/ws", agentToken, {
+    "X-NodeFlare-Agent-Capabilities": "metrics-v1,config-v1,task-ack-v1",
+  });
+  await waitForJsonMessage(agent, "monitor-only Agent config", (message) => message.type === "config");
+  const serversResponse = await fetch(new URL("/api/admin/servers", baseUrl), {
+    headers: { Authorization: `Bearer ${adminToken}` },
+  });
+  assert(serversResponse.ok, await serversResponse.clone().text());
+  const monitorOnlyServer = (await serversResponse.json()).servers.find((server) => server.id === serverId);
+  assert.equal(monitorOnlyServer.remote_control, false, "Admin must see the Agent's local permission");
+  const disabledOnly = await fetch(new URL("/api/admin/remote/task", baseUrl), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ command: "printf forbidden", server_ids: [serverId], totp_code: await currentTotp(setup.secret) }),
+  });
+  assert.equal(disabledOnly.status, 400, "Remote execution must reject a locally disabled Agent");
+  assert.match(await disabledOnly.text(), /本地关闭远程控制/);
+  await closeSocket(agent);
+  agent = await openSocket("/api/agent/ws", agentToken, { "X-Forwarded-For": "8.8.8.8" });
+  await waitForJsonMessage(agent, "remote-capable Agent config", (message) => message.type === "config");
 
   const remoteLogin = await fetch(new URL("/api/admin/login", baseUrl), {
     method: "POST",

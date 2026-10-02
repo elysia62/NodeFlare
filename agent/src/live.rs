@@ -13,6 +13,7 @@ pub(crate) struct LiveSenderWorker {
     pub(crate) configured_interval: Arc<Mutex<Duration>>,
     pub(crate) persisted_through: Arc<AtomicI64>,
     pub(crate) remote_config: Arc<Mutex<Option<RemoteConfig>>>,
+    pub(crate) remote_control: bool,
     pub(crate) clock: SharedClock,
     pub(crate) stats: Arc<runtime_stats::RuntimeStats>,
 }
@@ -29,6 +30,7 @@ impl LiveSender {
         let remote_config = Arc::new(Mutex::new(None));
         let endpoint = live_endpoint(&config.endpoint)?;
         let token = config.token.clone();
+        let remote_control = config.remote_control;
         let sender_state = Arc::clone(&pending);
         let sender_interval = Arc::clone(&send_interval);
         let sender_persisted_through = Arc::clone(&persisted_through);
@@ -45,6 +47,7 @@ impl LiveSender {
                         configured_interval: sender_interval,
                         persisted_through: sender_persisted_through,
                         remote_config: sender_remote_config,
+                        remote_control,
                         clock,
                         stats: sender_stats,
                     },
@@ -105,7 +108,11 @@ pub(crate) fn live_endpoint(endpoint: &str) -> Result<String> {
 
 pub(crate) type LiveSocket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
 
-pub(crate) fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, Option<i64>)> {
+pub(crate) fn connect_live(
+    endpoint: &str,
+    token: &str,
+    remote_control: bool,
+) -> Result<(LiveSocket, Option<i64>)> {
     let started_ms = unix_timestamp_millis();
     let deadline = Instant::now() + LIVE_CONNECT_TIMEOUT;
     let mut url = url::Url::parse(endpoint)?;
@@ -123,7 +130,7 @@ pub(crate) fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, O
             .insert(AGENT_PROTOCOL_HEADER, AGENT_PROTOCOL_VERSION.parse()?);
         request.headers_mut().insert(
             AGENT_CAPABILITIES_HEADER,
-            REQUIRED_AGENT_CAPABILITIES.join(",").parse()?,
+            agent_capabilities(remote_control).parse()?,
         );
         let stream = connect_live_stream(&url, deadline)?;
         match client_tls(request, stream) {
@@ -164,6 +171,14 @@ pub(crate) fn connect_live(endpoint: &str, token: &str) -> Result<(LiveSocket, O
         .into());
     }
     Ok((socket, clock_offset_ms))
+}
+
+pub(crate) fn agent_capabilities(remote_control: bool) -> String {
+    let mut capabilities = REQUIRED_AGENT_CAPABILITIES.to_vec();
+    if remote_control {
+        capabilities.push(telemetry::REMOTE_EXEC_CAPABILITY);
+    }
+    capabilities.join(",")
 }
 
 pub(crate) fn connect_live_stream(url: &url::Url, deadline: Instant) -> Result<TcpStream> {
@@ -465,6 +480,7 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
         configured_interval,
         persisted_through,
         remote_config,
+        remote_control,
         clock,
         stats,
     } = worker;
@@ -478,16 +494,16 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
     let mut accepted_through = persisted_through.load(Ordering::Acquire);
     let mut next_send_at = Instant::now();
     let mut next_probe_at = Instant::now();
-    let mut remote_executor = match RemoteExecutor::new() {
+    let mut remote_executor = match RemoteExecutor::new(remote_control) {
         Ok(executor) => executor,
         Err(error) => {
             eprintln!("remote executor disabled: {error}");
-            RemoteExecutor::disabled()
+            RemoteExecutor::disabled("Agent 任务日志异常，远程执行已禁用")
         }
     };
     'sender: loop {
         if socket.is_none() {
-            match connect_live(endpoint, token) {
+            match connect_live(endpoint, token, remote_executor.disabled_reason.is_none()) {
                 Ok((mut connected, offset_ms)) => {
                     observe_clock(&clock, offset_ms);
                     if set_live_read_timeout(&mut connected, Some(LIVE_HINT_READ_TIMEOUT)).is_err()

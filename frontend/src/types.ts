@@ -203,11 +203,13 @@ export interface Server extends ServerSummary {
 }
 
 export interface AdminServer extends ServerSummary {
+  remote_control: boolean | null;
   hidden: boolean;
   last_ip: string;
   ip_v4: string;
   ip_v6: string;
   network_interface: string;
+  reset_timezone: string;
   report_interval: number;
   collect_interval: number;
   rx_correction: number;
@@ -265,6 +267,7 @@ export interface ServerInput {
   network_interface: string;
   reset_day: number;
   report_interval: number;
+  reset_timezone: string;
   collect_interval: number;
   rx_correction: number;
   tx_correction: number;

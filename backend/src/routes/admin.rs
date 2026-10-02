@@ -35,9 +35,16 @@ pub struct DatabaseMigrationInput {
 
 pub async fn servers_get(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
     let live = state.live_reports.read().await.clone();
-    let servers = crate::db::queries::list_servers_with_live(&state.db, true, &live)
+    let mut servers = crate::db::queries::list_servers_with_live(&state.db, true, &live)
         .await
         .map_err(ApiResponse::internal)?;
+    let agents = state.agents.read().await;
+    for server in &mut servers {
+        server.remote_control = agents
+            .get(&server.id)
+            .filter(|agent| !agent.sender.is_closed())
+            .map(|agent| agent.remote_control);
+    }
     Ok(Json(serde_json::json!({"servers": servers})).into_response())
 }
 
@@ -927,6 +934,14 @@ fn validate_server(input: &ServerInput) -> Result<(), &'static str> {
     {
         return Err("采样、上报或流量重置配置无效");
     }
+    if input
+        .reset_timezone
+        .trim()
+        .parse::<chrono_tz::Tz>()
+        .is_err()
+    {
+        return Err("流量重置时区无效，请使用 UTC、Asia/Shanghai 等 IANA 时区名称");
+    }
     if input.network_interface.chars().count() > 160 || !valid_agent_mirror(&input.agent_mirror) {
         return Err("网卡或 Agent 下载地址无效");
     }
@@ -1175,11 +1190,25 @@ mod server_validation_tests {
             "hidden": false, "expires_at": null, "traffic_limit": 0,
             "traffic_limit_type": "sum", "price": 0, "billing_cycle": 30,
             "currency": "CNY", "auto_renewal": false, "network_interface": "",
-            "reset_day": 1, "report_interval": 60, "collect_interval": 3,
+            "reset_day": 1, "reset_timezone": "UTC", "report_interval": 60, "collect_interval": 3,
             "rx_correction": 0, "tx_correction": 0, "agent_mirror": "",
             "offline_notify_disabled": false, "auto_update": true
         }))
         .unwrap();
+        for timezone in [
+            "UTC",
+            "Asia/Shanghai",
+            "America/Los_Angeles",
+            "Asia/Kolkata",
+        ] {
+            input.reset_timezone = timezone.into();
+            assert!(validate_server(&input).is_ok());
+        }
+        for timezone in ["", "local", "UTC+8", "Asia/Unknown"] {
+            input.reset_timezone = timezone.into();
+            assert!(validate_server(&input).is_err());
+        }
+        input.reset_timezone = "UTC".into();
         for hidden in [true, false] {
             input.hidden = hidden;
             for price in [0.0, 0.01, 1_000_000_000.0] {

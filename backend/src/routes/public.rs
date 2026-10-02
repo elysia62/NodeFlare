@@ -299,13 +299,15 @@ mod tests {
     /// `PUBLIC_SERVER_FIELDS` and this list together must cover every struct
     /// field; `public_projection_keeps_private_server_fields_out` fails when a
     /// new field lands in neither, so publishing it stays a deliberate choice.
-    const PRIVATE_SERVER_FIELDS: [&str; 13] = [
+    const PRIVATE_SERVER_FIELDS: [&str; 15] = [
         "hidden",
         "last_ip",
         "ip_v4",
         "ip_v6",
         "network_interface",
         "reset_day",
+        "reset_timezone",
+        "remote_control",
         "report_interval",
         "collect_interval",
         "rx_correction",
@@ -317,6 +319,7 @@ mod tests {
 
     fn sample_server() -> ServerView {
         ServerView {
+            remote_control: Some(false),
             id: "node".to_string(),
             name: "Node".to_string(),
             region: "HK".to_string(),
@@ -335,6 +338,7 @@ mod tests {
             ip_v6: "2001:db8::1".to_string(),
             network_interface: "eth0".to_string(),
             reset_day: 1,
+            reset_timezone: "UTC".to_string(),
             report_interval: 60,
             collect_interval: 1,
             rx_correction: 0,

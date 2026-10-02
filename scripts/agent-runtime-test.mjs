@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,7 +19,7 @@ const releaseRequests = [];
 const agentProtocolHeaders = {
   "x-nodeflare-agent-protocol": "1",
   "x-nodeflare-agent-capabilities":
-    "metrics-v1,config-v1,remote-exec-v1,task-ack-v1",
+    "metrics-v1,config-v1,task-ack-v1,remote-exec-v1",
 };
 const proxy = createHttpServer((_request, response) => {
   response.writeHead(502);
@@ -41,9 +41,9 @@ async function waitUntil(predicate, timeout, message) {
   }
 }
 
-function startAgent(port, token, name, extraEnv = {}) {
+function startAgent(port, token, name, extraEnv = {}, extraArgs = []) {
   const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
-  const child = spawn(binary, ["-e", `http://127.0.0.1:${port}`, "-t", token], {
+  const child = spawn(binary, ["-e", `http://127.0.0.1:${port}`, "-t", token, ...extraArgs], {
     env: {
       ...process.env,
       NODEFLARE_STATE_DIR: join(directory, name),
@@ -83,7 +83,10 @@ try {
   let redirected = false;
   upgradeServer.on("upgrade", (request, socket, head) => {
     for (const [name, expected] of Object.entries(agentProtocolHeaders)) {
-      assert.equal(request.headers[name], expected, `Agent must send ${name}`);
+      const permitted = request.headers.authorization !== "Bearer runtime-remote-disabled";
+      const value = !permitted && name === "x-nodeflare-agent-capabilities"
+        ? expected.replace(",remote-exec-v1", "") : expected;
+      assert.equal(request.headers[name], value, `Agent must send ${name}`);
     }
     if (request.url === "/api/agent/ws") {
       redirected = true;
@@ -227,6 +230,55 @@ setTimeout(() => process.stdout.write("10, Runtime test GPU, 256, 1024\\n"), wai
   assert.equal(remoteResult.exit_code, 0);
   assert.equal(remoteResult.result.trim(), "remote-finished");
   await stopAgent(remote);
+
+  console.log("agent runtime: local remote-control denial cannot be overridden by the backend");
+  const blockedTaskId = randomUUID();
+  const blockedMarker = join(directory, "remote-must-not-run");
+  let deniedResult;
+  let disabledSamples = 0;
+  websocketServer.removeAllListeners("connection");
+  websocketServer.on("connection", (socket) => {
+    socket.send(JSON.stringify({
+      type: "config", ts: Math.floor(Date.now() / 1_000),
+      config: {
+        report_interval: 15, collect_interval: 3, network_interface: "",
+        agent_mirror: "", auto_update: false, latency_tasks: [],
+      },
+    }));
+    // Even a server that attempts to grant permission and ignores the Agent's
+    // advertised capabilities must not be able to start a local process.
+    socket.send(JSON.stringify({
+      type: "config", ts: Math.floor(Date.now() / 1_000),
+      config: {
+        report_interval: 15, collect_interval: 3, network_interface: "",
+        agent_mirror: "", auto_update: false, latency_tasks: [], disable_remote: false,
+      },
+    }));
+    socket.send(JSON.stringify({
+      type: "remote_task", task_id: blockedTaskId, command: `echo unsafe > "${blockedMarker}"`,
+    }));
+    socket.on("message", (raw, binary) => {
+      if (binary) {
+        const message = JSON.parse(gunzipSync(raw).toString());
+        disabledSamples += message.samples.length;
+        const latest = Math.max(0, ...message.samples.map((sample) => sample.metrics.timestamp));
+        socket.send(JSON.stringify({
+          type: "ack", ts: Math.floor(Date.now() / 1_000), persisted: true,
+          persistenceError: false, persistedThroughTs: latest, nextPersistAfterMs: 15_000,
+        }));
+      } else {
+        const message = JSON.parse(raw.toString());
+        if (message.type === "task_result" && message.task_id === blockedTaskId) deniedResult = message;
+      }
+    });
+  });
+  const disabled = startAgent(upgradeServer.address().port, "runtime-remote-disabled", "disabled", {}, ["--disable-remote"]);
+  await waitUntil(() => deniedResult && disabledSamples > 0, 15_000, "Disabled Agent must reject commands and continue reporting");
+  assert.equal(deniedResult.status, "failed");
+  assert.match(deniedResult.result, /本地配置已关闭/);
+  assert(!existsSync(blockedMarker), "The remote command must not run");
+  assert(!existsSync(join(directory, "disabled", "remote-tasks.json")), "Disabled Agent must not initialize remote execution");
+  await stopAgent(disabled);
 
   console.log("agent runtime: stalled handshake times out and reconnects");
   let connections = 0;

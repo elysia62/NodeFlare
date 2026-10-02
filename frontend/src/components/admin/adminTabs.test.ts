@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { installCommandFor } from "./InstallDialog";
-import type { AgentInstallInfo } from "./shared";
+import { emptyServer, toInput, trafficTimezones, type AgentInstallInfo } from "./shared";
+import type { AdminServer } from "../../types";
 
 const install: AgentInstallInfo = {
   agent_token: "secret-token",
@@ -50,7 +51,7 @@ describe("Agent install command builder", () => {
     expect(installCommandFor(install, "windows", "https://panel.example.com"))
       .not.toContain("-Mirror");
     // A mirror must never leave a dangling flag when it is empty.
-    expect(linux.trimEnd()).toMatch(/secret-token'$/);
+    expect(linux.trimEnd()).toMatch(/secret-token' --disable-remote$/);
   });
 
   test("escapes quotes inside the token so the command stays valid", () => {
@@ -58,5 +59,30 @@ describe("Agent install command builder", () => {
     // The shell literal must escape the embedded quote rather than break out.
     expect(installCommandFor(tricky, "linux", "https://panel.example.com"))
       .toContain(`'tok'\\''en'`);
+  });
+
+  test("new install commands disable remote control unless explicitly allowed", () => {
+    for (const platform of ["linux", "macos", "freebsd", "windows"] as const) {
+      const flag = platform === "windows" ? "-DisableRemote" : "--disable-remote";
+      expect(installCommandFor(install, platform, "https://panel.example.com")).toEndWith(flag);
+      const disabled = installCommandFor(install, platform, "https://panel.example.com", false);
+      expect(disabled).toEndWith(flag);
+      const enabled = installCommandFor(install, platform, "https://panel.example.com", true);
+      expect(enabled).not.toContain(flag);
+      expect(enabled).toEndWith("-t 'secret-token'");
+    }
+  });
+});
+
+describe("node traffic timezone", () => {
+  test("defaults to UTC and preserves the configured timezone when editing", () => {
+    expect(emptyServer.reset_timezone).toBe("UTC");
+    const server = { ...emptyServer, reset_timezone: "America/Los_Angeles" } as AdminServer;
+    expect(toInput(server).reset_timezone).toBe("America/Los_Angeles");
+    for (const locale of ["zh-CN", "en-US"]) {
+      for (const zone of trafficTimezones(locale)) {
+        expect(() => new Intl.DateTimeFormat("en-US", { timeZone: zone.value })).not.toThrow();
+      }
+    }
   });
 });

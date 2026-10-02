@@ -72,7 +72,7 @@ pub async fn list_servers_with_live(
     let statement = if include_hidden {
         "SELECT s.id, s.name, s.region, s.group_name, s.tags, s.hidden, s.expires_at, \
          s.traffic_limit, s.traffic_limit_type, s.price, s.billing_cycle, s.currency, \
-         s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, \
+         s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, s.reset_timezone, \
          s.report_interval, s.collect_interval, s.rx_correction, s.tx_correction, \
          s.agent_mirror, s.offline_notify_disabled, s.auto_update, \
          l.latest_json \
@@ -81,7 +81,7 @@ pub async fn list_servers_with_live(
     } else {
         "SELECT s.id, s.name, s.region, s.group_name, s.tags, s.hidden, s.expires_at, \
          s.traffic_limit, s.traffic_limit_type, s.price, s.billing_cycle, s.currency, \
-         s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, \
+         s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, s.reset_timezone, \
          s.report_interval, s.collect_interval, s.rx_correction, s.tx_correction, \
          s.agent_mirror, s.offline_notify_disabled, s.auto_update, \
          l.latest_json \
@@ -111,6 +111,7 @@ pub async fn list_servers_with_live(
             let integer = |read: fn(&AgentReport) -> i64| report.map(read);
             let text = |read: fn(&AgentReport) -> &String| report.as_ref().map(|r| read(r).clone());
             Ok(ServerView {
+                remote_control: None,
                 id: id.clone(),
                 name: row.try_get("name")?,
                 region: row.try_get("region")?,
@@ -129,6 +130,7 @@ pub async fn list_servers_with_live(
                 ip_v6: row.try_get("ip_v6")?,
                 network_interface: row.try_get("network_interface")?,
                 reset_day: row.try_get("reset_day")?,
+                reset_timezone: row.try_get("reset_timezone")?,
                 report_interval: row.try_get("report_interval")?,
                 collect_interval: row
                     .try_get::<i64, _>("collect_interval")?
@@ -201,9 +203,9 @@ pub async fn create_server(db: &Database, input: &ServerInput) -> Result<(String
         "INSERT INTO servers( \
          id, token_hash, name, region, group_name, tags, hidden, expires_at, traffic_limit, \
          traffic_limit_type, price, billing_cycle, currency, auto_renewal, last_ip, ip_v4, ip_v6, \
-         network_interface, reset_day, report_interval, collect_interval, rx_correction, \
+         network_interface, reset_day, reset_timezone, report_interval, collect_interval, rx_correction, \
          tx_correction, agent_mirror, offline_notify_disabled, auto_update, created_at, updated_at, \
-         sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?, ?, \
+         sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?, ?, ?, \
          ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM servers))",
     ))
     .bind(&id)
@@ -227,6 +229,7 @@ pub async fn create_server(db: &Database, input: &ServerInput) -> Result<(String
     .bind(i64::from(input.auto_renewal))
     .bind(input.network_interface.trim())
     .bind(input.reset_day)
+    .bind(input.reset_timezone.trim())
     .bind(input.report_interval)
     .bind(input.collect_interval)
     .bind(input.rx_correction)
@@ -256,7 +259,7 @@ pub async fn update_server(db: &Database, id: &str, input: &ServerInput) -> Resu
     let result = sqlx::query(db.sql(
         "UPDATE servers SET name=?, region=?, group_name=?, tags=?, hidden=?, expires_at=?, \
          traffic_limit=?, traffic_limit_type=?, price=?, billing_cycle=?, currency=?, auto_renewal=?, \
-         network_interface=?, reset_day=?, report_interval=?, collect_interval=?, rx_correction=?, \
+         network_interface=?, reset_day=?, reset_timezone=?, report_interval=?, collect_interval=?, rx_correction=?, \
          tx_correction=?, agent_mirror=?, offline_notify_disabled=?, auto_update=?, updated_at=? \
          WHERE id=?",
     ))
@@ -279,6 +282,7 @@ pub async fn update_server(db: &Database, id: &str, input: &ServerInput) -> Resu
     .bind(i64::from(input.auto_renewal))
     .bind(input.network_interface.trim())
     .bind(input.reset_day)
+    .bind(input.reset_timezone.trim())
     .bind(input.report_interval)
     .bind(input.collect_interval)
     .bind(input.rx_correction)
@@ -368,7 +372,7 @@ pub async fn server_name(db: &Database, id: &str) -> Result<Option<String>> {
 pub async fn agent_identity(db: &Database, token: &str) -> Result<Option<AgentIdentity>> {
     let token_hash = auth::token_hash(token);
     let row = sqlx::query(db.sql(
-        "SELECT id, hidden, report_interval, reset_day, rx_correction, \
+        "SELECT id, hidden, report_interval, reset_day, reset_timezone, rx_correction, \
          tx_correction FROM servers WHERE token_hash=? OR EXISTS (\
          SELECT 1 FROM server_install_tokens WHERE server_id=servers.id AND token_hash=?\
          )",
@@ -378,17 +382,17 @@ pub async fn agent_identity(db: &Database, token: &str) -> Result<Option<AgentId
     .fetch_optional(db.pool())
     .await?;
     row.map(|row| {
-        Ok::<AgentIdentity, sqlx::Error>(AgentIdentity {
+        Ok::<AgentIdentity, anyhow::Error>(AgentIdentity {
             server_id: row.try_get("id")?,
             hidden: row.try_get::<i64, _>("hidden")? != 0,
             report_interval: row.try_get("report_interval")?,
             reset_day: row.try_get("reset_day")?,
+            reset_timezone: row.try_get::<String, _>("reset_timezone")?.parse()?,
             rx_correction: row.try_get("rx_correction")?,
             tx_correction: row.try_get("tx_correction")?,
         })
     })
     .transpose()
-    .map_err(Into::into)
 }
 
 pub async fn agent_config(db: &Database, id: &str) -> Result<Option<serde_json::Value>> {

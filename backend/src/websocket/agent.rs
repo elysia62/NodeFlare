@@ -109,12 +109,22 @@ pub async fn handle(
         Err(error) => return ApiResponse::internal(error).into_response(),
     };
     let remote_ip = client_ip(&headers, peer, &state.config.trusted_proxies);
+    let remote_control = agent_has_capability(&headers, telemetry::REMOTE_EXEC_CAPABILITY);
     let token = token.to_string();
     let connection_state = Arc::clone(&state);
     let mut response = ws
         .max_message_size(MAX_AGENT_MESSAGE_BYTES)
         .max_frame_size(MAX_AGENT_MESSAGE_BYTES)
-        .on_upgrade(move |socket| run(socket, connection_state, identity, remote_ip, token));
+        .on_upgrade(move |socket| {
+            run(
+                socket,
+                connection_state,
+                identity,
+                remote_ip,
+                token,
+                remote_control,
+            )
+        });
     response.headers_mut().insert(
         AGENT_PROTOCOL_HEADER,
         axum::http::HeaderValue::from_static(AGENT_PROTOCOL_VERSION),
@@ -128,6 +138,7 @@ async fn run(
     identity: AgentIdentity,
     remote_ip: String,
     token: String,
+    remote_control: bool,
 ) {
     let connection_id = uuid::Uuid::new_v4().to_string();
     let (mut websocket_tx, mut websocket_rx) = socket.split();
@@ -144,6 +155,7 @@ async fn run(
         identity.server_id.clone(),
         AgentConnection {
             connection_id: connection_id.clone(),
+            remote_control,
             sender: outbound_tx.clone(),
         },
     );
@@ -477,22 +489,27 @@ fn agent_protocol_supported(headers: &HeaderMap) -> bool {
     if protocol != Some(AGENT_PROTOCOL_VERSION) {
         return false;
     }
-    let capabilities = headers
+    REQUIRED_AGENT_CAPABILITIES
+        .iter()
+        .all(|capability| agent_has_capability(headers, capability))
+}
+
+fn agent_has_capability(headers: &HeaderMap, capability: &str) -> bool {
+    headers
         .get(AGENT_CAPABILITIES_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .split(',')
-        .map(str::trim)
-        .collect::<std::collections::HashSet<_>>();
-    REQUIRED_AGENT_CAPABILITIES
-        .iter()
-        .all(|capability| capabilities.contains(capability))
+        .any(|value| value.trim() == capability)
 }
 
 pub fn queue_remote_task(
     connection: &AgentConnection,
     task: &RemoteTaskInfo,
 ) -> Result<(), &'static str> {
+    if !connection.remote_control {
+        return Err("Agent 本地已关闭远程控制，请修改主机配置或重新安装 Agent");
+    }
     connection
         .sender
         .try_send(AgentCommand::Text(
@@ -536,8 +553,9 @@ mod tests {
     #[test]
     fn remote_dispatch_reports_backpressure_and_disconnects() {
         let (sender, mut receiver) = mpsc::channel(1);
-        let connection = AgentConnection {
+        let mut connection = AgentConnection {
             connection_id: "test".to_string(),
+            remote_control: true,
             sender,
         };
         let task = RemoteTaskInfo {
@@ -567,6 +585,15 @@ mod tests {
         assert_eq!(payload["task_id"], task.id);
         assert!(receiver.try_recv().is_err());
 
+        connection.remote_control = false;
+        assert!(
+            queue_remote_task(&connection, &task)
+                .unwrap_err()
+                .contains("本地已关闭")
+        );
+        assert!(receiver.try_recv().is_err());
+        connection.remote_control = true;
+
         drop(receiver);
         assert!(
             queue_remote_task(&connection, &task)
@@ -588,6 +615,15 @@ mod tests {
             HeaderValue::from_static("metrics-v1,config-v1,remote-exec-v1,task-ack-v1"),
         );
         assert!(agent_protocol_supported(&headers));
+        headers.insert(
+            AGENT_CAPABILITIES_HEADER,
+            HeaderValue::from_static("metrics-v1,config-v1,task-ack-v1"),
+        );
+        assert!(agent_protocol_supported(&headers));
+        assert!(!agent_has_capability(
+            &headers,
+            telemetry::REMOTE_EXEC_CAPABILITY
+        ));
         headers.remove(AGENT_CAPABILITIES_HEADER);
         assert!(!agent_protocol_supported(&headers));
         headers.insert(

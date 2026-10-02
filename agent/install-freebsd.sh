@@ -69,7 +69,7 @@ usage() {
 NodeFlare Agent FreeBSD 安装脚本
 
 用法：
-  install-freebsd.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>]
+  install-freebsd.sh -e <NodeFlare URL> -t <Agent Token> [-i <历史保存间隔>] [-m <下载加速前缀>] [--disable-remote]
   install-freebsd.sh --update [-m <下载加速前缀>]
   install-freebsd.sh --status
   install-freebsd.sh --uninstall
@@ -77,6 +77,7 @@ NodeFlare Agent FreeBSD 安装脚本
 支持 FreeBSD amd64 和 arm64。Agent Token 请勿泄露。
 -m 为可选的 GitHub 下载加速前缀（如 https://ghproxy.net）。
 --update 手动更新 Agent。
+--disable-remote 在服务启动参数中禁用远程控制；不带此参数则允许。
 EOF
 }
 
@@ -86,8 +87,11 @@ safe_value() {
 
 load_installed_agent_config() {
   [ -f "$SERVICE_FILE" ] || fail "未找到已安装 Agent 的服务配置，请先安装"
-  endpoint=$(sed -n 's/^command_args=".* -e \([^ ]*\) -i [0-9]*"$/\1/p' "$SERVICE_FILE")
-  interval=$(sed -n 's/^command_args=".* -e [^ ]* -i \([0-9]*\)"$/\1/p' "$SERVICE_FILE")
+  installed_args=$(sed -n 's/^command_args="\([^"]*\)"$/\1/p' "$SERVICE_FILE")
+  disable_remote=$(printf '%s\n' "$installed_args" | awk 'BEGIN { disabled="false" } { for (i=1; i<=NF; i++) if ($i=="--disable-remote") disabled="true" } END { print disabled }')
+  installed_args=$(printf '%s\n' "$installed_args" | awk '{ for (i=1; i<=NF; i++) if ($i!="--disable-remote") printf "%s%s", (n++ ? " " : ""), $i }')
+  endpoint=$(printf '%s\n' "$installed_args" | sed -n 's/.* -e \([^ ]*\) -i [0-9]*$/\1/p')
+  interval=$(printf '%s\n' "$installed_args" | sed -n 's/.* -e [^ ]* -i \([0-9]*\)$/\1/p')
   token=$(sed -n 's/^export NODEFLARE_AGENT_TOKEN="\([^"]*\)"$/\1/p' "$SERVICE_FILE")
   [ -n "$endpoint" ] && [ -n "$token" ] && [ -n "$interval" ] || fail "已安装 Agent 的服务配置不完整"
 }
@@ -122,6 +126,7 @@ parse_agent_args() {
   interval_set=false
   mirror=""
   mirror_set=false
+  disable_remote=false
   update=false
   if [ "${1:-}" = "--update" ]; then
     update=true
@@ -133,6 +138,12 @@ parse_agent_args() {
       fail "--update 仅接受可选的 -m 下载加速前缀"
     fi
     case "$option" in
+      --disable-remote)
+        [ "$disable_remote" = false ] || fail "参数 $option 重复"
+        disable_remote=true
+        shift
+        continue
+        ;;
       -t|-e|-i|-m)
         [ "$#" -ge 2 ] && [ -n "$2" ] || fail "参数 $option 缺少值"
         value="$2"
@@ -190,6 +201,8 @@ command -v sysrc >/dev/null 2>&1 || fail "缺少 sysrc"
 
 log "正在检查运行环境"
 parse_agent_args "$@"
+disable_remote_arg=""
+[ "$disable_remote" = false ] || disable_remote_arg=" --disable-remote"
 [ -n "$token" ] && [ -n "$endpoint" ] || { usage; exit 1; }
 endpoint=${endpoint%/}
 [ ${#token} -le 512 ] && [ ${#endpoint} -le 2048 ] || fail "安装参数长度超出限制"
@@ -295,7 +308,7 @@ name="$RC_NAME"
 rcvar="${RC_NAME}_enable"
 pidfile="/var/run/\${name}.pid"
 command="/usr/sbin/daemon"
-command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint -i $interval"
+command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint -i $interval$disable_remote_arg"
 
 load_rc_config "\${name}"
 : \${nodeflare_agent_enable:="NO"}
