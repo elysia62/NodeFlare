@@ -53,16 +53,9 @@ fn request_headers(input: &str) -> Result<HeaderMap> {
 }
 
 pub fn render(template: &str, message: &Message<'_>) -> Result<String> {
-    let timestamp = time::OffsetDateTime::now_utc();
-    let time = format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
-        timestamp.year(),
-        timestamp.month() as u8,
-        timestamp.day(),
-        timestamp.hour(),
-        timestamp.minute(),
-        timestamp.second()
-    );
+    let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
     let mut remaining = template;
     let mut output = String::with_capacity(template.len());
     while let Some(start) = remaining.find("{{") {

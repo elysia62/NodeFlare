@@ -203,12 +203,14 @@ fn parse_frankfurter(value: &Value) -> Option<FetchedRates> {
 }
 
 fn date_from_timestamp(timestamp: i64) -> String {
-    time::OffsetDateTime::from_unix_timestamp(timestamp)
+    use chrono::Datelike;
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .filter(|value| (-9999..=9999).contains(&value.year()))
         .map(|value| {
             format!(
                 "{:04}-{:02}-{:02}",
                 value.year(),
-                value.month() as u8,
+                value.month(),
                 value.day()
             )
         })
@@ -218,6 +220,23 @@ fn date_from_timestamp(timestamp: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exchange_dates_keep_utc_boundaries_and_reject_out_of_range_timestamps() {
+        for (timestamp, date) in [
+            (-1, "1969-12-31"),
+            (0, "1970-01-01"),
+            (86_399, "1970-01-01"),
+            (86_400, "1970-01-02"),
+            (1_709_251_199, "2024-02-29"),
+            (1_709_251_200, "2024-03-01"),
+            (253_402_300_800, ""),
+            (i64::MAX, ""),
+            (i64::MIN, ""),
+        ] {
+            assert_eq!(date_from_timestamp(timestamp), date);
+        }
+    }
 
     #[test]
     fn default_rates_cover_frontend_currencies() {

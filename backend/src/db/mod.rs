@@ -888,7 +888,7 @@ pub async fn cleanup_auth(pool: &Database) -> Result<()> {
 }
 
 pub fn now() -> i64 {
-    time::OffsetDateTime::now_utc().unix_timestamp()
+    chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).timestamp()
 }
 
 fn string(values: &HashMap<String, String>, key: &str, fallback: &str) -> String {

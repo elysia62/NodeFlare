@@ -77,14 +77,12 @@ pub(crate) fn output_with_timeout(
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() >= timeout => {
-                terminate_command_tree(&mut child);
-                let _ = child.wait();
+                terminate_process_tree(&mut child);
                 break None;
             }
             Ok(None) => thread::sleep(Duration::from_millis(20)),
             Err(_) => {
-                terminate_command_tree(&mut child);
-                let _ = child.wait();
+                terminate_process_tree(&mut child);
                 break None;
             }
         }
@@ -99,7 +97,7 @@ pub(crate) fn output_with_timeout(
     })
 }
 
-fn terminate_command_tree(child: &mut Child) {
+pub(crate) fn terminate_process_tree(child: &mut Child) {
     #[cfg(unix)]
     {
         let group = format!("-{}", child.id());
@@ -120,6 +118,7 @@ fn terminate_command_tree(child: &mut Child) {
             .status();
     }
     let _ = child.kill();
+    let _ = child.wait();
 }
 
 pub(crate) fn command(name: &str, args: &[&str]) -> String {

@@ -8,7 +8,7 @@ import { PasswordInput } from "../PasswordInput";
 import { ThemeOption, Toggle } from "./controls";
 import { describeLoginDevice, formatSessionTime } from "./shared";
 
-export interface SettingsTabsProps {
+interface SettingsTabsProps {
   tab: AdminTab;
   locale: UiLocale | string | undefined;
   settings: Settings;

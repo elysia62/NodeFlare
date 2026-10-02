@@ -8,5 +8,5 @@ VITE_NODEFLARE_VERSION=$NODEFLARE_VERSION
 export VITE_NODEFLARE_VERSION
 cd "$root_dir"
 
-[ -d node_modules ] || bun install --frozen-lockfile
+bun install --frozen-lockfile
 bun run --cwd frontend build

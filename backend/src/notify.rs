@@ -455,16 +455,9 @@ fn validate_settings(settings: &TelegramSettingsView) -> Result<()> {
 }
 
 fn render(template: &str, title: &str, server: &str, message: &str) -> String {
-    let timestamp = time::OffsetDateTime::now_utc();
-    let time = format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
-        timestamp.year(),
-        timestamp.month() as u8,
-        timestamp.day(),
-        timestamp.hour(),
-        timestamp.minute(),
-        timestamp.second()
-    );
+    let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
     template
         .replace("{{title}}", title)
         .replace("{{server}}", server)

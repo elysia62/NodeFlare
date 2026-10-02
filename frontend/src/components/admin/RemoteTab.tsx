@@ -7,7 +7,7 @@ import { ui, type UiLocale } from "../../locale";
 import { Checkbox } from "../Checkbox";
 import { remoteTaskStatusLabels } from "./shared";
 
-export interface RemoteTabProps {
+interface RemoteTabProps {
   locale: UiLocale | string | undefined;
   servers: AdminServer[];
   busy: boolean;

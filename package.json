@@ -18,9 +18,6 @@
     "test:smoke": "sh scripts/smoke-test.sh"
   },
   "devDependencies": {
-    "ws": "^8.21.3"
-  },
-  "overrides": {
-    "nanoid": "3.3.18"
+    "ws": "^8.22.0"
   }
 }

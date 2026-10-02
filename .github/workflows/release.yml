@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -88,7 +88,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: clippy, rustfmt
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -97,7 +97,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Typecheck frontend
-        run: bunx --bun tsc -b frontend
+        run: bun run --cwd frontend tsc -b
       - name: Test frontend
         run: bun test --cwd frontend
       - name: Build frontend
@@ -247,7 +247,7 @@ jobs:
             extension: ""
             cross: false
             glibc: true
-            glibc_image: quay.io/pypa/manylinux_2_28_x86_64@sha256:0536c364004fa2a3c5041120b6fe35d84fc5bfe31f04c6a6304f13eac4a67b63
+            glibc_image: quay.io/pypa/manylinux_2_28_x86_64@sha256:1e102f2e9ed9b7fd8d64b29f798c76078c3fa8f14d34914d7a4045e39419d8e0
             native: true
             static_linux: false
             emulate: false
@@ -271,7 +271,7 @@ jobs:
             extension: ""
             cross: false
             glibc: true
-            glibc_image: quay.io/pypa/manylinux_2_28_aarch64@sha256:1676a4f178dc6cf8a1d1e3b7e1d71fca891a466ebde72a33880ccda8af3383d8
+            glibc_image: quay.io/pypa/manylinux_2_28_aarch64@sha256:017c91801301dee044fdf5e48f0291071a471f493a2f047c10d39987fe219536
             native: true
             static_linux: false
             emulate: false
@@ -338,7 +338,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           targets: ${{ matrix.target }}
       - name: Install cross compiler
@@ -418,7 +418,7 @@ jobs:
           scripts/check-glibc-version.sh "release/${{ matrix.asset }}" 2.28
       - name: Verify FreeBSD server
         if: matrix.freebsd_vm || matrix.freebsd_arm
-        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
+        uses: vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff # v1.5.8
         with:
           release: "15"
           arch: ${{ matrix.freebsd_arm && 'aarch64' || 'x86_64' }}
@@ -432,7 +432,7 @@ jobs:
               echo "Server version $actual_version does not match tag $NODEFLARE_VERSION" >&2
               exit 1
             fi
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release/${{ matrix.asset }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -465,7 +465,7 @@ jobs:
             extension: ""
             cross: false
             glibc: true
-            glibc_image: quay.io/pypa/manylinux_2_28_x86_64@sha256:0536c364004fa2a3c5041120b6fe35d84fc5bfe31f04c6a6304f13eac4a67b63
+            glibc_image: quay.io/pypa/manylinux_2_28_x86_64@sha256:1e102f2e9ed9b7fd8d64b29f798c76078c3fa8f14d34914d7a4045e39419d8e0
             native: true
             emulate: false
             static_linux: false
@@ -485,7 +485,7 @@ jobs:
             extension: ""
             cross: false
             glibc: true
-            glibc_image: quay.io/pypa/manylinux_2_28_aarch64@sha256:1676a4f178dc6cf8a1d1e3b7e1d71fca891a466ebde72a33880ccda8af3383d8
+            glibc_image: quay.io/pypa/manylinux_2_28_aarch64@sha256:017c91801301dee044fdf5e48f0291071a471f493a2f047c10d39987fe219536
             native: true
             emulate: false
             static_linux: false
@@ -540,7 +540,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           targets: ${{ matrix.target }}
       - name: Install cross compiler
@@ -620,7 +620,7 @@ jobs:
           scripts/check-glibc-version.sh "release/${{ matrix.asset }}" 2.28
       - name: Verify FreeBSD Agent in FreeBSD
         if: endsWith(matrix.target, '-unknown-freebsd')
-        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
+        uses: vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff # v1.5.8
         with:
           release: "15"
           arch: ${{ matrix.target == 'aarch64-unknown-freebsd' && 'aarch64' || 'x86_64' }}
@@ -634,7 +634,7 @@ jobs:
               echo "Agent version $actual_version does not match tag $NODEFLARE_VERSION" >&2
               exit 1
             fi
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release/${{ matrix.asset }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -669,7 +669,7 @@ jobs:
         run: bun run build:frontend
       - name: Package frontend
         run: tar -czf "nodeflare-frontend-${{ needs.metadata.outputs.version }}.tar.gz" -C frontend dist admin-dist
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: nodeflare-frontend-${{ needs.metadata.outputs.version }}.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -775,7 +775,7 @@ jobs:
             tar -czf "release/$ASSET" -C package .
             tar -tzf "release/$ASSET" >/dev/null
           fi
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release/${{ matrix.asset }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -823,7 +823,7 @@ jobs:
           pattern: server-bundle-*
           path: release-assets
           merge-multiple: true
-      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.3
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           body_path: CHANGELOG.md
           files: release-assets/*

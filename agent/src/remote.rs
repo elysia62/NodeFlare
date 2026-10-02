@@ -74,30 +74,6 @@ where
     receiver
 }
 
-pub(crate) fn terminate_remote_process_tree(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        let process_group = format!("-{}", child.id());
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", process_group.as_str()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 pub(crate) fn receive_remote_output(
     receiver: &mpsc::Receiver<CapturedOutput>,
     child: &mut Child,
@@ -106,7 +82,7 @@ pub(crate) fn receive_remote_output(
         Ok(output) => output,
         Err(_) => {
             // Descendants may keep the pipe open after the shell exits.
-            terminate_remote_process_tree(child);
+            terminate_process_tree(child);
             receiver
                 .recv_timeout(REMOTE_OUTPUT_DRAIN_TIMEOUT)
                 .unwrap_or_default()
@@ -205,11 +181,11 @@ pub(crate) fn execute_remote_task_with_timeout(
     let status = match wait_for_remote_child(&mut child, timeout) {
         Ok(Some(status)) => Some(status),
         Ok(None) => {
-            terminate_remote_process_tree(&mut child);
+            terminate_process_tree(&mut child);
             None
         }
         Err(error) => {
-            terminate_remote_process_tree(&mut child);
+            terminate_process_tree(&mut child);
             let stdout = receive_remote_output(&stdout, &mut child);
             let stderr = receive_remote_output(&stderr, &mut child);
             let output = remote_result_text(&stdout, &stderr);
