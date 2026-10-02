@@ -24,6 +24,72 @@ use super::connection_counts_from_netstat;
 use super::disk_device;
 
 #[test]
+// tungstenite's handshake callback requires its unboxed HTTP ErrorResponse.
+#[allow(clippy::result_large_err)]
+fn dual_stack_reporting_keeps_websocket_authentication_and_protocol_headers() {
+    use std::net::TcpListener;
+    use tungstenite::handshake::server::{Request, Response};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "local WebSocket client did not connect"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("local listener: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut socket =
+            tungstenite::accept_hdr(stream, |request: &Request, mut response: Response| {
+                assert_eq!(
+                    request.headers()["authorization"],
+                    "Bearer local-network-test"
+                );
+                assert_eq!(
+                    request.headers()[super::AGENT_PROTOCOL_HEADER],
+                    super::AGENT_PROTOCOL_VERSION
+                );
+                assert_eq!(
+                    request.headers()[super::AGENT_CAPABILITIES_HEADER],
+                    super::agent_capabilities(false)
+                );
+                response.headers_mut().insert(
+                    super::AGENT_PROTOCOL_HEADER,
+                    super::AGENT_PROTOCOL_VERSION.parse().unwrap(),
+                );
+                Ok(response)
+            })
+            .unwrap();
+        socket
+            .send(tungstenite::Message::Text("connected".into()))
+            .unwrap();
+    });
+    let result = super::connect_live(
+        &format!("ws://localhost:{port}/api/agent/ws"),
+        "local-network-test",
+        false,
+    );
+    server.join().unwrap();
+    let (mut socket, _) = result.unwrap();
+    assert_eq!(socket.read().unwrap().to_text().unwrap(), "connected");
+}
+
+#[test]
 fn auto_updates_require_server_opt_in() {
     let options =
         CliOptions::try_parse_from(["agent", "-t", "test-token", "-e", "http://127.0.0.1:2206"])

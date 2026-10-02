@@ -2,6 +2,7 @@ mod gpu;
 mod live;
 mod live_batch;
 mod metrics;
+mod network;
 mod probe;
 mod readiness;
 mod remote;
@@ -317,6 +318,10 @@ pub(crate) struct PublicIpProbe {
 
 impl PublicIpProbe {
     fn refresh(&self) {
+        self.refresh_with(probe_public_ip);
+    }
+
+    fn refresh_with(&self, probe: impl Fn(&str, bool) -> Option<IpAddr> + Send + Sync + 'static) {
         let due = self
             .last_attempt
             .lock()
@@ -329,13 +334,23 @@ impl PublicIpProbe {
         let state = Arc::clone(&self.state);
         let probing = Arc::clone(&self.probing);
         thread::spawn(move || {
-            let v4 = probe_public_ip(PUBLIC_IP_V4_URL, false);
-            let v6 = probe_public_ip(PUBLIC_IP_V6_URL, true);
-            let observed_at = Instant::now();
-            let mut state = state.lock().unwrap();
-            state.v4.observe(v4, observed_at);
-            state.v6.observe(v6, observed_at);
-            drop(state);
+            let observe = |ipv6| {
+                let url = if ipv6 {
+                    PUBLIC_IP_V6_URL
+                } else {
+                    PUBLIC_IP_V4_URL
+                };
+                let address = probe(url, ipv6);
+                let mut state = state.lock().unwrap();
+                let value = if ipv6 { &mut state.v6 } else { &mut state.v4 };
+                value.observe(address, Instant::now());
+            };
+            // A missing or blackholed family must not delay publishing the
+            // other address. Use only two short-lived workers per refresh.
+            thread::scope(|scope| {
+                scope.spawn(|| observe(true));
+                observe(false);
+            });
             probing.store(false, Ordering::SeqCst);
         });
     }
@@ -366,11 +381,20 @@ impl PublicIpProbe {
     }
 }
 
-fn probe_public_ip(url: &str, ipv6: bool) -> Option<IpAddr> {
-    let probe_agent: ureq::Agent = ureq::Agent::config_builder()
+fn public_ip_client(ipv6: bool) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .ip_family(if ipv6 {
+            ureq::config::IpFamily::Ipv6Only
+        } else {
+            ureq::config::IpFamily::Ipv4Only
+        })
         .timeout_global(Some(PUBLIC_IP_PROBE_TIMEOUT))
         .build()
-        .into();
+        .into()
+}
+
+fn probe_public_ip(url: &str, ipv6: bool) -> Option<IpAddr> {
+    let probe_agent = public_ip_client(ipv6);
     let response = probe_agent
         .get(url)
         .header("User-Agent", format!("nodeflare-agent/{VERSION}"))
@@ -958,3 +982,6 @@ fn main() {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod public_ip_tests;

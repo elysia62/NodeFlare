@@ -13,7 +13,7 @@ serde_json = "1"
 nodeflare-telemetry = { path = "../shared" }
 sha2 = "0.11"
 httpdate = "1"
-ureq = { version = "3.4", default-features = false, features = ["json", "rustls"] }
+ureq = { version = "3.4.2", default-features = false, features = ["json", "rustls"] }
 url = "2.5"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 

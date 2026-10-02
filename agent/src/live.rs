@@ -190,28 +190,8 @@ pub(crate) fn connect_live_stream(url: &url::Url, deadline: Instant) -> Result<T
     let port = url
         .port_or_known_default()
         .ok_or("WebSocket endpoint has no port")?;
-    let addresses = (host, port).to_socket_addrs()?;
-    let mut connected = None;
-    let mut last_error = io::Error::new(
-        ErrorKind::NotFound,
-        "WebSocket hostname resolved to no addresses",
-    );
-    for address in addresses {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(
-                io::Error::new(ErrorKind::TimedOut, "WebSocket connection timed out").into(),
-            );
-        }
-        match TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(3))) {
-            Ok(stream) => {
-                connected = Some(stream);
-                break;
-            }
-            Err(error) => last_error = error,
-        }
-    }
-    let stream = connected.ok_or(last_error)?;
+    let addresses = (host, port).to_socket_addrs()?.collect();
+    let stream = network::connect_tcp(addresses, deadline)?;
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(io::Error::new(ErrorKind::TimedOut, "WebSocket connection timed out").into());
