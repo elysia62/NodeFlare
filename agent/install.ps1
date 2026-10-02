@@ -24,6 +24,7 @@ $DataDir = Join-Path $env:ProgramData "NodeFlare"
 $StateDir = Join-Path $DataDir "Agent"
 $AgentFile = Join-Path $InstallDir "agent.exe"
 $ConfigFile = Join-Path $StateDir "config.json"
+$ReadyFile = Join-Path $StateDir "ready.pid"
 $LauncherFile = Join-Path $InstallDir "run-agent.ps1"
 $PreviousAgent = Join-Path $env:TEMP "nodeflare-agent-$PID.previous.exe"
 $PreviousConfig = Join-Path $env:TEMP "nodeflare-agent-$PID.previous.json"
@@ -54,6 +55,38 @@ function Stop-Agent {
     Start-Sleep -Milliseconds 500
   }
   Write-InstallError "旧 Agent 进程未退出，已停止操作，未替换程序"
+}
+
+function Wait-Agent {
+  $Deadline = [DateTime]::UtcNow.AddSeconds(30)
+  $StartedPid = 0
+  for ($Attempt = 0; $Attempt -lt 30; $Attempt++) {
+    if ([DateTime]::UtcNow -ge $Deadline) { break }
+    $ReadyPid = 0
+    if (Test-Path -LiteralPath $ReadyFile -PathType Leaf) {
+      try {
+        $ReadyText = (Get-Content -LiteralPath $ReadyFile -Raw -ErrorAction Stop).Trim()
+        if ($ReadyText -notmatch '^[1-9][0-9]*$' -or -not [int]::TryParse($ReadyText, [ref]$ReadyPid)) { $ReadyPid = 0 }
+      } catch { $ReadyPid = 0 }
+    }
+    if ($ReadyPid -gt 0) {
+      $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+      $Running = @(Get-CimInstance Win32_Process -Filter "ProcessId = $ReadyPid" -ErrorAction Stop |
+        Where-Object { $_.ExecutablePath -eq $AgentFile })
+      if ($Task.State -ne "Running" -or $Running.Count -ne 1) {
+        Write-InstallError "Agent 就绪进程与服务不一致，或启动后已退出"
+      }
+      if ($StartedPid -ne 0) {
+        if ($ReadyPid -ne $StartedPid) { Write-InstallError "Agent 启动后发生重启" }
+        return
+      }
+      $StartedPid = $ReadyPid
+    } elseif ($StartedPid -ne 0) {
+      Write-InstallError "Agent 启动后退出"
+    }
+    if ($Attempt -lt 29) { Start-Sleep -Seconds 1 }
+  }
+  Write-InstallError "Agent 未在 30 秒内完成本地初始化，请检查服务状态"
 }
 
 function Show-InstallResult {
@@ -240,6 +273,7 @@ try {
   if ($null -ne $ExistingTask) { $PreviousTaskXml = Export-ScheduledTask -TaskName $TaskName }
   Stop-Agent
   $InstallChanged = $true
+  if (Test-Path -LiteralPath $ReadyFile) { Remove-Item -LiteralPath $ReadyFile -Force -ErrorAction Stop }
   Move-Item -LiteralPath $Temporary -Destination $AgentFile -Force
 
   $AgentConfig = [ordered]@{
@@ -256,6 +290,7 @@ $AgentFile = Join-Path $InstallRoot "agent.exe"
 $ConfigFile = Join-Path $env:ProgramData "NodeFlare\Agent\config.json"
 $Config = Get-Content -LiteralPath $ConfigFile -Raw | ConvertFrom-Json
 $env:NODEFLARE_AGENT_TOKEN = [string]$Config.token
+$env:NODEFLARE_STATE_DIR = Split-Path -Parent $ConfigFile
 $AgentArguments = @('-e', [string]$Config.endpoint, '-i', [string]$Config.interval)
 if ($DisableRemote) { $AgentArguments += '--disable-remote' }
 & $AgentFile @AgentArguments
@@ -277,15 +312,7 @@ exit $LASTEXITCODE
   $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
   Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $Trigger -Settings $Settings -Principal $Principal -Force | Out-Null
   Start-ScheduledTask -TaskName $TaskName
-  $Task = $null
-  for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
-    Start-Sleep -Milliseconds 500
-    $Task = Get-ScheduledTask -TaskName $TaskName
-    if ($Task.State -eq "Running") { break }
-  }
-  if ($Task.State -ne "Running") {
-    Write-InstallError "服务启动失败（状态：$($Task.State)）"
-  }
+  Wait-Agent
   $InstallChanged = $false
   Show-InstallResult
 } catch {

@@ -62,6 +62,38 @@ stop_agent() {
   ! launchctl print "system/$LABEL" >/dev/null 2>&1
 }
 
+agent_service_ready() {
+  kill -0 "$1" 2>/dev/null || return 1
+  launchd_status=$(launchctl print "system/$LABEL") || return 1
+  printf '%s\n' "$launchd_status" | grep -Eq '^[[:space:]]*state = running$' || return 1
+  current_pid=$(printf '%s\n' "$launchd_status" | awk '$1 == "pid" && $2 == "=" { print $3; exit }')
+  [ "$current_pid" = "$1" ]
+}
+
+verify_agent_started() {
+  started_pid=""
+  deadline=$(($(date +%s) + 30))
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    ready_pid=$(cat "$STATE_DIR/ready.pid" 2>/dev/null) || ready_pid=""
+    case "$ready_pid" in
+      ''|*[!0-9]*|0) [ -z "$started_pid" ] || return 1 ;;
+      *)
+        agent_service_ready "$ready_pid" || return 1
+        if [ -n "$started_pid" ]; then
+          [ "$ready_pid" = "$started_pid" ]
+          return $?
+        fi
+        started_pid=$ready_pid
+        ;;
+    esac
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge 30 ] || sleep 1
+  done
+  return 1
+}
+
 usage() {
   cat <<'EOF'
 NodeFlare Agent macOS 安装脚本
@@ -273,6 +305,7 @@ fi
 log "正在启动 macOS LaunchDaemon 服务"
 stop_agent || fail "无法停止已有 Agent 服务，未替换程序"
 rollback_agent=true
+rm -f "$STATE_DIR/ready.pid"
 mv "$temporary" "$AGENT_FILE"
 cat > "$PLIST_FILE" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -288,15 +321,7 @@ cat > "$PLIST_FILE" <<EOF
 EOF
 chmod 600 "$PLIST_FILE"
 launchctl bootstrap system "$PLIST_FILE"
-started=false
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  sleep 1
-  if launchctl print "system/$LABEL" 2>/dev/null | grep -q 'state = running'; then
-    started=true
-    break
-  fi
-done
-[ "$started" = true ] || fail "服务启动失败，请查看 /var/log/nodeflare-agent.log"
+verify_agent_started || fail "服务未就绪或启动后退出，请查看 /var/log/nodeflare-agent.log"
 rollback_agent=false
 cleanup_agent_install
 trap - EXIT HUP INT TERM

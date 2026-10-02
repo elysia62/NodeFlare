@@ -70,7 +70,7 @@ function VerificationGate() {
 }
 
 function HomeView() {
-  const { carrierLatency, config, error, exchangeRates, liveConnected, liveMetrics, loading, openServer, reload, servers } = useApp();
+  const { carrierLatency, config, error, exchangeRates, liveConnected, liveMetrics, loading, nodeStatuses, openServer, reload, servers } = useApp();
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("__all__");
   const locale = config.locale;
@@ -92,7 +92,7 @@ function HomeView() {
 
   return (
     <div className="home-content">
-      <StatsBar servers={servers} config={config} exchangeRates={exchangeRates} />
+      <StatsBar servers={servers} statuses={nodeStatuses} config={config} exchangeRates={exchangeRates} />
       {config.show_search || config.show_groups ? <div className="toolbar">
         {config.show_search ? <div className="search-box"><Search size={16} /><input aria-label={ui(locale, "搜索节点", "Search servers")} placeholder={ui(locale, "搜索节点", "Search servers")} value={query} onChange={(event) => setQuery(event.target.value)} /></div> : null}
         {config.show_groups ? <div className="group-tabs" role="group" aria-label={ui(locale, "节点分组", "Server groups")}>{groups.map((item) => <button className={group === item ? "active" : ""} aria-pressed={group === item} key={item} onClick={() => setGroup(item)}>{item === "__all__" ? ui(locale, "全部", "All") : item}</button>)}</div> : null}
@@ -103,7 +103,7 @@ function HomeView() {
         <div className="dashboard-loading"><span className="loading-ring" aria-hidden="true" /><p>{ui(locale, "加载中…", "Loading…")}</p></div>
       ) : visible.length ? (
         <section className={`node-grid ${carrierLatency ? "carrier-latency" : ""}`}>
-          {visible.map((server) => <NodeCard key={server.id} server={server} config={config} liveConnected={liveConnected} liveLatencyResults={liveMetrics[server.id]?.latencyResults} onOpen={openServer} />)}
+          {visible.map((server) => <NodeCard key={server.id} server={server} status={nodeStatuses[server.id] ?? "pending"} config={config} liveConnected={liveConnected} liveLatencyResults={liveMetrics[server.id]?.latencyResults} onOpen={openServer} />)}
         </section>
       ) : !error ? (
         <div className="empty-state"><strong>{servers.length ? ui(locale, "没有匹配的节点", "No matching servers") : ui(locale, "尚未添加节点", "No servers added")}</strong></div>
@@ -113,7 +113,7 @@ function HomeView() {
 }
 
 function DetailView() {
-  const { config, goHome, liveMetrics, loading, selectedId, servers } = useApp();
+  const { config, goHome, liveMetrics, loading, nodeStatuses, selectedId, servers } = useApp();
   const locale = config.locale;
   const selected = servers.find((server) => server.id === selectedId) ?? null;
 
@@ -124,7 +124,7 @@ function DetailView() {
           key={selected.id}
           server={selected}
           liveLatencyResults={liveMetrics[selected.id]?.latencyResults}
-          threshold={config.offline_threshold_seconds}
+          status={nodeStatuses[selected.id] ?? "pending"}
           retentionDays={config.history_retention_days}
           locale={locale}
           demo={demoMode}

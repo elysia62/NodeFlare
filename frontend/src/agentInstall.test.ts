@@ -19,7 +19,7 @@ for (const platform of ["macos", "freebsd"] as const) {
       try {
         if (config !== "missing") {
           writeFileSync(file, [
-            'command_args="-P ${pidfile} -r -R 10 -S -T ${name} /usr/local/libexec/nodeflare/agent -e https://monitor.example.com -i 120' + (disabled ? ' --disable-remote"' : '"'),
+            'command_args="-P ${pidfile} -p /var/run/nodeflare_agent.child.pid -r -R 10 -S -T ${name} /usr/local/libexec/nodeflare/agent -e https://monitor.example.com -i 120' + (disabled ? ' --disable-remote"' : '"'),
             config === "valid" ? 'export NODEFLARE_AGENT_TOKEN="existing-token"' : "",
           ].join("\n"));
         }

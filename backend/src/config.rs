@@ -24,6 +24,10 @@ pub struct Args {
     /// Override the configured SQLite or PostgreSQL URL.
     #[arg(long)]
     pub database: Option<String>,
+
+    /// Check the local HTTP service is ready, then exit without opening a database.
+    #[arg(long)]
+    pub check_ready: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

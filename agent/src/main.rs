@@ -3,6 +3,7 @@ mod live;
 mod live_batch;
 mod metrics;
 mod probe;
+mod readiness;
 mod remote;
 mod runtime_stats;
 mod update;
@@ -734,6 +735,19 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
     let mut latency_executor = LatencyExecutor::new(Arc::clone(&stats))?;
     let mut pending_results = Vec::new();
     let spool_path = pending_spool_path()?;
+    // Installation checks local initialization, not reachability of the hub.
+    // One-shot collection must not touch a running service's readiness marker.
+    let mut readiness = if once {
+        None
+    } else {
+        match readiness::ReadyMarker::prepare(spool_path.with_file_name("ready.pid")) {
+            Ok(marker) => Some(marker),
+            Err(error) => {
+                eprintln!("agent readiness marker unavailable: {error}");
+                None
+            }
+        }
+    };
     let mut last_spool_rewrite: Option<Instant> = None;
     let mut pending_samples = load_pending_spool(&spool_path).unwrap_or_else(|error| {
         eprintln!("pending report spool ignored: {error}");
@@ -864,6 +878,14 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             }
             if let Some(live) = &live {
                 live.send(&report);
+            }
+            if let Some(marker) = &mut readiness
+                && let Err(error) = marker.publish()
+            {
+                // Readiness is advisory; inability to write it must not stop
+                // telemetry on a full or temporarily read-only filesystem.
+                eprintln!("agent readiness marker unavailable: {error}");
+                readiness = None;
             }
             if once {
                 once_target_timestamp = Some(report.timestamp);

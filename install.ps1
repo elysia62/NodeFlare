@@ -14,6 +14,7 @@ $Repository = "elysia62/NodeFlare"
 $TaskName = "nodeflare"
 $InstallDir = Join-Path $env:ProgramFiles "NodeFlare"
 $ServerFile = Join-Path $InstallDir "nodeflare.exe"
+$ReadinessFile = $ServerFile
 $ShareDir = Join-Path $InstallDir "share"
 $DataDir = Join-Path $env:ProgramData "NodeFlare\Server"
 $ConfigFile = Join-Path $DataDir "config.toml"
@@ -128,23 +129,53 @@ function Restore-ServerFiles {
   }
 }
 
+function Get-ServerProcessId {
+  $Processes = @(Get-CimInstance Win32_Process -Filter "Name = 'nodeflare.exe'" -ErrorAction Stop |
+    Where-Object { $_.ExecutablePath -eq $ServerFile })
+  if ($Processes.Count -gt 1) { Stop-Install "检测到多个面板进程，无法确认服务状态" }
+  if ($Processes.Count -eq 1) { return $Processes[0].ProcessId }
+  return 0
+}
+
+function Test-ServerReady {
+  try {
+    & $ReadinessFile --config $ConfigFile --check-ready *> $null
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  }
+}
+
 function Wait-Server {
-  $Task = $null
-  for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
-    Start-Sleep -Milliseconds 500
+  Write-Step "正在等待本机服务就绪"
+  $StartedProcessId = 0
+  $ReadyChecks = 0
+  $Timer = [Diagnostics.Stopwatch]::StartNew()
+  while ($Timer.Elapsed.TotalSeconds -lt 30) {
     $Task = Get-ScheduledTask -TaskName $TaskName
-    if ($Task.State -eq "Running") { break }
-  }
-  if ($Task.State -ne "Running") {
-    Stop-Install "服务启动失败（状态：$($Task.State)）"
-  }
-  for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
-    Start-Sleep -Seconds 1
-    $Task = Get-ScheduledTask -TaskName $TaskName
-    if ($Task.State -ne "Running") {
+    $CurrentProcessId = Get-ServerProcessId
+    if ($Task.State -eq "Running" -and $CurrentProcessId -gt 0) {
+      if ($StartedProcessId -eq 0) { $StartedProcessId = $CurrentProcessId }
+      elseif ($StartedProcessId -ne $CurrentProcessId) {
+        Stop-Install "服务启动后重新启动，请检查 bind_addr 端口占用及数据库连接"
+      }
+      if (Test-ServerReady) {
+        if ((Get-ServerProcessId) -ne $StartedProcessId -or (Get-ScheduledTask -TaskName $TaskName).State -ne "Running") {
+          Stop-Install "服务启动后退出或重新启动，请检查日志"
+        }
+        $ReadyChecks++
+        if ($ReadyChecks -ge 2) { return }
+      } else {
+        $ReadyChecks = 0
+      }
+    } elseif ($StartedProcessId -ne 0) {
       Stop-Install "服务启动后退出，请检查 bind_addr 端口占用及数据库连接"
+    } else {
+      $ReadyChecks = 0
     }
+    Start-Sleep -Seconds 1
   }
+  Stop-Install "等待本机 HTTP 服务就绪超时（30 秒），请检查日志"
 }
 
 function Write-Config([string]$Username, [string]$Password, [string]$DatabaseUrl, [int]$Port) {
@@ -188,7 +219,9 @@ if ($Mode -eq "Restart") {
   if ($null -eq $Task -or -not (Test-Path -LiteralPath $ServerFile) -or -not (Test-Path -LiteralPath $ConfigFile)) {
     Stop-Install "未检测到完整安装，请先选择安装 / 更新"
   }
+  Write-Step "正在停止服务"
   Stop-Server
+  Write-Step "正在启动服务"
   Start-ScheduledTask -TaskName $TaskName
   Wait-Server
   Write-Step "服务已重启"
@@ -247,6 +280,7 @@ try {
   $Expected = $DigestMatch.Groups[1].Value
   Write-Step "下载 $($Release.tag_name)（Windows x64）"
   Invoke-WebRequest -UseBasicParsing -Uri $ReleaseAsset.browser_download_url -OutFile $Archive -TimeoutSec 120
+  Write-Step "正在校验并解压安装包"
   $Actual = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash
   if ($Actual -ne $Expected) {
     Stop-Install "Release SHA-256 校验失败"
@@ -275,6 +309,8 @@ try {
   if ($Version -ne $Release.tag_name.Substring(1)) {
     Stop-Install "Release $($Release.tag_name) 与服务端版本 $Version 不一致"
   }
+  # Keep the verified probe available when restoring the previous binary.
+  $ReadinessFile = $PackageServer
 
   $NewConfig = -not (Test-Path -LiteralPath $ConfigFile)
   if ($NewConfig) {
@@ -305,6 +341,7 @@ try {
   } else {
     Write-Step "正在更新至 v$Version"
   }
+  Write-Step "正在备份程序文件"
   $HadPreviousInstall = Test-Path -LiteralPath $ServerFile -PathType Leaf
   $HadPreviousShare = Test-Path -LiteralPath $ShareDir -PathType Container
   New-Item -ItemType Directory -Path $PreviousInstall -Force | Out-Null
@@ -318,8 +355,10 @@ try {
   if ($null -ne $ExistingTask) {
     $PreviousTaskXml = Export-ScheduledTask -TaskName $TaskName
   }
+  Write-Step "正在停止旧服务"
   Stop-Server
   $InstallChanged = $true
+  Write-Step "正在替换程序文件"
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Path $InstallDir, $DataDir, $ThemeDir -Force | Out-Null
   Remove-Item -LiteralPath $ShareDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -355,6 +394,7 @@ try {
       if ($null -ne $PreviousTaskXml) {
         Register-ScheduledTask -TaskName $TaskName -Xml $PreviousTaskXml -Force | Out-Null
         Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        Wait-Server
       }
     } catch {
       $KeepBackup = $true

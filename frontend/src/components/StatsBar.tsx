@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowUp, Database, ServerIcon, WalletCards } from "lucide-react";
-import { formatBytes, formatCurrency, formatSpeedParts, isOnline, number, remainingAssetValue } from "../format";
+import { formatBytes, formatCurrency, formatSpeedParts, number, remainingAssetValue } from "../format";
+import type { NodeStatuses } from "../nodeStatus";
 import { assetCurrency, themeToggle } from "../theme";
 import type { Config, ExchangeRates, Server } from "../types";
 import { ui } from "../locale";
@@ -14,12 +15,15 @@ interface Stat {
   iconTone?: "success" | "info";
 }
 
-export function StatsBar({ servers, config, exchangeRates }: { servers: Server[]; config: Config; exchangeRates: ExchangeRates | null }) {
+export function StatsBar({ servers, statuses, config, exchangeRates }: { servers: Server[]; statuses: NodeStatuses; config: Config; exchangeRates: ExchangeRates | null }) {
   if (!config.show_stats) return null;
   const displayCurrency = assetCurrency(config);
   const locale = config.locale;
   const showOnline = themeToggle(config, "showOnline");
-  const onlineServers = servers.filter((server) => isOnline(server, config.offline_threshold_seconds));
+  const onlineServers = servers.filter((server) => statuses[server.id] === "online");
+  const offlineCount = servers.filter((server) => statuses[server.id] === "offline").length;
+  const pendingCount = servers.length - onlineServers.length - offlineCount;
+  const pendingLabel = ui(locale, `${pendingCount} 台待刷新`, `${pendingCount} awaiting update`);
   const trafficUp = servers.reduce((sum, server) => sum + number(server.net_tx_total), 0);
   const trafficDown = servers.reduce((sum, server) => sum + number(server.net_rx_total), 0);
   const speedUp = onlineServers.reduce((sum, server) => sum + number(server.net_out), 0);
@@ -54,10 +58,11 @@ export function StatsBar({ servers, config, exchangeRates }: { servers: Server[]
   if (showOnline) stats.push({
       icon: ServerIcon,
       label: ui(locale, "在线节点", "Online nodes"),
-      value: String(onlineServers.length),
+      value: pendingCount === servers.length && pendingCount > 0 ? "—" : String(onlineServers.length),
       unit: ui(locale, `/ ${servers.length} 台`, `/ ${servers.length}`),
       tone: "success-text",
-      detail: servers.length === onlineServers.length ? ui(locale, "全部运行正常", "All systems operational") : ui(locale, `${servers.length - onlineServers.length} 台离线`, `${servers.length - onlineServers.length} offline`),
+      detail: pendingCount > 0 ? <span>{pendingLabel}{offlineCount > 0 ? ui(locale, `，${offlineCount} 台离线`, `, ${offlineCount} offline`) : ""}</span>
+        : offlineCount === 0 ? ui(locale, "全部运行正常", "All systems operational") : ui(locale, `${offlineCount} 台离线`, `${offlineCount} offline`),
     });
 
   if (config.show_assets) stats.push({
@@ -75,17 +80,17 @@ export function StatsBar({ servers, config, exchangeRates }: { servers: Server[]
   if (config.show_speed) stats.push({
     icon: ArrowUp,
     label: ui(locale, "实时上行", "Live upload"),
-    value: formattedSpeedUp.value,
-    unit: formattedSpeedUp.unit,
-    detail: peakDetail(peakUpload, "net_out"),
+    value: pendingCount > 0 ? "—" : formattedSpeedUp.value,
+    unit: pendingCount > 0 ? undefined : formattedSpeedUp.unit,
+    detail: pendingCount > 0 ? pendingLabel : peakDetail(peakUpload, "net_out"),
     tone: "success-text",
     iconTone: "success",
   }, {
     icon: ArrowDown,
     label: ui(locale, "实时下行", "Live download"),
-    value: formattedSpeedDown.value,
-    unit: formattedSpeedDown.unit,
-    detail: peakDetail(peakDownload, "net_in"),
+    value: pendingCount > 0 ? "—" : formattedSpeedDown.value,
+    unit: pendingCount > 0 ? undefined : formattedSpeedDown.unit,
+    detail: pendingCount > 0 ? pendingLabel : peakDetail(peakDownload, "net_in"),
     tone: "info-text",
     iconTone: "info",
   });

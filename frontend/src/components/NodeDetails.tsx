@@ -26,7 +26,8 @@ import { demoHistory, demoLatencyHistory, demoLatencyTasks } from "../demo";
 import { averageOf } from "../latency";
 import { liveLatencySamples } from "../live";
 import { appendRealtimePoint, loadChartPoints, mergeLoadHistory, type LoadChartPoint, type LoadHistoryPoint } from "../loadHistory";
-import { displayGpuDevices, formatBytes, formatCpuName, formatSpeed, formatUptime, isOnline, number } from "../format";
+import { displayGpuDevices, formatBytes, formatCpuName, formatSpeed, formatUptime, number } from "../format";
+import type { NodeStatus } from "../nodeStatus";
 import type { HistoryPoint, LatencySample, LatencyTestPoint, LiveLatencyResult, Server } from "../types";
 import { Flag, regionDisplayName } from "./Flag";
 import { OSIcon } from "./OSIcon";
@@ -154,10 +155,10 @@ const tooltipStyle = {
   fontSize: 12,
 };
 
-export function NodeDetails({ server, liveLatencyResults, threshold, retentionDays, locale, demo = false, onClose }: {
+export function NodeDetails({ server, liveLatencyResults, status, retentionDays, locale, demo = false, onClose }: {
   server: Server;
   liveLatencyResults?: LiveLatencyResult[];
-  threshold: number;
+  status: NodeStatus;
   retentionDays: number;
   locale: "zh-CN" | "en";
   demo?: boolean;
@@ -237,7 +238,6 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
     });
   }, [latencyTasks]);
 
-  const online = isOnline(server, threshold);
   const gpuDevices = useMemo(() => displayGpuDevices(server.gpus), [server.gpus]);
   const gpuNames = gpuDevices.map((gpu) => gpu.model).join(" · ");
   const loadRanges = [
@@ -319,7 +319,7 @@ export function NodeDetails({ server, liveLatencyResults, threshold, retentionDa
         <button className="icon-btn" onClick={onClose} title={ui(locale, "返回首页", "Back")}><ArrowLeft size={19} /></button>
         <Flag region={server.region} size={24} className="detail-flag" locale={locale} />
         <div className="detail-title">
-          <div><h1>{server.name}</h1><span className={`status-chip ${online ? "online" : ""}`}>{online ? ui(locale, "在线", "Online") : ui(locale, "离线", "Offline")}</span></div>
+          <div><h1>{server.name}</h1><span className={`status-chip ${status}`}>{status === "pending" ? ui(locale, "待刷新", "Awaiting update") : status === "online" ? ui(locale, "在线", "Online") : ui(locale, "离线", "Offline")}</span></div>
           <p><OSIcon os={server.os} size={14} />{regionDisplayName(server.region, locale)}{server.group_name ? ` · ${server.group_name}` : ""}</p>
         </div>
       </section>

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { api, setApiLocale, ApiError } from "./api";
 import { demoConfig, demoExchangeRates, demoServers } from "./demo";
 import {
@@ -10,6 +10,7 @@ import {
   type LiveMetricsMap,
 } from "./live";
 import { isOnline } from "./format";
+import { createNodeObservation, type NodeStatuses } from "./nodeStatus";
 import { ui } from "./locale";
 import { useFavicon, useStoredAppearance, useSystemDark } from "./hooks/useBrowserAppearance";
 import { resolveBackground, themeToggle } from "./theme";
@@ -38,6 +39,7 @@ interface AppState {
   servers: Server[];
   liveMetrics: LiveMetricsMap;
   liveConnected: boolean;
+  nodeStatuses: NodeStatuses;
   exchangeRates: ExchangeRates | null;
   loading: boolean;
   error: string;
@@ -77,6 +79,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [liveMetrics, setLiveMetrics] = useState<LiveMetricsMap>({});
   const [liveConnected, setLiveConnected] = useState(false);
   const livePlayback = useRef(createLivePlayback());
+  const nodeObservation = useRef(createNodeObservation());
+  const [observationVersion, refreshObservation] = useReducer((version: number) => version + 1, 0);
+  const nodeStatusesRef = useRef<NodeStatuses>({});
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [loading, setLoading] = useState(true);
@@ -90,7 +95,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const cardCacheRef = useRef(new Map<string, {
     server: Server;
     live: LiveMetrics | undefined;
-    online: boolean;
     result: Server;
   }>());
   const liveServersRef = useRef<Server[]>([]);
@@ -118,6 +122,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
       try {
+        const observationRequest = nodeObservation.current.beginSnapshot();
         const result = await api.bootstrap();
         // Set before any later request so server errors come back translated.
         setApiLocale(result.config.locale);
@@ -127,6 +132,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setServers(result.servers);
         setExchangeRates(result.exchange_rates);
         setAccess(result.access);
+        nodeObservation.current.acceptSnapshot(observationRequest);
+        refreshObservation();
         if (result.access !== "ok") {
           setLiveMetrics({});
         }
@@ -236,10 +243,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const batch = livePlayback.current.take(serversRef.current);
       if (!batch.length) return;
       setLiveMetrics((current) => applyBatch(current, batch, serversRef.current));
+      nodeObservation.current.observe(batch.flatMap((update) => update.serverId ? [update.serverId] : []));
+      refreshObservation();
     };
     const sync = () => {
       window.clearInterval(timer);
       timer = undefined;
+      nodeObservation.current.setAvailable(!document.hidden && navigator.onLine !== false);
+      refreshObservation();
       if (document.hidden || navigator.onLine === false) {
         livePlayback.current.clear();
         return;
@@ -269,6 +280,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       onConnectedChange: (connected) => {
         liveConnectedRef.current = connected;
         setLiveConnected(connected);
+        nodeObservation.current.setConnected(connected);
+        refreshObservation();
         if (!connected) {
           livePlayback.current.clear();
         }
@@ -298,27 +311,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Merge live metrics into servers with identity preservation: a server's object
-  // only changes when its own data or online status changes, and the array itself
-  // stays referentially stable on quiet ticks. Memoized cards then skip re-renders
-  // for nodes that reported nothing new, while a silent node still flips to
-  // offline within a second of crossing the threshold.
+  // only changes when its own data changes, and the array itself
+  // stays referentially stable on quiet ticks. Status is kept separately so a
+  // browser reconnection never rewrites the agent's timestamp or metric data.
   const liveServers = useMemo(() => {
-    const nowSec = clockNow / 1000;
     const cache = cardCacheRef.current;
     const next = servers.map((server) => {
       const live = liveMetrics[server.id];
       const merged = mergeServerLive(server, live);
-      const online = isOnline(merged, config.offline_threshold_seconds, nowSec);
       const cached = cache.get(server.id);
       if (cached && cached.server === server && cached.live === live) {
-        if (cached.online === online) return cached.result;
-        // Online status flipped without new data: mint a fresh object so the
-        // card re-renders into the offline/online state.
-        const result = { ...merged };
-        cache.set(server.id, { server, live, online, result });
-        return result;
+        return cached.result;
       }
-      cache.set(server.id, { server, live, online, result: merged });
+      cache.set(server.id, { server, live, result: merged });
       return merged;
     });
     if (cache.size > next.length) {
@@ -332,7 +337,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
       && next.every((server, index) => server === previous[index]);
     liveServersRef.current = stable ? previous : next;
     return liveServersRef.current;
-  }, [clockNow, config.offline_threshold_seconds, liveMetrics, servers]);
+  }, [liveMetrics, servers]);
+
+  const nodeStatuses = useMemo(() => {
+    const next: NodeStatuses = {};
+    for (const server of liveServers) {
+      next[server.id] = demoMode
+        ? isOnline(server, config.offline_threshold_seconds, clockNow / 1000) ? "online" : "offline"
+        : nodeObservation.current.status(server, config.offline_threshold_seconds, clockNow);
+    }
+    const previous = nodeStatusesRef.current;
+    if (Object.keys(previous).length === liveServers.length
+      && liveServers.every((server) => previous[server.id] === next[server.id])) return previous;
+    nodeStatusesRef.current = next;
+    return next;
+  }, [clockNow, config.offline_threshold_seconds, liveServers, observationVersion]);
 
   useEffect(() => {
     if (!configReady) return;
@@ -366,6 +385,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     servers: liveServers,
     liveMetrics,
     liveConnected,
+    nodeStatuses,
     exchangeRates,
     loading,
     error,
@@ -382,7 +402,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     reload: () => reload(),
     login,
     verify,
-  }), [access, background, blur, carrierLatency, config, configReady, dark, error, exchangeRates, goHome, liveConnected, liveMetrics, liveServers, loading, login, openServer, reload, selectedId, toggleTheme, verify]);
+  }), [access, background, blur, carrierLatency, config, configReady, dark, error, exchangeRates, goHome, liveConnected, liveMetrics, liveServers, loading, login, nodeStatuses, openServer, reload, selectedId, toggleTheme, verify]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

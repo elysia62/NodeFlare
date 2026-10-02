@@ -14,12 +14,12 @@ import {
   formatPrice,
   remainingAssetValue,
   formatSpeed,
-  isOnline,
   number,
   percent,
   trafficUsed,
 } from "../format";
 import type { Config, LiveLatencyResult, Server } from "../types";
+import type { NodeStatus } from "../nodeStatus";
 import { ui } from "../locale";
 import { carrierSelection, themeToggle } from "../theme";
 import { useNodeLatency, type CarrierLatencyRow, type LatencyBar } from "../hooks/useNodeLatency";
@@ -94,21 +94,23 @@ function CarrierPanel({ label, rows, kind }: {
   );
 }
 
-export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResults, liveConnected, onOpen }: {
+export const NodeCard = memo(function NodeCard({ server, status, config, liveLatencyResults, liveConnected, onOpen }: {
   server: Server;
+  status: NodeStatus;
   config: Config;
   liveLatencyResults?: LiveLatencyResult[];
   liveConnected: boolean;
   onOpen: (server: Server) => void;
 }) {
-  const threshold = config.offline_threshold_seconds;
-  const online = isOnline(server, threshold);
+  const online = status === "online";
   const cpuCores = Math.max(0, Math.trunc(number(server.cpu_cores)));
   const memory = percent(server.mem_used, server.mem_total);
   const disk = percent(server.disk_used, server.disk_total);
   const usedTraffic = trafficUsed(server);
   const traffic = server.traffic_limit > 0 ? Math.min(100, (usedTraffic / server.traffic_limit) * 100) : 0;
   const locale = config.locale;
+  const statusLabel = status === "pending" ? ui(locale, "待刷新", "Awaiting update")
+    : online ? ui(locale, "在线", "Online") : ui(locale, "离线", "Offline");
   const showCarriers = themeToggle(config, "showCarrierLatency", false);
   const quality = useNodeLatency(server, config.show_latency, locale, showCarriers ? carrierSelection(config) : null, liveLatencyResults, liveConnected);
   const price = formatPrice(server, locale);
@@ -117,9 +119,9 @@ export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResu
   const lastUpdated = new Date(number(server.timestamp) * 1000).toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
   return (
-    <button className={`node-card glass-panel ${online ? "" : "offline"}`} onClick={() => onOpen(server)} type="button" aria-label={ui(locale, `${server.name}，${online ? "在线" : "离线"}，查看详情`, `${server.name}, ${online ? "online" : "offline"}, view details`)}>
+    <button className={`node-card glass-panel ${status}`} onClick={() => onOpen(server)} type="button" aria-label={ui(locale, `${server.name}，${statusLabel}，查看详情`, `${server.name}, ${statusLabel}, view details`)}>
       <header className="node-header">
-        <span className={`status-dot ${online ? "online" : ""}`} />
+        <span className={`status-dot ${status}`} title={statusLabel} />
         <strong title={server.name}>{server.name}</strong>
         <OSIcon os={server.os} size={16} />
         <Flag region={server.region} size={19} locale={locale} />
@@ -127,6 +129,7 @@ export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResu
 
       <div className="node-body">
         <div className="node-chips">
+          {status === "pending" ? <span>{statusLabel}</span> : null}
           {config.show_uptime && online ? <span>{ui(locale, `在线 ${Math.floor(number(server.uptime) / 86400)} 天`, `Online ${Math.floor(number(server.uptime) / 86400)} days`)}</span> : null}
           {config.show_price && price ? <span title={price}>{price}</span> : null}
         </div>
@@ -165,7 +168,7 @@ export const NodeCard = memo(function NodeCard({ server, config, liveLatencyResu
           </>}
         </div> : null}
 
-        {!online ? <div className="node-offline-overlay" aria-hidden="true">
+        {status === "offline" ? <div className="node-offline-overlay" aria-hidden="true">
           <span>{ui(locale, "离线", "Offline")}</span>
           <small>{server.timestamp
             ? ui(locale, `最后更新 ${lastUpdated}`, `Last update ${lastUpdated}`)

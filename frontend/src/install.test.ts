@@ -5,6 +5,7 @@ import { delimiter, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const installer = readFileSync(new URL("../../install.sh", import.meta.url), "utf8");
+const windowsInstaller = readFileSync(new URL("../../install.ps1", import.meta.url), "utf8");
 const agentInstaller = readFileSync(new URL("../../agent/agent.sh", import.meta.url), "utf8");
 
 function shellFunctions(...names: string[]) {
@@ -23,7 +24,7 @@ function agentShellFunctions(...names: string[]) {
   }).join("\n");
 }
 
-const startFunction = shellFunctions("start_server");
+const startFunction = shellFunctions("check_server_process", "wait_server_ready", "start_server");
 
 describe("server uninstall ownership", () => {
   for (const [platform, purge] of [["linux", true], ["linux", false], ["macos", true], ["freebsd", true]] as const) {
@@ -140,15 +141,33 @@ function start(scenario: string, init = "systemd") {
     set -eu
     init_system=$TEST_INIT
     launchd_file=/unused/nodeflare.plist
+    server_binary=probe
+    config_file='/unused/server config.toml'
+    if [ "$SCENARIO" = staged-probe ]; then readiness_binary=probe; server_binary=old_probe; fi
     tick=0
+    log() { :; }
+    date() { printf '%s\n' "$tick"; }
     sleep() { tick=$((tick + 1)); }
+    probe() {
+      [ "$#" -eq 3 ] && [ "$1" = --config ] && [ "$2" = "$config_file" ] && [ "$3" = --check-ready ] || return 99
+      case "$SCENARIO" in
+        never-ready) return 1 ;;
+        delayed-ready) [ "$tick" -ge 3 ] ;;
+        flaky-ready) [ "$tick" -ne 1 ] ;;
+        exits-during-probe) tick=1; return 0 ;;
+        *) return 0 ;;
+      esac
+    }
+    old_probe() { return 99; }
     systemctl() {
       case "$1" in
         daemon-reload) [ "$SCENARIO" != command-failure ] ;;
         enable|restart) return 0 ;;
-        is-active) [ "$SCENARIO" != exits ] || [ "$tick" -lt 2 ] ;;
+        is-active)
+          case "$SCENARIO" in exits|exits-during-probe) [ "$tick" -lt 1 ] ;; *) return 0 ;; esac ;;
         show)
-          if [ "$SCENARIO" = restarts ] && [ "$tick" -ge 2 ]; then
+          [ "$SCENARIO" != query-failure ] || return 1
+          if [ "$SCENARIO" = restarts ] && [ "$tick" -ge 1 ]; then
             printf '456\n'
           else
             printf '123\n'
@@ -161,9 +180,10 @@ function start(scenario: string, init = "systemd") {
         bootstrap) [ "$SCENARIO" != command-failure ] ;;
         print)
           [ "$SCENARIO" != query-failure ] || return 1
-          if [ "$SCENARIO" = waiting ] || { [ "$SCENARIO" = exits ] && [ "$tick" -ge 2 ]; }; then
+          if [ "$SCENARIO" = waiting ] || { [ "$SCENARIO" = delayed-process ] && [ "$tick" -lt 2 ]; } \
+            || { { [ "$SCENARIO" = exits ] || [ "$SCENARIO" = exits-during-probe ]; } && [ "$tick" -ge 1 ]; }; then
             printf 'state = waiting\nlast exit code = 1\n'
-          elif [ "$SCENARIO" = restarts ] && [ "$tick" -ge 2 ]; then
+          elif [ "$SCENARIO" = restarts ] && [ "$tick" -ge 1 ]; then
             printf 'state = running\npid = 456\n'
           else
             printf 'state = running\npid = 123\n'
@@ -171,18 +191,43 @@ function start(scenario: string, init = "systemd") {
         *) return 99 ;;
       esac
     }
+    rc-update() { [ "$SCENARIO" != command-failure ]; }
+    sysrc() { [ "$SCENARIO" != command-failure ]; }
+    service() {
+      [ "$2" != status ] || [ "$SCENARIO" != exits ] || [ "$tick" -lt 1 ]
+    }
+    rc-service() { service "$@"; }
     ${startFunction}
     if start_server; then printf 'ready:%s\n' "$tick"; else exit 1; fi
   `], { env: { ...process.env, SCENARIO: scenario, TEST_INIT: init }, encoding: "utf8" });
 }
 
 describe("installer startup verification", () => {
-  test("waits for the same process to remain active", () => {
-    const result = start("healthy");
+  test("uses the staged probe when checking a restored older binary", () => {
+    const result = start("staged-probe");
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe("ready:10\n");
+    expect(result.stdout).toBe("ready:1\n");
   });
-  for (const scenario of ["exits", "restarts", "command-failure"]) {
+  for (const init of ["systemd", "launchd", "openrc", "freebsd"]) {
+    for (const [scenario, ticks] of [["healthy", 1], ["delayed-ready", 4], ["flaky-ready", 3]] as const) {
+      test(`${init} ${scenario} returns after consecutive HTTP readiness checks`, () => {
+        const result = start(scenario, init);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe(`ready:${ticks}\n`);
+      });
+    }
+    test(`${init} bounds waiting when a live process never becomes HTTP ready`, () => {
+      const result = start("never-ready", init);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("就绪超时（30 秒）");
+    });
+    for (const scenario of ["exits", "command-failure"]) {
+      test(`${init} rejects ${scenario}`, () => {
+        expect(start(scenario, init).status).toBe(1);
+      });
+    }
+  }
+  for (const scenario of ["restarts", "query-failure", "exits-during-probe"]) {
     test(`rejects ${scenario} even when called in an if condition`, () => {
       expect(start(scenario).status).toBe(1);
     });
@@ -190,15 +235,70 @@ describe("installer startup verification", () => {
 });
 
 describe("launchd installer startup verification", () => {
-  test("waits for the same process to remain active", () => {
-    const result = start("healthy", "launchd");
+  test("allows initial scheduling before checking a stable PID", () => {
+    const result = start("delayed-process", "launchd");
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe("ready:10\n");
+    expect(result.stdout).toBe("ready:3\n");
   });
-  for (const scenario of ["exits", "restarts", "command-failure", "waiting", "query-failure"]) {
+  for (const scenario of ["restarts", "waiting", "query-failure", "exits-during-probe"]) {
     test(`rejects ${scenario}`, () => {
       expect(start(scenario, "launchd").status).toBe(1);
     });
+  }
+});
+
+describe("Windows installer startup verification", () => {
+  const powershell = Bun.which("pwsh");
+  const functions = ["Get-ServerProcessId", "Test-ServerReady", "Wait-Server"].map((name) => {
+    const match = windowsInstaller.match(new RegExp(`^function ${name} \\{[\\s\\S]*?^\\}`, "m"));
+    if (!match) throw new Error(`Missing Windows installer function: ${name}`);
+    return match[0];
+  }).join("\n").replace("[Diagnostics.Stopwatch]::StartNew()", "([pscustomobject]@{ Elapsed = [pscustomobject]@{ TotalSeconds = 0 } })");
+
+  for (const [scenario, ticks] of [["healthy", 1], ["delayed-ready", 4], ["delayed-process", 3], ["flaky-ready", 3],
+    ["never-ready", null], ["exits", null], ["restarts", null], ["exits-during-probe", null], ["multiple-processes", null]] as const) {
+    test.skipIf(!powershell)(`${scenario} preserves readiness and process safety`, () => {
+      const script = `
+        $ErrorActionPreference = "Stop"
+        $script:Tick = 0
+        $TaskName = "nodeflare"
+        $ServerFile = "C:\\NodeFlare\\nodeflare.exe"
+        $ReadinessFile = "Invoke-ReadinessProbe"
+        $ConfigFile = "C:\\NodeFlare Data\\config.toml"
+        function Write-Step { }
+        function Stop-Install([string]$Message) { throw $Message }
+        function Start-Sleep([int]$Seconds) { $script:Tick += $Seconds; $Timer.Elapsed.TotalSeconds = $script:Tick }
+        function Get-ScheduledTask {
+          $State = if (($env:SCENARIO -eq "delayed-process" -and $script:Tick -lt 2) -or
+            ($env:SCENARIO -eq "exits" -and $script:Tick -ge 1)) { "Ready" } else { "Running" }
+          [pscustomobject]@{ State = $State }
+        }
+        function Get-CimInstance {
+          if (($env:SCENARIO -eq "delayed-process" -and $script:Tick -lt 2) -or
+            (($env:SCENARIO -eq "exits" -or $env:SCENARIO -eq "exits-during-probe") -and $script:Tick -ge 1)) { return }
+          $ProcessId = if ($env:SCENARIO -eq "restarts" -and $script:Tick -ge 1) { 456 } else { 123 }
+          [pscustomobject]@{ ProcessId = $ProcessId; ExecutablePath = $ServerFile }
+          if ($env:SCENARIO -eq "multiple-processes") { [pscustomobject]@{ ProcessId = 789; ExecutablePath = $ServerFile } }
+        }
+        function Invoke-ReadinessProbe {
+          if ($args.Count -ne 3 -or $args[0] -ne "--config" -or $args[1] -ne $ConfigFile -or $args[2] -ne "--check-ready") {
+            throw "Invalid readiness arguments"
+          }
+          $global:LASTEXITCODE = if ($env:SCENARIO -eq "never-ready" -or
+            ($env:SCENARIO -eq "delayed-ready" -and $script:Tick -lt 3) -or
+            ($env:SCENARIO -eq "flaky-ready" -and $script:Tick -eq 1)) { 1 } else { 0 }
+          if ($env:SCENARIO -eq "exits-during-probe") { $script:Tick = 1 }
+        }
+        ${functions}
+        try { Wait-Server; Write-Output "ready:$script:Tick" } catch { Write-Output $_; exit 1 }
+      `;
+      const result = spawnSync(powershell!, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        env: { ...process.env, SCENARIO: scenario }, encoding: "utf8", timeout: 30_000,
+      });
+      expect(result.status).toBe(ticks === null ? 1 : 0);
+      if (ticks !== null) expect(result.stdout.trim()).toBe(`ready:${ticks}`);
+      if (scenario === "never-ready") expect(result.stdout).toContain("就绪超时（30 秒）");
+    }, 30_000);
   }
 });
 
@@ -278,7 +378,7 @@ describe("server installer update output", () => {
         expect(result.stdout).not.toMatch(/NodeFlare|配置|沿用|复用|下一步|本机访问/);
         if (healthy) {
           expect(result.status).toBe(0);
-          expect(result.stdout).toBe("正在更新至 v1.2.3\n正在启动服务\n\n更新完成（v1.2.3）\n");
+          expect(result.stdout).toBe("正在更新至 v1.2.3\n正在备份程序文件\n正在停止旧服务\n正在替换程序文件\n正在启动服务\n\n更新完成（v1.2.3）\n");
           expect(result.stderr).toBe("");
         } else {
           expect(result.status).toBe(1);
@@ -548,31 +648,6 @@ describe("agent installer service safety", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
-
-  for (const scenario of ["healthy", "exits", "restarts", "query-fails"]) {
-    test(`checks continuous agent startup: ${scenario}`, () => {
-      const result = spawnSync("sh", ["-c", `
-        set -eu
-        SERVICE_NAME=nodeflare-agent
-        tick=0
-        sleep() { tick=$((tick + 1)); }
-        systemctl() {
-          case "$1" in
-            is-active) [ "$SCENARIO" != exits ] || [ "$tick" -lt 2 ] ;;
-            show)
-              [ "$SCENARIO" != query-fails ] || return 1
-              if [ "$SCENARIO" = restarts ] && [ "$tick" -ge 2 ]; then printf '456'; else printf '123'; fi
-              ;;
-            *) return 99 ;;
-          esac
-        }
-        ${agentShellFunctions("verify_agent_started")}
-        if verify_agent_started; then printf '%s' "$tick"; else exit 1; fi
-      `], { env: { ...process.env, SCENARIO: scenario }, encoding: "utf8" });
-      expect(result.status).toBe(scenario === "healthy" ? 0 : 1);
-      if (scenario === "healthy") expect(result.stdout).toBe("10");
-    });
-  }
 
   for (const file of ["../../install.sh", "../../agent/agent.sh", "../../agent/install-macos.sh", "../../agent/install-freebsd.sh"]) {
     test(`${file} exits on termination and runs rollback once`, () => {

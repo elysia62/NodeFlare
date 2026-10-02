@@ -8,6 +8,7 @@ AGENT_FILE="$INSTALL_DIR/agent"
 STATE_ROOT="/var/db/nodeflare"
 STATE_DIR="$STATE_ROOT/agent"
 SERVICE_FILE="/usr/local/etc/rc.d/$SERVICE_NAME"
+AGENT_PID_FILE="/var/run/${RC_NAME}.child.pid"
 temporary=""
 backup_agent=""
 backup_service=""
@@ -62,6 +63,37 @@ stop_agent() {
   service "$SERVICE_NAME" onestatus >/dev/null 2>&1 || return 0
   service "$SERVICE_NAME" onestop || return 1
   ! service "$SERVICE_NAME" onestatus >/dev/null 2>&1
+}
+
+agent_service_ready() {
+  kill -0 "$1" 2>/dev/null || return 1
+  service "$SERVICE_NAME" onestatus >/dev/null 2>&1 || return 1
+  current_pid=$(cat "$AGENT_PID_FILE" 2>/dev/null) || return 1
+  [ "$current_pid" = "$1" ]
+}
+
+verify_agent_started() {
+  started_pid=""
+  deadline=$(($(date +%s) + 30))
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    ready_pid=$(cat "$STATE_DIR/ready.pid" 2>/dev/null) || ready_pid=""
+    case "$ready_pid" in
+      ''|*[!0-9]*|0) [ -z "$started_pid" ] || return 1 ;;
+      *)
+        agent_service_ready "$ready_pid" || return 1
+        if [ -n "$started_pid" ]; then
+          [ "$ready_pid" = "$started_pid" ]
+          return $?
+        fi
+        started_pid=$ready_pid
+        ;;
+    esac
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge 30 ] || sleep 1
+  done
+  return 1
 }
 
 usage() {
@@ -292,6 +324,7 @@ fi
 log "正在启动 FreeBSD rc.d 服务"
 stop_agent || fail "无法停止已有 Agent 服务，未替换程序"
 rollback_agent=true
+rm -f "$STATE_DIR/ready.pid"
 mv "$temporary" "$AGENT_FILE"
 cat > "$SERVICE_FILE" <<EOF
 #!/bin/sh
@@ -308,7 +341,7 @@ name="$RC_NAME"
 rcvar="${RC_NAME}_enable"
 pidfile="/var/run/\${name}.pid"
 command="/usr/sbin/daemon"
-command_args="-P \${pidfile} -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint -i $interval$disable_remote_arg"
+command_args="-P \${pidfile} -p $AGENT_PID_FILE -r -R 10 -S -T \${name} $AGENT_FILE -e $endpoint -i $interval$disable_remote_arg"
 
 load_rc_config "\${name}"
 : \${nodeflare_agent_enable:="NO"}
@@ -317,7 +350,7 @@ EOF
 chmod 700 "$SERVICE_FILE"
 sysrc "${RC_NAME}_enable=YES" >/dev/null
 service "$SERVICE_NAME" start
-service "$SERVICE_NAME" status >/dev/null || {
+verify_agent_started || {
   service "$SERVICE_NAME" status >&2 || true
   fail "服务启动失败，请查看 /var/log/messages"
 }

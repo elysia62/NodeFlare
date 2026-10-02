@@ -59,6 +59,7 @@
 .node-header strong { min-width: 0; flex: 1; overflow: hidden; font-size: 14px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { width: 10px; height: 10px; flex: 0 0 auto; border-radius: 50%; background: var(--danger-bar); box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger-bar) 40%, transparent); animation: status-pulse 2s ease-out infinite; }
 .status-dot.online { background: var(--success-bar); box-shadow: 0 0 0 0 color-mix(in srgb, var(--success-bar) 40%, transparent); }
+.status-dot.pending { background: var(--muted-foreground); box-shadow: none; animation: none; }
 @keyframes status-pulse { 70%, 100% { box-shadow: 0 0 0 6px transparent; } }
 .os-icon, .os-icon-fallback { width: 16px; height: 16px; flex: 0 0 auto; object-fit: contain; }
 .os-icon-fallback { color: var(--muted-foreground); }
@@ -167,6 +168,7 @@ html[data-blur="on"] .node-offline-overlay { backdrop-filter: blur(2px); }
 .detail-title p { display: flex; overflow: hidden; align-items: center; gap: 6px; margin: 4px 0 0; color: var(--muted-foreground); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .status-chip { flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--danger) 20%, transparent); border-radius: 999px; padding: 2px 7px; color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); font-size: 11px; line-height: 1.25; }
 .status-chip.online { border-color: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); }
+.status-chip.pending { border-color: var(--border); color: var(--muted-foreground); background: var(--muted); }
 .info-groups { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
 .info-group { border-radius: 8px; padding: 16px; }
 .info-group h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 14px; font-weight: 600; }

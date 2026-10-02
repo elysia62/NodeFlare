@@ -10,6 +10,7 @@ freebsd_rc_file=/usr/local/etc/rc.d/nodeflare
 download_dir=""
 package_dir=""
 release_version=""
+readiness_binary=""
 config_temp=""
 tty_state=""
 rollback_ready=false
@@ -420,6 +421,7 @@ download_release() {
   release_base="https://github.com/$repository/releases/download/$release_tag"
   log "下载 $release_tag ($release_label)"
   download_file "$release_base/$asset" "$archive" 120
+  log "正在校验并解压安装包"
   verify_checksum
 
   package_dir=$download_dir/package
@@ -437,6 +439,8 @@ download_release() {
     || fail "服务端返回了无效版本号"
   [ "$release_version" = "${release_tag#v}" ] \
     || fail "Release $release_tag 与服务端版本 $release_version 不一致"
+  # Keep the verified probe available when restoring the previous binary.
+  readiness_binary=$package_dir/nodeflare
 }
 
 write_openrc_service() {
@@ -589,52 +593,79 @@ install_service() {
   esac
 }
 
+check_server_process() {
+  case "$init_system" in
+    systemd)
+      systemctl is-active --quiet nodeflare.service || return 1
+      current_pid=$(systemctl show -p MainPID --value nodeflare.service) || return 1
+      ;;
+    openrc)
+      rc-service nodeflare status >/dev/null 2>&1 || return 1
+      return 0
+      ;;
+    launchd)
+      launchd_status=$(launchctl print system/nodeflare) || return 1
+      if ! printf '%s\n' "$launchd_status" | grep -Eq '^[[:space:]]*state = running$'; then
+        [ -z "$started_pid" ] || return 1
+        return 2
+      fi
+      current_pid=$(printf '%s\n' "$launchd_status" | awk '$1 == "pid" && $2 == "=" { print $3; exit }')
+      ;;
+    freebsd)
+      service nodeflare status >/dev/null 2>&1 || return 1
+      return 0
+      ;;
+  esac
+  case "$current_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  if [ -z "$started_pid" ]; then
+    started_pid=$current_pid
+  else
+    [ "$current_pid" = "$started_pid" ] || return 1
+  fi
+}
+
+wait_server_ready() {
+  started_pid=""
+  ready_checks=0
+  ready_deadline=$(( $(date +%s) + 30 ))
+  while [ "$(date +%s)" -lt "$ready_deadline" ]; do
+    process_status=0
+    check_server_process || process_status=$?
+    [ "$process_status" -ne 1 ] || return 1
+    if [ "$process_status" -eq 0 ] \
+      && "${readiness_binary:-$server_binary}" --config "$config_file" --check-ready >/dev/null 2>&1; then
+      # Recheck after the HTTP request as the process may have exited meanwhile.
+      check_server_process || return 1
+      ready_checks=$((ready_checks + 1))
+      [ "$ready_checks" -lt 2 ] || return 0
+    else
+      ready_checks=0
+    fi
+    sleep 1
+  done
+  printf '错误：等待本机 HTTP 服务就绪超时（30 秒）\n' >&2
+  return 1
+}
+
 start_server() {
   case "$init_system" in
     systemd)
       systemctl daemon-reload || return 1
       systemctl enable --quiet nodeflare.service >/dev/null || return 1
       systemctl restart nodeflare.service || return 1
-      started_pid=$(systemctl show -p MainPID --value nodeflare.service) || return 1
-      [ "$started_pid" -gt 0 ] || return 1
-      attempt=1
-      while [ "$attempt" -le 10 ]; do
-        sleep 1
-        systemctl is-active --quiet nodeflare.service || return 1
-        current_pid=$(systemctl show -p MainPID --value nodeflare.service) || return 1
-        [ "$current_pid" = "$started_pid" ] || return 1
-        attempt=$((attempt + 1))
-      done
       ;;
     openrc)
       rc-update add nodeflare default >/dev/null || return 1
       rc-service nodeflare start || return 1
-      rc-service nodeflare status >/dev/null
       ;;
-    launchd)
-      launchctl bootstrap system "$launchd_file" || return 1
-      started_pid=""
-      attempt=1
-      while [ "$attempt" -le 10 ]; do
-        sleep 1
-        launchd_status=$(launchctl print system/nodeflare) || return 1
-        printf '%s\n' "$launchd_status" | grep -Eq '^[[:space:]]*state = running$' || return 1
-        current_pid=$(printf '%s\n' "$launchd_status" | awk '$1 == "pid" && $2 == "=" { print $3; exit }')
-        case "$current_pid" in ''|*[!0-9]*|0) return 1 ;; esac
-        if [ -z "$started_pid" ]; then
-          started_pid=$current_pid
-        else
-          [ "$current_pid" = "$started_pid" ] || return 1
-        fi
-        attempt=$((attempt + 1))
-      done
-      ;;
+    launchd) launchctl bootstrap system "$launchd_file" || return 1 ;;
     freebsd)
       sysrc nodeflare_enable=YES >/dev/null || return 1
       service nodeflare start || return 1
-      service nodeflare status >/dev/null
       ;;
   esac
+  log "正在等待本机服务就绪"
+  wait_server_ready
 }
 
 status_server() {
@@ -649,7 +680,9 @@ status_server() {
 restart_server() {
   [ -x "$server_binary" ] && [ -f "$config_file" ] && [ -f "$(service_definition)" ] \
     || fail "未检测到完整安装，请先选择安装 / 更新"
+  log "正在停止服务"
   stop_server || fail "无法停止已有面板服务，已取消重启"
+  log "正在启动服务"
   start_server || fail "服务重启失败，请检查日志"
   log "服务已重启"
 }
@@ -731,7 +764,7 @@ case "$mode" in
   restart) restart_server; exit 0 ;;
 esac
 
-for required_command in tar install mktemp sed grep wc tr id chown chmod mv cp stty uname cat; do
+for required_command in tar install mktemp sed grep wc tr id chown chmod mv cp stty uname cat date; do
   command -v "$required_command" >/dev/null 2>&1 || fail "缺少命令：$required_command"
 done
 case "$platform" in
@@ -765,9 +798,12 @@ if [ "$new_config" = true ]; then
 else
   log "正在更新至 v$release_version"
 fi
+log "正在备份程序文件"
 snapshot_install
+log "正在停止旧服务"
 stop_server || fail "无法停止已有面板服务，未替换程序"
 rollback_ready=true
+log "正在替换程序文件"
 install -d -m 0700 "$config_dir" "$theme_dir"
 install -d -m 0755 "$install_dir"
 rm -rf "$share_dir"

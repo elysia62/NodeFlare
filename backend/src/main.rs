@@ -8,6 +8,7 @@ mod middleware;
 mod mime;
 mod models;
 mod notify;
+mod readiness;
 mod routes;
 mod security;
 mod theme;
@@ -128,6 +129,9 @@ async fn main() -> Result<()> {
     let bind_addr = args
         .bind
         .unwrap_or(config.bind_addr.parse().context("invalid bind_addr")?);
+    if args.check_ready {
+        return readiness::check(bind_addr).await;
+    }
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .with_context(|| {

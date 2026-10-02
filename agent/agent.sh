@@ -157,17 +157,45 @@ stop_agent() {
   esac
 }
 
+agent_service_ready() {
+  kill -0 "$1" 2>/dev/null || return 1
+  case "$init_system" in
+    systemd)
+      systemctl is-active --quiet "$SERVICE_NAME" || return 1
+      current_pid=$(systemctl show -p MainPID --value "$SERVICE_NAME") || return 1
+      [ "$current_pid" = "$1" ]
+      ;;
+    openrc)
+      rc-service "$SERVICE_NAME" status >/dev/null 2>&1 || return 1
+      current_executable=$(readlink "/proc/$1/exe") || return 1
+      [ "$current_executable" = "$AGENT_FILE" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 verify_agent_started() {
-  started_pid=$(systemctl show -p MainPID --value "$SERVICE_NAME") || return 1
-  case "$started_pid" in ''|*[!0-9]*|0) return 1 ;; esac
-  attempt=1
-  while [ "$attempt" -le 10 ]; do
-    sleep 1
-    systemctl is-active --quiet "$SERVICE_NAME" || return 1
-    current_pid=$(systemctl show -p MainPID --value "$SERVICE_NAME") || return 1
-    [ "$current_pid" = "$started_pid" ] || return 1
+  started_pid=""
+  deadline=$(($(date +%s) + 30))
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    ready_pid=$(cat "$STATE_DIR/ready.pid" 2>/dev/null) || ready_pid=""
+    case "$ready_pid" in
+      ''|*[!0-9]*|0) [ -z "$started_pid" ] || return 1 ;;
+      *)
+        agent_service_ready "$ready_pid" || return 1
+        if [ -n "$started_pid" ]; then
+          [ "$ready_pid" = "$started_pid" ]
+          return $?
+        fi
+        started_pid=$ready_pid
+        ;;
+    esac
     attempt=$((attempt + 1))
+    [ "$attempt" -ge 30 ] || sleep 1
   done
+  return 1
 }
 
 ensure_curl() {
@@ -358,6 +386,7 @@ install_agent() {
   fi
   stop_agent || fail "无法停止已有 Agent 服务，未替换程序"
   rollback_agent=true
+  rm -f "$STATE_DIR/ready.pid"
   mv "$temporary" "$AGENT_FILE"
   log "正在启动 $init_system 服务"
   if [ "$init_system" = "systemd" ]; then
@@ -400,7 +429,7 @@ install_agent() {
     chmod 700 "$OPENRC_FILE"
     rc-update add "$SERVICE_NAME" default
     rc-service "$SERVICE_NAME" restart
-    rc-service "$SERVICE_NAME" status >/dev/null || {
+    verify_agent_started || {
       rc-service "$SERVICE_NAME" status >&2 || true
       fail "服务启动失败，请查看上方状态信息"
     }
