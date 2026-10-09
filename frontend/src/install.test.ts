@@ -137,69 +137,86 @@ describe("Windows uninstall ownership", () => {
 });
 
 function start(scenario: string, init = "systemd") {
-  return spawnSync("sh", ["-c", `
-    set -eu
-    init_system=$TEST_INIT
-    launchd_file=/unused/nodeflare.plist
-    server_binary=probe
-    config_file='/unused/server config.toml'
-    if [ "$SCENARIO" = staged-probe ]; then readiness_binary=probe; server_binary=old_probe; fi
-    tick=0
-    log() { :; }
-    date() { printf '%s\n' "$tick"; }
-    sleep() { tick=$((tick + 1)); }
-    probe() {
-      [ "$#" -eq 3 ] && [ "$1" = --config ] && [ "$2" = "$config_file" ] && [ "$3" = --check-ready ] || return 99
-      case "$SCENARIO" in
-        never-ready) return 1 ;;
-        delayed-ready) [ "$tick" -ge 3 ] ;;
-        flaky-ready) [ "$tick" -ne 1 ] ;;
-        exits-during-probe) tick=1; return 0 ;;
-        *) return 0 ;;
-      esac
-    }
-    old_probe() { return 99; }
-    systemctl() {
-      case "$1" in
-        daemon-reload) [ "$SCENARIO" != command-failure ] ;;
-        enable|restart) return 0 ;;
-        is-active)
-          case "$SCENARIO" in exits|exits-during-probe) [ "$tick" -lt 1 ] ;; *) return 0 ;; esac ;;
-        show)
-          [ "$SCENARIO" != query-failure ] || return 1
-          if [ "$SCENARIO" = restarts ] && [ "$tick" -ge 1 ]; then
-            printf '456\n'
-          else
-            printf '123\n'
-          fi ;;
-        *) return 99 ;;
-      esac
-    }
-    launchctl() {
-      case "$1" in
-        bootstrap) [ "$SCENARIO" != command-failure ] ;;
-        print)
-          [ "$SCENARIO" != query-failure ] || return 1
-          if [ "$SCENARIO" = waiting ] || { [ "$SCENARIO" = delayed-process ] && [ "$tick" -lt 2 ]; } \
-            || { { [ "$SCENARIO" = exits ] || [ "$SCENARIO" = exits-during-probe ]; } && [ "$tick" -ge 1 ]; }; then
-            printf 'state = waiting\nlast exit code = 1\n'
-          elif [ "$SCENARIO" = restarts ] && [ "$tick" -ge 1 ]; then
-            printf 'state = running\npid = 456\n'
-          else
-            printf 'state = running\npid = 123\n'
-          fi ;;
-        *) return 99 ;;
-      esac
-    }
-    rc-update() { [ "$SCENARIO" != command-failure ]; }
-    sysrc() { [ "$SCENARIO" != command-failure ]; }
-    service() {
-      [ "$2" != status ] || [ "$SCENARIO" != exits ] || [ "$tick" -lt 1 ]
-    }
-    rc-service() { service "$@"; }
-    ${startFunction}
-    if start_server; then printf 'ready:%s\n' "$tick"; else exit 1; fi
-  `], { env: { ...process.env, SCENARIO: scenario, TEST_INIT: init }, encoding: "utf8" });
+  const directory = mkdtempSync(join(tmpdir(), "nodeflare-startup-"));
+  try {
+    // Dash rejects hyphenated function names, so mock the external commands.
+    writeFileSync(join(directory, "rc-service"),
+      '#!/bin/sh\n[ "$2" != status ] || [ "$SCENARIO" != exits ] || [ "$tick" -lt 1 ]\n', { mode: 0o755 });
+    writeFileSync(join(directory, "rc-update"),
+      '#!/bin/sh\n[ "$SCENARIO" != command-failure ]\n', { mode: 0o755 });
+    return spawnSync("sh", ["-c", `
+      set -eu
+      init_system=$TEST_INIT
+      launchd_file=/unused/nodeflare.plist
+      server_binary=probe
+      config_file='/unused/server config.toml'
+      if [ "$SCENARIO" = staged-probe ]; then readiness_binary=probe; server_binary=old_probe; fi
+      tick=0
+      export tick
+      log() { :; }
+      date() { printf '%s\n' "$tick"; }
+      sleep() { tick=$((tick + 1)); }
+      probe() {
+        [ "$#" -eq 3 ] && [ "$1" = --config ] && [ "$2" = "$config_file" ] && [ "$3" = --check-ready ] || return 99
+        case "$SCENARIO" in
+          never-ready) return 1 ;;
+          delayed-ready) [ "$tick" -ge 3 ] ;;
+          flaky-ready) [ "$tick" -ne 1 ] ;;
+          exits-during-probe) tick=1; return 0 ;;
+          *) return 0 ;;
+        esac
+      }
+      old_probe() { return 99; }
+      systemctl() {
+        case "$1" in
+          daemon-reload) [ "$SCENARIO" != command-failure ] ;;
+          enable|restart) return 0 ;;
+          is-active)
+            case "$SCENARIO" in exits|exits-during-probe) [ "$tick" -lt 1 ] ;; *) return 0 ;; esac ;;
+          show)
+            [ "$SCENARIO" != query-failure ] || return 1
+            if [ "$SCENARIO" = restarts ] && [ "$tick" -ge 1 ]; then
+              printf '456\n'
+            else
+              printf '123\n'
+            fi ;;
+          *) return 99 ;;
+        esac
+      }
+      launchctl() {
+        case "$1" in
+          bootstrap) [ "$SCENARIO" != command-failure ] ;;
+          print)
+            [ "$SCENARIO" != query-failure ] || return 1
+            if [ "$SCENARIO" = waiting ] || { [ "$SCENARIO" = delayed-process ] && [ "$tick" -lt 2 ]; } \
+              || { { [ "$SCENARIO" = exits ] || [ "$SCENARIO" = exits-during-probe ]; } && [ "$tick" -ge 1 ]; }; then
+              printf 'state = waiting\nlast exit code = 1\n'
+            elif [ "$SCENARIO" = restarts ] && [ "$tick" -ge 1 ]; then
+              printf 'state = running\npid = 456\n'
+            else
+              printf 'state = running\npid = 123\n'
+            fi ;;
+          *) return 99 ;;
+        esac
+      }
+      sysrc() { [ "$SCENARIO" != command-failure ]; }
+      service() {
+        [ "$2" != status ] || [ "$SCENARIO" != exits ] || [ "$tick" -lt 1 ]
+      }
+      ${startFunction}
+      if start_server; then printf 'ready:%s\n' "$tick"; else exit 1; fi
+    `], {
+      env: {
+        ...process.env,
+        PATH: `${directory}${delimiter}${process.env.PATH ?? ""}`,
+        SCENARIO: scenario,
+        TEST_INIT: init,
+      },
+      encoding: "utf8",
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 describe("installer startup verification", () => {

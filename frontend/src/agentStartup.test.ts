@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const installers = {
@@ -38,6 +38,9 @@ for (const [platform, path] of Object.entries(installers)) {
       test(`${scenario}: local readiness, identity and bounded stable window`, () => {
         const directory = mkdtempSync(join(tmpdir(), "nodeflare-agent-ready-"));
         try {
+          // Dash rejects hyphenated function names, so mock the external command.
+          writeFileSync(join(directory, "rc-service"),
+            '#!/bin/sh\n[ "$TEST_SCENARIO" != service-dead ]\n', { mode: 0o755 });
           if (scenario !== "missing" && scenario !== "delayed") {
             writeFileSync(join(directory, "ready.pid"), scenario === "invalid" ? "not-a-pid\n" : "321\n");
           }
@@ -51,6 +54,7 @@ for (const [platform, path] of Object.entries(installers)) {
             LABEL=nodeflare-agent
             init_system=$TEST_PLATFORM
             tick=0
+            export tick
             date() {
               if [ "$TEST_SCENARIO" = deadline ] && [ "$tick" -gt 0 ]; then printf '1031';
               else printf '%s' "$((1000 + tick))"; fi
@@ -81,7 +85,6 @@ for (const [platform, path] of Object.entries(installers)) {
                 *) return 92 ;;
               esac
             }
-            rc-service() { [ "$TEST_SCENARIO" != service-dead ]; }
             readlink() {
               if [ "$TEST_SCENARIO" = wrong-process ]; then printf '/other/agent'; else printf '%s' "$AGENT_FILE"; fi
             }
@@ -95,7 +98,13 @@ for (const [platform, path] of Object.entries(installers)) {
             printf '%s' "$tick"
             exit "$result"
           `], {
-            env: { ...process.env, TEST_DIRECTORY: directory, TEST_PLATFORM: platform, TEST_SCENARIO: scenario },
+            env: {
+              ...process.env,
+              PATH: `${directory}${delimiter}${process.env.PATH ?? ""}`,
+              TEST_DIRECTORY: directory,
+              TEST_PLATFORM: platform,
+              TEST_SCENARIO: scenario,
+            },
             encoding: "utf8", timeout: 5_000,
           });
           expect(result.error).toBeUndefined();

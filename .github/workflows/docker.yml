@@ -15,10 +15,12 @@ concurrency:
   group: docker-hub-${{ github.ref }}
   cancel-in-progress: false
 
+# The ubuntu-latest label migrates to Ubuntu 26 on 2026-10-19, so pin Ubuntu 24.04
+# explicitly until the build and smoke tests are validated on the newer image.
 jobs:
   metadata:
     name: Resolve image tags
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -71,7 +73,7 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
@@ -139,7 +141,7 @@ jobs:
   publish:
     name: Publish multi-platform tags
     needs: [metadata, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       IMAGE_TAGS: ${{ needs.metadata.outputs.tags }}

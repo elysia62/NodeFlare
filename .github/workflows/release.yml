@@ -12,10 +12,12 @@ on:
 permissions:
   contents: read
 
+# The ubuntu-latest label migrates to Ubuntu 26 on 2026-10-19, so pin Ubuntu 24.04
+# explicitly until the build and smoke tests are validated on the newer image.
 jobs:
   metadata:
     name: Resolve build metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -42,7 +44,7 @@ jobs:
 
   security:
     name: Dependency security
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,7 +68,7 @@ jobs:
   quality:
     name: Quality checks
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       NODEFLARE_VERSION: ${{ needs.metadata.outputs.version }}
@@ -241,7 +243,7 @@ jobs:
       matrix:
         include:
           - platform: Linux x64 glibc 2.28+
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             asset: nodeflare-linux-x64-glibc
             extension: ""
@@ -254,7 +256,7 @@ jobs:
             freebsd_vm: false
             freebsd_arm: false
           - platform: Linux x64 musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             asset: nodeflare-linux-x64-musl
             extension: ""
@@ -278,7 +280,7 @@ jobs:
             freebsd_vm: false
             freebsd_arm: false
           - platform: Linux ARM64 musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: aarch64-unknown-linux-musl
             asset: nodeflare-linux-aarch64-musl
             extension: ""
@@ -313,7 +315,7 @@ jobs:
             freebsd_arm: false
             rustflags: ""
           - platform: FreeBSD x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-freebsd
             asset: nodeflare-freebsd-x64
             extension: ""
@@ -324,7 +326,7 @@ jobs:
             freebsd_vm: true
             freebsd_arm: false
           - platform: FreeBSD ARM64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: aarch64-unknown-freebsd
             asset: nodeflare-freebsd-aarch64
             extension: ""
@@ -459,7 +461,7 @@ jobs:
       matrix:
         include:
           - platform: Linux x64 glibc 2.28+
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             asset: agent-linux-x64-glibc
             extension: ""
@@ -470,7 +472,7 @@ jobs:
             emulate: false
             static_linux: false
           - platform: Linux x64 musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             asset: agent-linux-x64-musl
             extension: ""
@@ -490,7 +492,7 @@ jobs:
             emulate: false
             static_linux: false
           - platform: Linux ARM64 musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: aarch64-unknown-linux-musl
             asset: agent-linux-aarch64-musl
             extension: ""
@@ -519,7 +521,7 @@ jobs:
             static_linux: false
             rustflags: ""
           - platform: FreeBSD x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-freebsd
             asset: agent-freebsd-x64
             extension: ""
@@ -528,7 +530,7 @@ jobs:
             emulate: false
             static_linux: false
           - platform: FreeBSD ARM64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: aarch64-unknown-freebsd
             asset: agent-freebsd-aarch64
             extension: ""
@@ -647,7 +649,7 @@ jobs:
     name: Frontend
     needs: metadata
     if: needs.metadata.outputs.release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       attestations: write
@@ -682,7 +684,7 @@ jobs:
     name: Server bundle (${{ matrix.platform }})
     needs: [metadata, server, frontend]
     if: needs.metadata.outputs.release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       attestations: write
@@ -788,7 +790,7 @@ jobs:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [metadata, security, quality, agent, server-bundle]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       actions: read
