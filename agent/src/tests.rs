@@ -9,7 +9,7 @@ use super::{
     PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES, REMOTE_STREAM_OUTPUT_BYTES,
     RemoteExecutor, RemoteTaskJournalEntry, RemoteTaskMessage, Report, TaskResultMessage,
     UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval, advance_deadline,
-    clock_offset_from_http_date, corrected_timestamp, dedupe_disks,
+    clock_offset_from_http_date, corrected_timestamp, dedupe_disks, download_agent,
     execute_remote_task_with_timeout, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
     live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
     parse_pciconf_gpu_names, parse_probe_target, parse_public_ip, parse_system_profiler_gpu_names,
@@ -566,6 +566,100 @@ fn validates_release_asset_digests() {
     assert_eq!(release_asset_sha256(&asset), None);
     asset.digest = None;
     assert_eq!(release_asset_sha256(&asset), None);
+}
+
+/// Serves the given body once so `download_agent` can be exercised end to end.
+fn serve_once(body: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/agent",
+        listener.local_addr().unwrap().port()
+    );
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 1024];
+        let _ = std::io::Read::read(&mut stream, &mut buffer);
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+    });
+    (url, server)
+}
+
+fn download_probe_path(label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "nodeflare-agent-{label}-{}-{nonce}.download",
+        std::process::id()
+    ))
+}
+
+#[test]
+fn download_failures_report_their_own_reason_instead_of_a_version_mismatch() {
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+
+    // A mirror that returns a non-executable body is a truncation or block page,
+    // not a wrong version. The message must name the URL so the mirror is obvious.
+    let destination = download_probe_path("not-executable");
+    let (url, server) = serve_once(b"<html>mirror error</html>".to_vec());
+    let error = download_agent(&client, &url, &destination, "1.2.3", &"0".repeat(64))
+        .unwrap_err()
+        .to_string();
+    server.join().unwrap();
+    assert!(error.contains("not an executable"), "{error}");
+    assert!(error.contains(&url), "{error}");
+    assert!(!destination.exists(), "rejected download must be removed");
+}
+
+#[test]
+fn corrupted_downloads_name_the_hash_instead_of_the_version() {
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+    // Valid ELF magic keeps the format check happy so the SHA-256 check reports.
+    let mut body = b"\x7fELF".to_vec();
+    body.resize(64, 0);
+    let destination = download_probe_path("corrupted");
+    let (url, server) = serve_once(body);
+    let error = download_agent(&client, &url, &destination, "1.2.3", &"0".repeat(64))
+        .unwrap_err()
+        .to_string();
+    server.join().unwrap();
+    assert!(error.contains("corrupted"), "{error}");
+    assert!(error.contains("expected"), "{error}");
+    assert!(!destination.exists(), "rejected download must be removed");
+}
+
+#[test]
+fn unreachable_download_sources_report_the_url() {
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+    let destination = download_probe_path("unreachable");
+    // Reserved for documentation use, so the connection cannot succeed.
+    let url = "http://127.0.0.1:1/agent";
+    let error = download_agent(&client, url, &destination, "1.2.3", &"0".repeat(64))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("failed"), "{error}");
+    assert!(error.contains(url), "{error}");
 }
 
 #[test]

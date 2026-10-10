@@ -97,27 +97,40 @@ pub(crate) fn release_asset_sha256(asset: &GithubReleaseAsset) -> Option<String>
     .then(|| digest.to_ascii_lowercase())
 }
 
+/// Downloads a candidate Agent binary and rejects it unless it is runnable and
+/// byte-identical to the published asset. Every rejection carries its own reason
+/// so a slow or blocked mirror is not misreported as a version mismatch.
 pub(crate) fn download_agent(
     agent: &ureq::Agent,
     url: &str,
     destination: &Path,
     expected_version: &str,
     expected_sha256: &str,
-) -> Result<bool> {
-    let Ok(response) = agent.get(url).call() else {
-        return Ok(false);
-    };
+) -> Result<()> {
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|error| format!("download from {url} failed: {error}"))?;
     let response = response.into_body().into_reader();
     let mut file = fs::File::create(destination)?;
     let copied = io::copy(&mut response.take(MAX_AGENT_BINARY_BYTES + 1), &mut file)?;
     file.flush()?;
     drop(file);
-    if copied > MAX_AGENT_BINARY_BYTES
-        || !executable_format_valid(destination)
-        || sha256_file(destination)? != expected_sha256
-    {
+    if copied > MAX_AGENT_BINARY_BYTES {
         let _ = fs::remove_file(destination);
-        return Ok(false);
+        return Err(format!("download from {url} exceeded {MAX_AGENT_BINARY_BYTES} bytes").into());
+    }
+    if !executable_format_valid(destination) {
+        let _ = fs::remove_file(destination);
+        return Err(format!("download from {url} is not an executable for this system").into());
+    }
+    let actual_sha256 = sha256_file(destination)?;
+    if actual_sha256 != expected_sha256 {
+        let _ = fs::remove_file(destination);
+        return Err(format!(
+            "download from {url} is corrupted: sha256 {actual_sha256}, expected {expected_sha256}"
+        )
+        .into());
     }
     #[cfg(unix)]
     fs::set_permissions(destination, fs::Permissions::from_mode(0o755))?;
@@ -137,8 +150,13 @@ pub(crate) fn download_agent(
         == Some(normalized_version(expected_version));
     if !valid {
         let _ = fs::remove_file(destination);
+        return Err(format!(
+            "download from {url} reports version {}, expected {expected_version}",
+            downloaded_version.as_deref().unwrap_or("unknown")
+        )
+        .into());
     }
-    Ok(valid)
+    Ok(())
 }
 
 pub(crate) fn mirrored_download_url(mirror: &str, url: &str) -> String {
@@ -187,15 +205,13 @@ pub(crate) fn update(agent: &ureq::Agent, mirror: &str) -> Result<bool> {
             format!("latest release does not contain a SHA-256 digest for {artifact}").into(),
         );
     };
-    if !download_agent(
+    download_agent(
         agent,
         &mirrored_download_url(mirror, &release_asset.browser_download_url),
         &temporary,
         &release.tag_name,
         &expected_sha256,
-    )? {
-        return Err("downloaded agent version does not match the configured version".into());
-    }
+    )?;
 
     #[cfg(unix)]
     {
