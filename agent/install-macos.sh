@@ -105,7 +105,7 @@ NodeFlare Agent macOS 安装脚本
   install-macos.sh --uninstall
 
 仅支持 Apple Silicon（arm64）。Agent Token 请勿泄露。
--m 为可选的 GitHub 下载加速前缀（如 https://ghproxy.net）。
+-m 为可选的 GitHub 下载加速前缀（如 https://gh-proxy.com）。
 --update 手动更新 Agent。
 --disable-remote 在服务启动参数中禁用远程控制；不带此参数则允许。
 EOF

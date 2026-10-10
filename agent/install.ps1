@@ -3,7 +3,7 @@
   .\install.ps1 -Update
   Update using the saved endpoint, token and history interval.
 .EXAMPLE
-  .\install.ps1 -Update -Mirror https://ghproxy.net
+  .\install.ps1 -Update -Mirror https://gh-proxy.com
 #>
 [CmdletBinding(DefaultParameterSetName = "Install")]
 param(

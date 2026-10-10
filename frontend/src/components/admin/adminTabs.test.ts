@@ -38,12 +38,12 @@ describe("Agent install command builder", () => {
   });
 
   test("appends the mirror with the platform's own flag", () => {
-    const mirrored = { ...install, agent_mirror: "https://ghproxy.net/" };
+    const mirrored = { ...install, agent_mirror: "https://gh-proxy.com/" };
     // The trailing slash is trimmed before being embedded.
     expect(installCommandFor(mirrored, "linux", "https://panel.example.com"))
-      .toContain("-m 'https://ghproxy.net'");
+      .toContain("-m 'https://gh-proxy.com'");
     expect(installCommandFor(mirrored, "windows", "https://panel.example.com"))
-      .toContain("-Mirror 'https://ghproxy.net'");
+      .toContain("-Mirror 'https://gh-proxy.com'");
   });
 
   test("omits the mirror flag entirely when none is configured", () => {

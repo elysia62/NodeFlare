@@ -570,7 +570,7 @@ describe("agent installer manual update", () => {
     expect(spawnSync("sh", ["-n"], { input: agentInstaller }).status).toBe(0);
     const functions = agentShellFunctions("update_agent", "load_installed_agent_config", "fail", "usage");
     for (const disabled of [true, false]) {
-      for (const mirror of [[], ["-m", "https://ghproxy.net"]]) {
+      for (const mirror of [[], ["-m", "https://gh-proxy.com"]]) {
         const accepted = spawnSync("sh", ["-c", `
           set -eu
           ${functions}

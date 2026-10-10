@@ -30,7 +30,7 @@ NodeFlare Agent 安装脚本
   -e  NodeFlare 服务地址（必填）
   -t  后台生成的 Agent Token（必填，请勿泄露）
   -i  初始历史保存间隔，15-3600 秒（默认 60）
-  -m  GitHub 下载加速前缀（可选，如 https://ghproxy.net）
+  -m  GitHub 下载加速前缀（可选，如 https://gh-proxy.com）
   --disable-remote  在服务启动参数中禁用远程控制；不带此参数则允许
 EOF
 }
