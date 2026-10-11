@@ -159,7 +159,7 @@ export default function App() {
       <div className="theme-background" style={background ? { backgroundImage: `url(${JSON.stringify(background)})`, opacity: 1 } : undefined} />
       <header className="site-header">
         <div className="container header-inner">
-          <div className="brand"><SiteLogo src={config.logo_url} alt="" width="36" height="36" /><strong>{config.site_name}</strong></div>
+          <div className="brand"><SiteLogo src={config.logo_url} alt="" width="36" height="36" /><h1>{config.site_name}</h1></div>
           <div className="header-actions">
             <button className="icon-btn" onClick={toggleTheme} title={dark ? ui(locale, "浅色主题", "Light theme") : ui(locale, "深色主题", "Dark theme")}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
             <a className="icon-btn" href="/admin/login" target="_blank" rel="noopener noreferrer" title={ui(locale, "进入后台", "Administration")} aria-label={ui(locale, "进入后台", "Administration")}><UserCircle size={18} /></a>

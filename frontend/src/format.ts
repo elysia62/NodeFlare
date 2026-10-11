@@ -177,10 +177,24 @@ export function formatExpire(server: Pick<Server, "expires_at" | "price">, local
   return ui(locale, `${days} 天`, `${days} days`);
 }
 
+/**
+ * Value of a node that has been paid for but not yet consumed.
+ *
+ * `price` is what one billing period costs, and the period covers
+ * `billingCycle` days, so a node is worth at most one `price` — the amount the
+ * operator has already committed to spending. The remaining days are prorated
+ * against that period and capped at it: a node paid to the minute counts as a
+ * full period, while one with several periods still outstanding counts as one,
+ * because only the next period has actually been paid for.
+ *
+ * Without the cap the result could exceed the node's own price (a monthly node
+ * with 46 days left would read as 1.53× its price), and the dashboard's asset
+ * total would end up smaller than the remaining value it is compared against.
+ */
 export function remainingAssetValue(price: number, billingCycle: number, expiresAt: number | null) {
   if (price <= 0) return 0;
   const days = daysUntil(expiresAt);
   if (days === null || days <= 0) return 0;
   if (billingCycle <= 0) return price;
-  return price * days / billingCycle;
+  return price * Math.min(days, billingCycle) / billingCycle;
 }

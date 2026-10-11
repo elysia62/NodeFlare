@@ -11,7 +11,7 @@
 .header-inner { display: flex; min-height: 64px; align-items: center; justify-content: space-between; gap: 12px; }
 .brand { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 0; color: inherit; text-align: left; }
 .brand img { flex: 0 0 auto; object-fit: contain; }
-.brand strong { overflow: hidden; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+.brand h1 { overflow: hidden; margin: 0; font-size: 17px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { display: flex; align-items: center; gap: 4px; }
 .header-actions .icon-btn { color: var(--foreground); }
 .main-content { flex: 1; padding-top: 20px; padding-bottom: 24px; }
@@ -46,6 +46,16 @@
 .group-tabs button { display: inline-flex; min-height: 29px; flex: 0 0 auto; align-items: center; justify-content: center; gap: 5px; border-radius: 5px; padding: 0 10px; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; }
 .group-tabs button.active { color: var(--foreground); background: var(--card-solid); box-shadow: 0 1px 4px rgb(20 35 42 / .08); }
 .result-count { margin-left: auto; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+
+/* Touch devices need a bigger hit area than a pointer does. The default 36px
+   icon buttons, 36px search box and 29px group tabs are comfortable with a
+   mouse but below the 44px fingers reliably land on, so they grow only where
+   they are actually tapped. */
+@media (pointer: coarse) {
+  .icon-btn { width: 44px; height: 44px; }
+  .search-box { height: 44px; }
+  .group-tabs button { min-height: 40px; }
+}
 
 .node-grid { display: grid; align-items: start; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
 .node-card { position: relative; display: flex; width: 100%; min-width: 0; min-height: var(--node-card-min-height); align-self: start; flex-direction: column; overflow: hidden; border-radius: 12px; padding: 0; text-align: left; box-shadow: var(--node-card-shadow); transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease; }
@@ -209,7 +219,7 @@ html[data-blur="on"] .node-offline-overlay { backdrop-filter: blur(2px); }
 .latency-empty-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted-foreground); font-size: 12px; pointer-events: none; }
 
 @media (min-width: 640px) {
-  .brand strong { font-size: 18px; }
+  .brand h1 { font-size: 18px; }
 }
 
 @media (max-width: 1023px) {

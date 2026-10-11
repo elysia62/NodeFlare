@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
-import { formatByteSize, formatCurrency, formatExpire, formatPrice, formatSpeedParts, parseByteSize, remainingAssetValue } from "./format";
+import { formatByteSize, formatExpire, formatPrice, formatSpeedParts, parseByteSize, remainingAssetValue } from "./format";
 
 describe("parseByteSize", () => {
   test("accepts manual units and defaults to GB", () => {
@@ -65,17 +65,20 @@ describe("remainingAssetValue", () => {
   beforeEach(() => setSystemTime(new Date(now * 1000)));
   afterEach(() => setSystemTime());
 
-  test("counts every remaining monthly period for a long prepaid term", () => {
-    const remaining = remainingAssetValue(36, 30, expiresIn(3254));
-    expect(remaining).toBeCloseTo(3904.8, 8);
-    expect(formatCurrency(remaining, "CNY")).toBe("¥3904.8");
-    expect(remainingAssetValue(36, 30, expiresIn(3650))).toBeCloseTo(4380, 8);
+  test("never exceeds the price of one billing period", () => {
+    // A monthly node with more than a month left is still only worth one month:
+    // only that period has been paid for. Counting every remaining period would
+    // report 3904.8 for a node whose period costs 36, making the dashboard's
+    // asset total smaller than the remaining value shown next to it.
+    expect(remainingAssetValue(36, 30, expiresIn(3254))).toBeCloseTo(36, 8);
+    expect(remainingAssetValue(36, 30, expiresIn(3650))).toBeCloseTo(36, 8);
+    expect(remainingAssetValue(120, 365, expiresIn(730))).toBeCloseTo(120, 8);
   });
 
-  test("prorates partial periods and supports multi-year annual billing", () => {
+  test("prorates within a period and supports multi-year annual billing", () => {
     expect(remainingAssetValue(36, 30, expiresIn(15))).toBeCloseTo(18, 8);
-    expect(remainingAssetValue(36, 30, expiresIn(45))).toBeCloseTo(54, 8);
-    expect(remainingAssetValue(120, 365, expiresIn(730))).toBeCloseTo(240, 8);
+    expect(remainingAssetValue(36, 30, expiresIn(45))).toBeCloseTo(36, 8);
+    expect(remainingAssetValue(120, 365, expiresIn(100))).toBeCloseTo(120 * 100 / 365, 8);
   });
 
   test("keeps one-time charges fixed and excludes expired or unpriced terms", () => {
