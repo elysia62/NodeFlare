@@ -16,9 +16,17 @@ export function createNodeObservation() {
   let connectedAt: number | null = null;
   const observed = new Set<string>();
 
-  const invalidate = () => {
+  // Suspension only discards what the socket itself confirmed, because that
+  // evidence cannot outlive the connection it arrived on, and the generation bump
+  // rejects a response that was already in flight when the page hid.
+  //
+  // The HTTP snapshot is a separate channel: its freshness is bounded by
+  // SNAPSHOT_MAX_AGE_MS, not by visibility, so it is kept here and ages out on its
+  // own. That lets a short tab switch resume from the state already confirmed
+  // instead of flashing "pending" until the next poll lands, while an absence
+  // longer than the snapshot's grace period honestly falls back to pending.
+  const invalidateStream = () => {
     generation += 1;
-    snapshotAt = null;
     connectedAt = null;
     observed.clear();
   };
@@ -27,10 +35,10 @@ export function createNodeObservation() {
     setAvailable(next: boolean) {
       if (available === next) return;
       available = next;
-      invalidate();
+      invalidateStream();
     },
     setConnected(connected: boolean, now = Date.now()) {
-      if (!connected) invalidate();
+      if (!connected) invalidateStream();
       else if (available) connectedAt = now;
     },
     beginSnapshot(now = Date.now()) { return { generation, startedAt: now }; },
@@ -48,8 +56,8 @@ export function createNodeObservation() {
       if (!available) return "pending";
       const streamObserved = connectedAt !== null && (
         observed.has(server.id)
-        // The initial HTTP snapshot usually arrives just before WS connects.
-        // It is also a valid baseline; suspension/disconnect clears it entirely.
+        // The last HTTP snapshot is a valid baseline while it is still fresh; it
+        // outlives a suspension and is replaced by the next poll after resume.
         || (snapshotAt !== null && snapshotAt >= connectedAt - SNAPSHOT_MAX_AGE_MS)
         || now - connectedAt >= threshold * 1000
       );

@@ -19,6 +19,49 @@ describe("dashboard status observation", () => {
     expect(observation.status(node(100), 30, 201_000)).toBe("offline");
   });
 
+  test("a short tab switch resumes from the last snapshot instead of flashing pending", () => {
+    const observation = createNodeObservation();
+    observation.acceptSnapshot(observation.beginSnapshot(100_000));
+    observation.setConnected(true, 100_500);
+    observation.observe(["node-1"]);
+    expect(observation.status(node(100), 180, 101_000)).toBe("online");
+
+    // Switch away briefly and come back. The socket reconnects, but no report has
+    // arrived yet: the still-fresh snapshot keeps the confirmed state, so the card
+    // does not fall back to "pending" while the next poll is in flight.
+    observation.setAvailable(false);
+    observation.setConnected(false);
+    observation.setAvailable(true);
+    observation.setConnected(true, 104_000);
+    expect(observation.status(node(100), 180, 104_100)).toBe("online");
+    expect(observation.status(node(103), 180, 104_100)).toBe("online");
+
+    // The confirmed state is not frozen: a node that stops reporting still turns
+    // offline once its own threshold passes.
+    expect(observation.status(node(100), 180, 285_000)).toBe("offline");
+  });
+
+  test("an absence longer than the snapshot grace period still waits for fresh data", () => {
+    const observation = createNodeObservation();
+    observation.acceptSnapshot(observation.beginSnapshot(100_000));
+    observation.setConnected(true, 100_500);
+    observation.observe(["node-1"]);
+
+    // Come back after the snapshot has aged out: nothing confirms the node yet, so
+    // the dashboard must not assert a state from data that is already too old.
+    observation.setAvailable(false);
+    observation.setConnected(false);
+    observation.setAvailable(true);
+    observation.setConnected(true, 200_000);
+    expect(observation.status(node(100), 180, 200_100)).toBe("pending");
+
+    // A fresh poll re-confirms it: the snapshot decides from its own request time,
+    // so a node quiet for longer than the threshold is reported offline.
+    observation.acceptSnapshot(observation.beginSnapshot(201_000));
+    expect(observation.status(node(200), 180, 201_100)).toBe("online");
+    expect(observation.status(node(20), 180, 201_100)).toBe("offline");
+  });
+
   test("late responses from before suspension cannot confirm stale node status", () => {
     const observation = createNodeObservation();
     const oldRequest = observation.beginSnapshot(100_000);
