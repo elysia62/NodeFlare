@@ -1117,3 +1117,164 @@ fn update_check_jitter_is_stable_and_bounded() {
     assert_eq!(first, update_check_jitter("agent-token"));
     assert!(first.as_secs() <= UPDATE_CHECK_JITTER_MAX_SECONDS);
 }
+
+/// Serves the body slowly (in chunks with pauses) so a download that needs more
+/// than the agent-wide timeout can still complete.
+fn serve_slowly(body: Vec<u8>, chunk: usize, pause: Duration) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/agent",
+        listener.local_addr().unwrap().port()
+    );
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 1024];
+        let _ = std::io::Read::read(&mut stream, &mut buffer);
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        for piece in body.chunks(chunk) {
+            if stream.write_all(piece).is_err() {
+                return;
+            }
+            let _ = stream.flush();
+            std::thread::sleep(pause);
+        }
+    });
+    (url, server)
+}
+
+#[test]
+fn slow_downloads_get_their_own_timeout_budget() {
+    // Agent-wide timeout is short here to stand in for the real 20s budget,
+    // while the download is deliberately slower than that.
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_millis(600)))
+        .build()
+        .into();
+
+    // Valid ELF magic so the format check passes and the hash check is reached,
+    // which keeps the assertion focused on the transfer completing at all.
+    let mut body = b"\x7fELF".to_vec();
+    body.resize(4096, 0);
+    let expected = {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(&body);
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+
+    let destination = download_probe_path("slow");
+    // 8 chunks with 200ms pauses: ~1.6s total, well past the 600ms budget.
+    let (url, server) = serve_slowly(body, 512, Duration::from_millis(200));
+    let result = download_agent(&client, &url, &destination, "1.2.3", &expected);
+    server.join().unwrap();
+
+    // The binary reports its own version; a non-agent ELF legitimately fails the
+    // version check, so accept either success or a version complaint, but not a
+    // transport timeout — which is what the wider budget exists to prevent.
+    match result {
+        Ok(()) => {}
+        Err(error) => {
+            let error = error.to_string();
+            assert!(
+                !error.contains("failed"),
+                "slow download must not be aborted by the transport timeout: {error}"
+            );
+            assert!(error.contains("version"), "{error}");
+        }
+    }
+}
+
+/// End-to-end check against a real release binary over a rate-limited mirror.
+/// Only runs when NODEFLARE_E2E_BINARY points at a downloaded asset, so the
+/// normal suite stays hermetic.
+#[test]
+fn real_binary_downloads_through_a_slow_mirror() {
+    let Ok(binary) = std::env::var("NODEFLARE_E2E_BINARY") else {
+        return;
+    };
+    let body = fs::read(&binary).expect("read E2E binary");
+    let expected = {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(&body);
+        digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    };
+
+    // Agent-wide budget shorter than the transfer, standing in for the real 20s.
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_millis(500)))
+        .build()
+        .into();
+
+    let destination = download_probe_path("real");
+    let (url, server) = serve_slowly(body, 32 * 1024, Duration::from_millis(30));
+    let result = download_agent(&client, &url, &destination, "1.0.13", &expected);
+    server.join().unwrap();
+
+    match result {
+        Ok(()) => {
+            assert!(destination.exists(), "verified binary must be kept");
+            let _ = fs::remove_file(&destination);
+        }
+        Err(error) => panic!("real binary download failed: {error}"),
+    }
+}
+
+/// A mirror that accepts the connection and then never answers must still be
+/// abandoned quickly: only the body transfer gets the larger allowance.
+#[test]
+fn stalled_handshakes_still_fail_fast() {
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/agent",
+        listener.local_addr().unwrap().port()
+    );
+    let server = std::thread::spawn(move || {
+        // Accept and hold the connection open without sending response headers.
+        let (stream, _) = listener.accept().unwrap();
+        std::thread::sleep(Duration::from_secs(30));
+        drop(stream);
+    });
+
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(20)))
+        .build()
+        .into();
+
+    let destination = download_probe_path("stalled");
+    let started = Instant::now();
+    let error = download_agent(&client, &url, &destination, "1.2.3", &"0".repeat(64))
+        .unwrap_err()
+        .to_string();
+    let elapsed = started.elapsed();
+
+    assert!(error.contains("failed"), "{error}");
+    // The handshake budget is 20s, well below the 180s body allowance. If the
+    // phases were not bounded separately this would wait for the larger budget.
+    assert!(
+        error.contains("receive response") || error.contains("connect"),
+        "expected a handshake timeout, got: {error}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "stalled handshake took {elapsed:?}, expected the 20s handshake budget"
+    );
+    // The server thread is still sleeping; detach it so the test does not wait.
+    drop(server);
+}
+

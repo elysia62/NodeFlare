@@ -109,6 +109,20 @@ pub(crate) fn download_agent(
 ) -> Result<()> {
     let response = agent
         .get(url)
+        // The agent-wide 20s budget is sized for the small release metadata
+        // request; a multi-megabyte binary needs more. Every phase is bounded
+        // separately so a stalled mirror still fails fast:
+        //   - connect / response headers: short, matching the agent-wide budget
+        //   - body transfer: the larger allowance, which is the point of the fix
+        // The global timeout also has to be raised, because ureq takes the
+        // smallest applicable deadline and the inherited one would otherwise
+        // cut the transfer off at 20s no matter what recv_body says.
+        .config()
+        .timeout_global(Some(AGENT_DOWNLOAD_TIMEOUT))
+        .timeout_connect(Some(AGENT_DOWNLOAD_HANDSHAKE_TIMEOUT))
+        .timeout_recv_response(Some(AGENT_DOWNLOAD_HANDSHAKE_TIMEOUT))
+        .timeout_recv_body(Some(AGENT_DOWNLOAD_TIMEOUT))
+        .build()
         .call()
         .map_err(|error| format!("download from {url} failed: {error}"))?;
     let response = response.into_body().into_reader();

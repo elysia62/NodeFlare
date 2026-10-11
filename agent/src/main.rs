@@ -64,6 +64,15 @@ const LATEST_RELEASE_API: &str = "https://api.github.com/repos/elysia62/NodeFlar
 const PROBE_ATTEMPTS: usize = 4;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
+/// Reading the release metadata is a few hundred bytes, so the agent-wide 20s
+/// budget is generous. Downloading the binary is not comparable: a usable mirror
+/// can still be slow enough that a 3 MB asset needs more than 20s, and the
+/// transfer would then be aborted mid-way and reported as a failure.
+const AGENT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+/// Connecting and reading the response headers keep the agent-wide budget, so a
+/// mirror that accepts the connection and then stalls is still abandoned quickly
+/// instead of holding up the loop for the full download allowance.
+const AGENT_DOWNLOAD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_TASK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const REMOTE_STREAM_OUTPUT_BYTES: u64 = 512 * 1024;
 const REMOTE_RESULT_OUTPUT_BYTES: usize = 900 * 1024;
