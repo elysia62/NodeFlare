@@ -15,9 +15,16 @@
     "build:agent": "sh scripts/build-agent.sh",
     "build:backend": "sh scripts/build-backend.sh",
     "build:frontend": "sh scripts/build-frontend.sh",
-    "test:smoke": "sh scripts/smoke-test.sh"
+    "test:smoke": "sh scripts/smoke-test.sh",
+    "test:e2e": "playwright test",
+    "test:e2e:types": "sh -c 'cd frontend && ./node_modules/.bin/tsc -p ../tsconfig.e2e.json'",
+    "test:visual": "playwright test visual",
+    "test:visual:update": "playwright test visual --update-snapshots"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^26.6.5",
+    "playwright": "^1.64.0",
     "ws": "^8.22.0"
   }
 }

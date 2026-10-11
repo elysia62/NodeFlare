@@ -35,6 +35,12 @@ config.toml
 # 本地运行状态
 *.log
 
+# Playwright 产物（截图基线在 e2e/__screenshots__ 下，需提交）
+/e2e-report/
+/e2e-results/
+/playwright-report/
+/test-results/
+
 # 旧版部署遗留的本地密钥，避免迁移时误提交
 .dev.vars
 .dev.vars.*
