@@ -105,7 +105,12 @@ for (const [platform, path] of Object.entries(installers)) {
               TEST_PLATFORM: platform,
               TEST_SCENARIO: scenario,
             },
-            encoding: "utf8", timeout: 5_000,
+            // Start-Sleep is mocked to count rather than wait, so this budget only
+            // covers spawning PowerShell and parsing the script. The first case to
+            // run pays the cold-start cost, which measured 5012ms on a CI runner
+            // and tripped the previous 5s limit; 30s keeps the timeout meaningful
+            // for a hung process without racing a slow start.
+            encoding: "utf8", timeout: 30_000,
           });
           expect(result.error).toBeUndefined();
           expect(result.status).toBe(expectedStatus);
@@ -180,14 +185,18 @@ describe("Windows Agent local readiness", () => {
           ${functions}
           try { Wait-Agent; Write-Output $script:Tick; exit 0 }
           catch { Write-Output $script:Tick; exit 1 }
-        `], { env: { ...process.env, TEST_DIRECTORY: directory, TEST_SCENARIO: scenario }, encoding: "utf8", timeout: 10_000 });
+        `], { env: { ...process.env, TEST_DIRECTORY: directory, TEST_SCENARIO: scenario }, encoding: "utf8", timeout: 30_000 });
         expect(result.error).toBeUndefined();
         expect(result.status).toBe(expectedStatus);
         expect(result.stdout.trim()).toBe(String(expectedSleeps));
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
-    });
+      // Bun's default 5s test budget is too tight here: each case spawns
+      // PowerShell, which costs ~360ms locally but over 5s on a slower CI runner
+      // where the first case pays the cold start. The scenarios themselves only
+      // count mocked sleeps, so this covers process startup, not real waiting.
+    }, 30_000);
   }
 
   test("checks a protected fresh marker and real process identity before confirming installation", () => {

@@ -97,7 +97,13 @@ for (const [name, path, server] of [
         $errors = $null
         [System.Management.Automation.Language.Parser]::ParseFile($env:TEST_SCRIPT, [ref]$tokens, [ref]$errors) > $null
         if ($errors.Count) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
-      `], { env: { ...process.env, TEST_SCRIPT: file }, encoding: "utf8", timeout: 10_000 });
+      `], {
+        env: { ...process.env, TEST_SCRIPT: file },
+        // Spawning PowerShell costs ~360ms locally and considerably more on a CI
+        // runner, so the budget is sized for the process start rather than the
+        // parse itself, which is negligible.
+        encoding: "utf8", timeout: 30_000,
+      });
       expect(result.status).toBe(0);
     }, 30_000);
 
@@ -120,7 +126,7 @@ for (const [name, path, server] of [
           $Port = 3100
           Write-Step "正在启动服务"
           Show-InstallResult
-        `], { encoding: "utf8", timeout: 10_000 });
+        `], { encoding: "utf8", timeout: 30_000 });
         expect(result.status).toBe(0);
         const output = result.stdout.replaceAll("\r\n", "\n");
         if (fresh) {
