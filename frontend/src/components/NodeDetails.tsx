@@ -316,7 +316,7 @@ export function NodeDetails({ server, liveLatencyResults, status, retentionDays,
   return (
     <div className="detail-page">
       <section className="detail-hero glass-panel">
-        <button className="icon-btn" onClick={onClose} title={ui(locale, "返回首页", "Back")}><ArrowLeft size={19} /></button>
+        <button className="icon-btn" onClick={onClose} aria-label={ui(locale, "返回首页", "Back to home")} title={ui(locale, "返回首页", "Back")}><ArrowLeft size={19} /></button>
         <Flag region={server.region} size={24} className="detail-flag" locale={locale} />
         <div className="detail-title">
           <div><h1>{server.name}</h1><span className={`status-chip ${status}`}>{status === "pending" ? ui(locale, "待刷新", "Awaiting update") : status === "online" ? ui(locale, "在线", "Online") : ui(locale, "离线", "Offline")}</span></div>

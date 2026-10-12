@@ -7,7 +7,7 @@ import {
   Save,
   Sun,
 } from "lucide-react";
-import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError } from "../api";
 import { ui } from "../locale";
 import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } from "../adminRoutes";
@@ -65,6 +65,7 @@ export function AdminPanel({
   const [notice, setNotice] = useState("");
   const [tab, setTab] = useState<AdminTab>(() => adminTabFromPath(window.location.pathname));
   const [servers, setServers] = useState<AdminServer[]>([]);
+  const [draggingId, setDraggingId] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [database, setDatabase] = useState<DatabaseStats | null>(null);
@@ -324,9 +325,30 @@ export function AdminPanel({
     if (target < 0 || target >= servers.length) return;
     const next = [...servers];
     [next[index], next[target]] = [next[target], next[index]];
+    await persistOrder(next);
+  }
+
+  /** Drop a dragged row onto another, moving it to that position. */
+  async function dropServer(event: DragEvent<HTMLDivElement>, targetId: string) {
+    event.preventDefault();
+    const sourceId = draggingId || event.dataTransfer.getData("text/plain");
+    setDraggingId("");
+    if (!sourceId || sourceId === targetId) return;
+    const sourceIndex = servers.findIndex((server) => server.id === sourceId);
+    const targetIndex = servers.findIndex((server) => server.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const next = [...servers];
+    const [moved] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, moved);
+    await persistOrder(next);
+  }
+
+  /** Apply a new order optimistically and roll back if the server rejects it. */
+  async function persistOrder(next: AdminServer[]) {
+    const previous = servers;
     setServers(next);
     try { await api.reorderServers(next.map((server) => server.id)); onChanged(); }
-    catch (reason) { setServers(servers); setError(reason instanceof Error ? reason.message : ui(locale, "排序失败", "Failed to reorder")); }
+    catch (reason) { setServers(previous); setError(reason instanceof Error ? reason.message : ui(locale, "排序失败", "Failed to reorder")); }
   }
 
   async function saveSite(event: FormEvent) {
@@ -877,6 +899,10 @@ export function AdminPanel({
                   busy={busy}
                   selectedIds={selectedIds}
                   allSelected={allSelected}
+                  draggingId={draggingId}
+                  onStartDrag={(event, id) => { setDraggingId(id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); }}
+                  onEndDrag={() => setDraggingId("")}
+                  onDrop={(event, id) => void dropServer(event, id)}
                   onCopyIp={(ip) => void copyServerIp(ip)}
                   onAdd={() => openEditor()}
                   onToggleSelected={toggleSelected}

@@ -1,4 +1,5 @@
-import { ChevronDown, ChevronUp, Download, Pencil, Plus, Trash2 } from "lucide-react";
+import type { DragEvent } from "react";
+import { ChevronDown, ChevronUp, Download, GripVertical, Pencil, Plus, Trash2 } from "lucide-react";
 import { ui } from "../../locale";
 import type { AdminServer } from "../../types";
 import { Checkbox } from "../Checkbox";
@@ -31,19 +32,23 @@ function ServerIpAddresses({ server, onCopy, locale }: {
   );
 }
 
-/** Server list with batch selection and move controls. */
+/** Server list with batch selection, move controls and drag reordering. */
 export function ServersTab({
   locale,
   servers,
   busy,
   selectedIds,
   allSelected,
+  draggingId,
   onCopyIp,
   onAdd,
   onToggleSelected,
   onToggleAll,
   onRemoveSelected,
   onMove,
+  onStartDrag,
+  onEndDrag,
+  onDrop,
   onInstallCommand,
   onEdit,
   onRemove,
@@ -53,12 +58,16 @@ export function ServersTab({
   busy: boolean;
   selectedIds: string[];
   allSelected: boolean;
+  draggingId: string;
   onCopyIp: (ip: string) => void;
   onAdd: () => void;
   onToggleSelected: (id: string) => void;
   onToggleAll: () => void;
   onRemoveSelected: () => void;
   onMove: (index: number, offset: number) => void;
+  onStartDrag: (event: DragEvent<HTMLButtonElement>, id: string) => void;
+  onEndDrag: () => void;
+  onDrop: (event: DragEvent<HTMLDivElement>, targetId: string) => void;
   onInstallCommand: (server: AdminServer) => void;
   onEdit: (server: AdminServer) => void;
   onRemove: (server: AdminServer) => void;
@@ -68,6 +77,7 @@ export function ServersTab({
       <div className="section-head"><div><h3>{ui(locale, "监控节点", "Monitored servers")}</h3><span>{ui(locale, `${servers.length} 个节点`, `${servers.length} server(s)`)}</span></div><div className="section-actions"><button className="primary-btn compact" onClick={onAdd}><Plus size={15} />{ui(locale, "添加", "Add")}</button></div></div>
       <div className="server-list">
         <div className="server-list-header">
+          <span aria-hidden="true" />
           <label className="select-all"><Checkbox checked={allSelected} onChange={onToggleAll} />{ui(locale, "全选", "Select all")}</label>
           <span>{ui(locale, "IP 地址", "IP address")}</span>
           <span>{ui(locale, "Agent 版本", "Agent version")}</span>
@@ -75,7 +85,13 @@ export function ServersTab({
           <div className="server-batch-actions">{selectedIds.length ? <button className="danger-btn compact" onClick={onRemoveSelected}><Trash2 size={15} />{ui(locale, `删除选中 (${selectedIds.length})`, `Delete selected (${selectedIds.length})`)}</button> : <span>{ui(locale, "批量操作", "Batch actions")}</span>}</div>
         </div>
         {servers.map((server, index) => (
-          <div className="server-row" key={server.id}>
+          <div
+            className={`server-row ${draggingId === server.id ? "dragging" : ""}`}
+            key={server.id}
+            onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }}
+            onDrop={(event) => onDrop(event, server.id)}
+          >
+            <button type="button" className="drag-handle" draggable onDragStart={(event) => onStartDrag(event, server.id)} onDragEnd={onEndDrag} aria-label={ui(locale, `拖动排序：${server.name}`, `Drag to reorder: ${server.name}`)} title={ui(locale, `拖动排序：${server.name}`, `Drag to reorder: ${server.name}`)}><GripVertical size={15} /></button>
             <Checkbox checked={selectedIds.includes(server.id)} onChange={() => onToggleSelected(server.id)} ariaLabel={ui(locale, `选择 ${server.name}`, `Select ${server.name}`)} />
             <div className="server-name"><div className="server-name-main"><Flag region={server.region} size={17} /><strong title={server.name}>{server.name}</strong></div></div>
             <ServerIpAddresses server={server} onCopy={onCopyIp} locale={locale} />

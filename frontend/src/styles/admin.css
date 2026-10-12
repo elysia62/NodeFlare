@@ -118,11 +118,15 @@
 .select-all { display: inline-flex; align-items: center; flex-direction: row; gap: 7px; color: var(--admin-text); font-size: 13px; }
 
 .server-list { overflow-x: auto; border-top: 1px solid var(--admin-border); }
-.server-list-header, .server-row { display: grid; min-width: 820px; align-items: center; gap: 10px; border-bottom: 1px solid var(--admin-border); grid-template-columns: 20px minmax(140px, .7fr) minmax(200px, 1.6fr) 105px 120px 175px; }
+.server-list-header, .server-row { display: grid; min-width: 848px; align-items: center; gap: 10px; border-bottom: 1px solid var(--admin-border); grid-template-columns: 18px 20px minmax(140px, .7fr) minmax(200px, 1.6fr) 105px 120px 175px; }
 .server-list-header { min-height: 44px; color: var(--admin-muted); font-size: 12px; }
-.server-list-header .select-all { grid-column: 1 / 3; }
+.server-list-header .select-all { grid-column: 2 / 4; }
 .server-batch-actions { display: flex; justify-content: flex-end; }
 .server-row { min-height: 62px; padding-block: 8px; transition: opacity .15s ease, background-color .15s ease; }
+.server-row.dragging { opacity: .45; background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.drag-handle { display: inline-flex; width: 18px; height: 32px; align-items: center; justify-content: center; padding: 0; color: var(--admin-muted); cursor: grab; touch-action: none; }
+.drag-handle:active { cursor: grabbing; }
+.drag-handle:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; border-radius: 4px; }
 .server-expiry, .server-agent-version { overflow: hidden; color: var(--admin-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .server-expiry { font-variant-numeric: tabular-nums; }
 .server-name { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
