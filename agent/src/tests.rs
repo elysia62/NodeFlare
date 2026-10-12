@@ -1120,7 +1120,11 @@ fn update_check_jitter_is_stable_and_bounded() {
 
 /// Serves the body slowly (in chunks with pauses) so a download that needs more
 /// than the agent-wide timeout can still complete.
-fn serve_slowly(body: Vec<u8>, chunk: usize, pause: Duration) -> (String, std::thread::JoinHandle<()>) {
+fn serve_slowly(
+    body: Vec<u8>,
+    chunk: usize,
+    pause: Duration,
+) -> (String, std::thread::JoinHandle<()>) {
     use std::io::Write;
     use std::net::TcpListener;
 
@@ -1210,7 +1214,11 @@ fn real_binary_downloads_through_a_slow_mirror() {
         use sha2::{Digest, Sha256};
         let mut digest = Sha256::new();
         digest.update(&body);
-        digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
     };
 
     // Agent-wide budget shorter than the transfer, standing in for the real 20s.
@@ -1277,4 +1285,3 @@ fn stalled_handshakes_still_fail_fast() {
     // The server thread is still sleeping; detach it so the test does not wait.
     drop(server);
 }
-
