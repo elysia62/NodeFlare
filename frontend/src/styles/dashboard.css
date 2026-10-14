@@ -78,7 +78,12 @@
 .node-chips { display: flex; height: 19px; flex: 0 0 auto; align-items: center; gap: 6px; overflow: hidden; margin-top: -4px; }
 .node-chips span { min-width: 0; overflow: hidden; border-radius: 999px; padding: 2px 8px; color: var(--muted-foreground); background: color-mix(in srgb, var(--muted) 82%, transparent); font-size: 12px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .node-chips span + span { margin-left: auto; text-align: right; }
-.metric-grid { display: grid; gap: 10px 16px; grid-template-columns: 1fr 1fr; }
+/* minmax(0, 1fr) rather than a bare 1fr: the auto minimum of 1fr lets content
+   widen the track, which some third-party mobile browsers (Alook on iOS, Via on
+   Android) resolve inconsistently after a resize or a data refresh, leaving the
+   card's content narrower than the card itself. An explicit 0 minimum keeps the
+   tracks tied to the container width. */
+.metric-grid { display: grid; gap: 10px 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .metric { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
 .metric.muted { opacity: .55; }
 /* 固定行高:CJK 回退字体的 normal 行高大于拉丁文本,浮动行高会把进度条与下一行顶偏 */
@@ -99,7 +104,7 @@
 .data-panel b > span { display: inline-flex; width: 10px; height: 10px; flex: 0 0 10px; align-items: center; justify-content: center; }
 .data-panel b svg { width: 10px; height: 10px; }
 .data-panel em { overflow: hidden; font-style: normal; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.quality-grid { display: grid; gap: 6px; grid-template-columns: 1fr 1fr; }
+.quality-grid { display: grid; gap: 6px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .quality-panel { display: flex; min-width: 0; height: var(--quality-panel-height); flex-direction: column; gap: 6px; overflow: visible; border-radius: 8px; padding: 8px; background: var(--node-data-bg); }
 .quality-panel > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted-foreground); font-size: 12px; line-height: 1; }
 .carrier-panel { height: var(--carrier-panel-height); }
