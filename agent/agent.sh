@@ -318,6 +318,9 @@ install_agent() {
   trap 'exit 143' TERM
   artifact="agent-linux-$arch-$libc"
   release_api="https://api.github.com/repos/elysia62/NodeFlare/releases/latest"
+  # The mirror covers the release metadata too: on a host that cannot reach
+  # GitHub the install would otherwise stall here, before any download starts.
+  [ -z "$mirror" ] || release_api="$mirror/$release_api"
   log "正在获取 GitHub 最新正式版本（$artifact）"
   release_json=$(curl --fail --location --silent --show-error --max-time 30 \
     -H 'Accept: application/vnd.github+json' \

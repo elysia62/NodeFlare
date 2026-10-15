@@ -46,6 +46,27 @@ describe("Agent install command builder", () => {
       .toContain("-Mirror 'https://gh-proxy.com'");
   });
 
+  test("routes the installer script itself through the mirror", () => {
+    // The mirror has to cover the script download, not just the release asset
+    // the script fetches later. A host that cannot reach GitHub would otherwise
+    // stall on this first command and never reach the mirror at all.
+    const mirrored = { ...install, agent_mirror: "https://gh-proxy.com" };
+    const scripts = { linux: "agent.sh", macos: "install-macos.sh", freebsd: "install-freebsd.sh", windows: "install.ps1" };
+    for (const [platform, script] of Object.entries(scripts) as Array<[keyof typeof scripts, string]>) {
+      const command = installCommandFor(mirrored, platform, "https://panel.example.com");
+      expect(command).toContain(`https://gh-proxy.com/https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/${script}`);
+      // The bare GitHub URL must not survive anywhere in the command.
+      expect(command).not.toMatch(/(^|["'\s])https:\/\/raw\.githubusercontent\.com/);
+    }
+  });
+
+  test("leaves the installer script URL untouched without a mirror", () => {
+    for (const platform of ["linux", "macos", "freebsd", "windows"] as const) {
+      expect(installCommandFor(install, platform, "https://panel.example.com"))
+        .toContain("https://raw.githubusercontent.com/elysia62/NodeFlare/main/agent/");
+    }
+  });
+
   test("omits the mirror flag entirely when none is configured", () => {
     const linux = installCommandFor(install, "linux", "https://panel.example.com");
     expect(linux).not.toContain(" -m ");

@@ -5,6 +5,7 @@ import { useDialog } from "../useDialog";
 import {
   AGENT_SCRIPT_BASE,
   copyText,
+  mirroredUrl,
   powershellLiteral,
   shellLiteral,
   type AgentInstallInfo,
@@ -25,16 +26,20 @@ export function installCommandFor(install: AgentInstallInfo, platform: AgentPlat
   const powershellMirror = mirror ? ` -Mirror ${powershellLiteral(mirror)}` : "";
   const shellPermission = install.agent_remote_control ? "" : " --disable-remote";
   const powershellPermission = install.agent_remote_control ? "" : " -DisableRemote";
+  // The mirror has to cover the script itself, not just the binary the script
+  // downloads later: on a host that cannot reach GitHub the very first command
+  // would otherwise stall before the mirror is ever consulted.
+  const script = (name: string) => mirroredUrl(mirror, `${AGENT_SCRIPT_BASE}/${name}`);
   if (platform === "windows") {
-    return `Invoke-WebRequest -UseBasicParsing -Uri "${AGENT_SCRIPT_BASE}/install.ps1" -OutFile "$env:TEMP\\nodeflare-install.ps1"\nUnblock-File "$env:TEMP\\nodeflare-install.ps1"\n& "$env:TEMP\\nodeflare-install.ps1" -e ${powershellLiteral(origin)} -t ${powershellLiteral(install.agent_token)}${powershellMirror}${powershellPermission}`;
+    return `Invoke-WebRequest -UseBasicParsing -Uri "${script("install.ps1")}" -OutFile "$env:TEMP\\nodeflare-install.ps1"\nUnblock-File "$env:TEMP\\nodeflare-install.ps1"\n& "$env:TEMP\\nodeflare-install.ps1" -e ${powershellLiteral(origin)} -t ${powershellLiteral(install.agent_token)}${powershellMirror}${powershellPermission}`;
   }
   if (platform === "macos") {
-    return `curl -fsSL ${AGENT_SCRIPT_BASE}/install-macos.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}${shellPermission}`;
+    return `curl -fsSL ${script("install-macos.sh")} | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}${shellPermission}`;
   }
   if (platform === "freebsd") {
-    return `fetch -qo - ${AGENT_SCRIPT_BASE}/install-freebsd.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}${shellPermission}`;
+    return `fetch -qo - ${script("install-freebsd.sh")} | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}${shellPermission}`;
   }
-  return `curl -fsSL ${AGENT_SCRIPT_BASE}/agent.sh | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}${shellPermission}`;
+  return `curl -fsSL ${script("agent.sh")} | sudo sh -s -- -e ${shellLiteral(origin)} -t ${shellLiteral(install.agent_token)}${shellMirror}${shellPermission}`;
 }
 
 /** Modal that shows the per-platform Agent install command. */

@@ -5,17 +5,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
     CLOCK_CALIBRATION_MAX_AGE, CapturedOutput, CliOptions, ClockCalibration, DiskMetric,
-    GithubReleaseAsset, LatencyResult, LatencyTask, LiveAck, MAX_PENDING_LATENCY_RESULTS,
-    PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES, REMOTE_STREAM_OUTPUT_BYTES,
-    RemoteExecutor, RemoteTaskJournalEntry, RemoteTaskMessage, Report, TaskResultMessage,
-    UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval, advance_deadline,
+    GithubReleaseAsset, LATEST_RELEASE_API, LatencyResult, LatencyTask, LiveAck,
+    MAX_PENDING_LATENCY_RESULTS, PUBLIC_IP_STALE_AFTER, PublicIpValue, REMOTE_RESULT_OUTPUT_BYTES,
+    REMOTE_STREAM_OUTPUT_BYTES, RemoteExecutor, RemoteTaskJournalEntry, RemoteTaskMessage, Report,
+    TaskResultMessage, UPDATE_CHECK_JITTER_MAX_SECONDS, ack_persist_interval, advance_deadline,
     clock_offset_from_http_date, corrected_timestamp, dedupe_disks, download_agent,
     execute_remote_task_with_timeout, gpu_name_from_uevent, is_public_probe_ip, live_endpoint,
-    live_update_payload, monotonic_report_timestamp, normalized_version, parse_lspci_gpu_names,
-    parse_pciconf_gpu_names, parse_probe_target, parse_public_ip, parse_system_profiler_gpu_names,
-    ping_latencies, ping_latency, prune_report_samples, release_asset_sha256, remote_result_text,
-    sanitize_latency_tasks, selected_interface, update_check_jitter, valid_endpoint,
-    version_triplet, wildcard_match, write_remote_task_journal,
+    live_update_payload, mirrored_url, monotonic_report_timestamp, normalized_version,
+    parse_lspci_gpu_names, parse_pciconf_gpu_names, parse_probe_target, parse_public_ip,
+    parse_system_profiler_gpu_names, ping_latencies, ping_latency, prune_report_samples,
+    release_asset_sha256, release_metadata_url, remote_result_text, sanitize_latency_tasks,
+    selected_interface, update_check_jitter, valid_endpoint, version_triplet, wildcard_match,
+    write_remote_task_journal,
 };
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
@@ -1116,6 +1117,40 @@ fn update_check_jitter_is_stable_and_bounded() {
     let first = update_check_jitter("agent-token");
     assert_eq!(first, update_check_jitter("agent-token"));
     assert!(first.as_secs() <= UPDATE_CHECK_JITTER_MAX_SECONDS);
+}
+
+#[test]
+fn every_github_request_can_be_routed_through_the_mirror() {
+    // The release metadata call is the first GitHub request an updating Agent
+    // makes. Leaving it unmirrored would strand a host that cannot reach GitHub
+    // even though a working mirror is configured, so the binding itself — not
+    // just the prefix helper — is asserted here.
+    assert_eq!(
+        release_metadata_url(""),
+        LATEST_RELEASE_API,
+        "without a mirror the URL must be untouched"
+    );
+    assert_eq!(
+        release_metadata_url("https://gh-proxy.com"),
+        format!("https://gh-proxy.com/{LATEST_RELEASE_API}"),
+        "the release metadata lookup must go through the mirror"
+    );
+    // A trailing slash would otherwise double up against the proxied URL.
+    assert_eq!(
+        release_metadata_url("https://gh-proxy.com/"),
+        format!("https://gh-proxy.com/{LATEST_RELEASE_API}")
+    );
+    assert_eq!(
+        release_metadata_url("  https://gh-proxy.com/  "),
+        format!("https://gh-proxy.com/{LATEST_RELEASE_API}")
+    );
+    let asset =
+        "https://github.com/elysia62/NodeFlare/releases/download/v1.2.3/agent-linux-x64-glibc";
+    assert_eq!(
+        mirrored_url("https://gh-proxy.com", asset),
+        format!("https://gh-proxy.com/{asset}"),
+        "the asset download must go through the mirror too"
+    );
 }
 
 /// Serves the body slowly (in chunks with pauses) so a download that needs more

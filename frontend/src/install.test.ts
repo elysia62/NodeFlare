@@ -514,6 +514,18 @@ describe("installer menu", () => {
 });
 
 describe("agent installer manual update", () => {
+  test("every installer script routes its release lookup through the mirror", () => {
+    // Four scripts fetch the release metadata independently. Missing the prefix
+    // in any one of them stalls the install before any download starts, so the
+    // scripts are checked together.
+    for (const path of ["../../agent/agent.sh", "../../agent/install-macos.sh", "../../agent/install-freebsd.sh"]) {
+      const script = readFileSync(new URL(path, import.meta.url), "utf8");
+      expect(script, `${path} must prefix the release API`).toContain('[ -z "$mirror" ] || release_api="$mirror/$release_api"');
+    }
+    const powershell = readFileSync(new URL("../../agent/install.ps1", import.meta.url), "utf8");
+    expect(powershell).toContain('if ($Mirror) { $ReleaseApi = "$Mirror/$ReleaseApi" }');
+  });
+
   test("Linux installation accepts a presence-only remote disable flag", () => {
     const functions = agentShellFunctions("parse_agent_args", "fail", "usage");
     for (const [args, expected] of [
@@ -600,6 +612,83 @@ describe("agent installer manual update", () => {
       update_agent --bad
     `], { encoding: "utf8" });
     expect(rejected.status).toBe(1);
+  });
+
+  test("the Linux installer sends every GitHub request through the mirror", () => {
+    // Run the real install_agent with a stubbed curl and record what it asks
+    // for. Checking the script text alone would not catch a request that never
+    // picks up the prefix, which is exactly the bug this guards against: the
+    // install stalled on the release-metadata call before reaching the mirror.
+    const constants = agentInstaller
+      .split("\n")
+      .filter((line) => /^(SERVICE_NAME|INSTALL_DIR|AGENT_FILE|STATE_ROOT|STATE_DIR|SERVICE_FILE|OPENRC_FILE)=/.test(line))
+      .join("\n");
+    const functions = agentShellFunctions(
+      "log", "fail", "usage", "safe_value", "detect_glibc_version", "glibc_is_supported",
+      "ensure_curl", "cleanup_agent_install", "stop_agent", "verify_agent_started",
+      "ensure_not_agent_service", "explain_exec_failure", "parse_agent_args", "install_agent",
+    );
+    // The installer exits on failure (fail() calls exit), so the recorded URLs
+    // are read from the file afterwards rather than printed by the script.
+    const requestedUrls = (mirror: string[]) => {
+      const log = join(mkdtempSync(join(tmpdir(), "nodeflare-mirror-probe-")), "urls.log");
+      spawnSync("sh", ["-c", `
+      set -eu
+      ${constants}
+      INSTALL_DIR="$PROBE_DIR/opt"
+      AGENT_FILE="$INSTALL_DIR/agent"
+      STATE_ROOT="$PROBE_DIR/etc"
+      STATE_DIR="$STATE_ROOT/agent"
+      SERVICE_FILE="$PROBE_DIR/$SERVICE_NAME.service"
+      ${functions}
+      id() { printf '0'; }
+      uname() { printf 'x86_64'; }
+      command() { case "$1:$2" in -v:curl|-v:sha256sum) return 0 ;; esac; return 1; }
+      detect_init_system() { printf systemd; }
+      ensure_not_agent_service() { return 0; }
+      stop_agent() { return 0; }
+      verify_agent_started() { return 0; }
+      systemctl() { :; }
+      curl() {
+        url=""
+        output=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            -o) output="$2"; shift 2 ;;
+            -H|--max-time) shift 2 ;;
+            -*) shift ;;
+            *) url="$1"; shift ;;
+          esac
+        done
+        printf '%s\\n' "$url" >> "$PROBE_LOG"
+        if [ -n "$output" ]; then printf 'binary' > "$output"; fi
+        if [ "$(wc -l < "$PROBE_LOG")" -le 1 ]; then
+          printf '%s' '{"tag_name":"v9.9.9","assets":[{"name":"agent-linux-x64-glibc","browser_download_url":"https://github.com/elysia62/NodeFlare/releases/download/v9.9.9/agent-linux-x64-glibc","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}]}'
+        fi
+      }
+      sha256sum() { printf '0000000000000000000000000000000000000000000000000000000000000000  -\\n'; }
+      install_agent "$@" || true
+    `, "agent-test", "-e", "https://panel.example.com", "-t", "token", ...mirror], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PROBE_LOG: log,
+          PROBE_DIR: mkdtempSync(join(tmpdir(), "nodeflare-mirror-dir-")),
+        },
+      });
+      return readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
+    };
+
+    const plain = requestedUrls([]);
+    expect(plain).toEqual([
+      "https://api.github.com/repos/elysia62/NodeFlare/releases/latest",
+      "https://github.com/elysia62/NodeFlare/releases/download/v9.9.9/agent-linux-x64-glibc",
+    ]);
+
+    // Every request, metadata included, has to carry the prefix.
+    expect(requestedUrls(["-m", "https://gh-proxy.com"])).toEqual(
+      plain.map((url) => `https://gh-proxy.com/${url}`),
+    );
   });
 });
 

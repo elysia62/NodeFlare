@@ -171,6 +171,15 @@ export function settingPatch(settings: Settings, key: keyof Settings, value: unk
   return { ...settings, [key]: value } as Settings;
 }
 
+/** Prefixes a GitHub URL with the configured mirror, matching what the Agent
+ * installer does for the binary it downloads. Every GitHub request in the
+ * install chain has to go through it: a user who cannot reach GitHub at all
+ * would otherwise stall on the first command that skips it. */
+export function mirroredUrl(mirror: string, url: string) {
+  const prefix = mirror.trim().replace(/\/+$/, "");
+  return prefix ? `${prefix}/${url}` : url;
+}
+
 export function shellLiteral(value: string) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }

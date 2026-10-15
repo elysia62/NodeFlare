@@ -173,7 +173,11 @@ pub(crate) fn download_agent(
     Ok(())
 }
 
-pub(crate) fn mirrored_download_url(mirror: &str, url: &str) -> String {
+/// Prefixes a GitHub URL with the configured mirror. Everything the Agent
+/// fetches from GitHub goes through here, release metadata included: a host
+/// that cannot reach GitHub would otherwise stall on the first request that
+/// skips the mirror.
+pub(crate) fn mirrored_url(mirror: &str, url: &str) -> String {
     let mirror = mirror.trim().trim_end_matches('/');
     if mirror.is_empty() {
         url.to_string()
@@ -182,9 +186,17 @@ pub(crate) fn mirrored_download_url(mirror: &str, url: &str) -> String {
     }
 }
 
+/// The release metadata endpoint, already routed through the mirror. Kept apart
+/// from `update` so the mirror binding is covered by a test: this call is the
+/// first GitHub request an updating Agent makes, and skipping the mirror here
+/// strands hosts that cannot reach GitHub.
+pub(crate) fn release_metadata_url(mirror: &str) -> String {
+    mirrored_url(mirror, LATEST_RELEASE_API)
+}
+
 pub(crate) fn update(agent: &ureq::Agent, mirror: &str) -> Result<bool> {
     let mut response = agent
-        .get(LATEST_RELEASE_API)
+        .get(&release_metadata_url(mirror))
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", format!("nodeflare-agent/{VERSION}"))
         .call()?;
@@ -221,7 +233,7 @@ pub(crate) fn update(agent: &ureq::Agent, mirror: &str) -> Result<bool> {
     };
     download_agent(
         agent,
-        &mirrored_download_url(mirror, &release_asset.browser_download_url),
+        &mirrored_url(mirror, &release_asset.browser_download_url),
         &temporary,
         &release.tag_name,
         &expected_sha256,

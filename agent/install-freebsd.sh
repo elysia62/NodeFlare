@@ -271,6 +271,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 artifact="agent-freebsd-$arch"
 release_api="https://api.github.com/repos/elysia62/NodeFlare/releases/latest"
+# The mirror covers the release metadata too: on a host that cannot reach
+# GitHub the install would otherwise stall here, before any download starts.
+[ -z "$mirror" ] || release_api="$mirror/$release_api"
 log "正在获取 GitHub 最新正式版本（$artifact）"
 release_json=$(download_stdout "$release_api")
 release_tag=$(printf '%s\n' "$release_json" | tr ',' '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)

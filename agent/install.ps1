@@ -227,6 +227,9 @@ if ($LASTEXITCODE -ne 0) { Write-InstallError "无法限制程序目录权限" }
 if ($LASTEXITCODE -ne 0) { Write-InstallError "无法限制 Agent 数据目录权限" }
 $Temporary = "$AgentFile.$PID.download.exe"
 $ReleaseApi = "https://api.github.com/repos/elysia62/NodeFlare/releases/latest"
+# The mirror covers the release metadata too: on a host that cannot reach
+# GitHub the install would otherwise stall here, before any download starts.
+if ($Mirror) { $ReleaseApi = "$Mirror/$ReleaseApi" }
 $Artifact = "agent-windows-x64.exe"
 try {
   Write-Step "正在获取 GitHub 最新正式版本（$Artifact）"
