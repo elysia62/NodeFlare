@@ -1,9 +1,10 @@
 #!/bin/sh
-# Run every check the CI quality job runs, so a push is not the first time the
-# formatting, lint and test steps meet this code.
+# Run every check the CI quality and dependency-security jobs run, so a push is
+# not the first time the formatting, lint, test and audit steps meet this code.
 #
-# Steps that need a service CI provides are skipped with a notice instead of
-# failing: PostgreSQL tests only run when NODEFLARE_TEST_POSTGRES_URL is set.
+# Steps that need a service or tool CI provides are skipped with a notice
+# instead of failing: PostgreSQL tests only run when NODEFLARE_TEST_POSTGRES_URL
+# is set, and the Rust audits only run when cargo-audit is installed.
 set -eu
 
 root_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -32,6 +33,17 @@ step "语法检查（shell）" sh -c '
     sh -n "$script" || exit "$?"
   done
 '
+
+# 依赖审计。CI 单独跑这一项，漏掉它会让「本地全绿」在推送后才暴露新披露的
+# 漏洞，所以这里一并检查。registry 显式指向官方源：本机默认走 npmmirror，
+# 它不提供 audit 接口。cargo-audit 未安装时跳过并提示，不阻塞其它步骤。
+step "审计（web 依赖）" bun audit --registry https://registry.npmjs.org
+if command -v cargo-audit >/dev/null 2>&1; then
+  step "审计（backend）" cargo audit --file backend/Cargo.lock
+  step "审计（agent）" cargo audit --file agent/Cargo.lock
+else
+  printf '\n▶ 审计（Rust 依赖）\n  已跳过：未安装 cargo-audit，可运行 cargo install cargo-audit 后重跑\n'
+fi
 
 # Rust：格式、lint、测试
 for crate in backend agent shared; do
