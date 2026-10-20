@@ -74,7 +74,7 @@ export function ThemesTab({
               <div className="theme-row-actions">
                 {!theme.builtin ? <button type="button" className="secondary-btn compact" disabled={busy} onClick={() => onPreview(theme)}><Eye size={15} />{ui(locale, "预览", "Preview")}</button> : null}
                 <button type="button" className={theme.active ? "theme-active-btn" : "primary-btn compact"} disabled={busy || theme.active} onClick={() => onActivate(theme)}>{theme.active ? <><Check size={15} />{ui(locale, "使用中", "Active")}</> : ui(locale, "启用", "Activate")}</button>
-                {!theme.builtin ? <button type="button" className="icon-btn danger" disabled={busy} title={ui(locale, "删除主题", "Delete theme")} onClick={() => onRemove(theme)}><Trash2 size={15} /></button> : null}
+                {!theme.builtin ? <button type="button" className="icon-btn danger" disabled={busy} title={ui(locale, "删除主题", "Delete theme")} aria-label={ui(locale, "删除主题", "Delete theme")} onClick={() => onRemove(theme)}><Trash2 size={15} /></button> : null}
               </div>
             </article>;
           })}

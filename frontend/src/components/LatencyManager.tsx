@@ -158,7 +158,7 @@ export function LatencyManager({
         <div className="latency-task-name"><strong>{task.name}</strong><small>{task.target}{task.port ? `:${task.port}` : ""}</small></div>
         <span className="latency-task-meta">{task.interval_seconds}s</span>
         <span className="latency-task-meta">{ui(locale, `${task.server_ids.length} 个节点`, `${task.server_ids.length} server(s)`)}</span>
-        <div className="row-actions"><button className="icon-btn" type="button" onClick={() => open(task)} title={ui(locale, "编辑延迟任务", "Edit latency task")}><Pencil size={15} /></button><button className="icon-btn danger" type="button" onClick={() => void remove(task)} title={ui(locale, "删除延迟任务", "Delete latency task")}><Trash2 size={15} /></button></div>
+        <div className="row-actions"><button className="icon-btn" type="button" onClick={() => open(task)} title={ui(locale, "编辑延迟任务", "Edit latency task")} aria-label={ui(locale, "编辑延迟任务", "Edit latency task")}><Pencil size={15} /></button><button className="icon-btn danger" type="button" onClick={() => void remove(task)} title={ui(locale, "删除延迟任务", "Delete latency task")} aria-label={ui(locale, "删除延迟任务", "Delete latency task")}><Trash2 size={15} /></button></div>
       </div>)}
       {!tasks.length && !busy ? <div className="list-empty">{ui(locale, "暂无延迟任务", "No latency tasks")}</div> : null}
       {busy && !tasks.length ? <div className="list-empty">{ui(locale, "正在读取延迟任务", "Loading latency tasks")}</div> : null}

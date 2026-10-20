@@ -102,8 +102,8 @@ export function AlertRuleManager({ locale, servers, onError, onNotice }: {
       {rules.map((rule) => <div className="alert-rule-row" key={rule.id}>
         <Checkbox checked={rule.enabled} onChange={() => void toggle(rule)} ariaLabel={ui(locale, `${rule.name}启用状态`, `${rule.name} enabled state`)} />
         <div><strong>{rule.name}</strong><small>{metricLabels(locale)[rule.metric]} ≥ {rule.threshold} {rule.metric.startsWith("net_") ? "MiB/s" : "%"} · {ui(locale, `${rule.duration_minutes} 分钟`, `${rule.duration_minutes} min`)}{rule.aggregation === "continuous" ? ui(locale, "持续", " continuous") : ui(locale, "平均", " average")} · {rule.all_servers ? ui(locale, "全部服务器", "All servers") : ui(locale, `${rule.server_ids.length} 台服务器`, `${rule.server_ids.length} server(s)`)}</small></div>
-        <button type="button" className="icon-btn" title={ui(locale, "编辑规则", "Edit rule")} onClick={() => open(rule)}><Pencil size={15} /></button>
-        <button type="button" className="icon-btn danger" title={ui(locale, "删除规则", "Delete rule")} onClick={() => void remove(rule)}><Trash2 size={15} /></button>
+        <button type="button" className="icon-btn" title={ui(locale, "编辑规则", "Edit rule")} aria-label={ui(locale, "编辑规则", "Edit rule")} onClick={() => open(rule)}><Pencil size={15} /></button>
+        <button type="button" className="icon-btn danger" title={ui(locale, "删除规则", "Delete rule")} aria-label={ui(locale, "删除规则", "Delete rule")} onClick={() => void remove(rule)}><Trash2 size={15} /></button>
       </div>)}
       {!rules.length ? <div className="list-empty">{ui(locale, "尚未配置资源告警规则", "No resource alert rules yet")}</div> : null}
     </div>

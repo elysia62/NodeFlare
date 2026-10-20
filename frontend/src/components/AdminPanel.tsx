@@ -849,7 +849,7 @@ export function AdminPanel({
       {authenticated ? (error ? <div className="admin-toast error" role="alert" aria-live="assertive"><CircleAlert aria-hidden="true" /><span>{error}</span></div>
         : notice ? <div className="admin-toast" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{notice}</span></div> : null) : null}
       {!authenticated ? <div className="admin-login-stage">
-        <button className="admin-login-theme" type="button" onClick={onToggleTheme} title={dark ? ui(locale, "切换浅色主题", "Switch to light theme") : ui(locale, "切换深色主题", "Switch to dark theme")}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
+        <button className="admin-login-theme" type="button" onClick={onToggleTheme} title={dark ? ui(locale, "切换浅色主题", "Switch to light theme") : ui(locale, "切换深色主题", "Switch to dark theme")} aria-label={dark ? ui(locale, "切换浅色主题", "Switch to light theme") : ui(locale, "切换深色主题", "Switch to dark theme")}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
         <LoginForm
           config={config}
           dark={dark}
@@ -865,6 +865,7 @@ export function AdminPanel({
           <div className="login-copy"><h1>{ui(locale, "管理员登录", "Admin sign in")}</h1><p>{config.site_name}</p></div>
         </LoginForm>
       </div> : <section className="admin-shell" aria-label={ui(locale, "管理面板", "Admin panel")}>
+        <a className="skip-link" href="#admin-main">{ui(locale, "跳到主内容", "Skip to main content")}</a>
         <header className="admin-topbar">
           <div className="admin-brand">
             <SiteLogo src={siteLogoUrl} alt="" width="36" height="36" />
@@ -890,7 +891,7 @@ export function AdminPanel({
                 })}
               </nav>
             </aside>
-            <div className="admin-content">
+            <main className="admin-content" id="admin-main" tabIndex={-1}>
               <header className="admin-content-header"><h1>{pages[tab].title}</h1><p>{pages[tab].description}</p></header>
               {tab === "servers" ? (
                 <ServersTab
@@ -997,7 +998,7 @@ export function AdminPanel({
               ) : tab === "about" ? (
                 <AboutTab locale={locale} />
               ) : null}
-            </div>
+            </main>
           </div>
       </section>}
 
