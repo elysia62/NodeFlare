@@ -354,7 +354,8 @@ fn install_archive_blocking(theme_dir: &Path, id: &str, archive: Vec<u8>) -> Res
         let mut seen = HashSet::new();
         for index in 0..zip.len() {
             let mut entry = zip.by_index(index)?;
-            if entry.name().contains('\\') || entry.name().contains('\0') {
+            let entry_name = entry.name()?;
+            if entry_name.contains('\\') || entry_name.contains('\0') {
                 anyhow::bail!("主题 ZIP 包含非法路径");
             }
             let relative = entry.enclosed_name().context("主题 ZIP 包含越界路径")?;

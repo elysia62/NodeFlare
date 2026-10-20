@@ -23,9 +23,9 @@
     "test:visual:update": "playwright test visual --update-snapshots"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.0",
+    "@playwright/test": "^1.64.1",
     "@types/node": "^26.6.5",
-    "playwright": "^1.64.0",
+    "playwright": "^1.64.1",
     "ws": "^8.22.0"
   }
 }

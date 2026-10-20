@@ -484,7 +484,7 @@ fn validate_archive<R: Read + Seek>(
         if entry.is_dir() || !expected.contains(&name) || !seen.insert(name) {
             bail!("备份 ZIP 文件结构无效");
         }
-        if entry.name().starts_with("themes/") && entry.size() > THEME_BACKUP_FILE_MAX_BYTES {
+        if entry.name()?.starts_with("themes/") && entry.size() > THEME_BACKUP_FILE_MAX_BYTES {
             bail!("主题备份文件超过 32 MiB");
         }
         extracted_bytes = extracted_bytes

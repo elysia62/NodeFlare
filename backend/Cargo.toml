@@ -39,7 +39,7 @@ data-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
 url = "2.5"
 ipnet = { version = "2", features = ["serde"] }
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 tempfile = "3"
 
 [profile.release]
