@@ -249,7 +249,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const sync = () => {
       window.clearInterval(timer);
       timer = undefined;
-      nodeObservation.current.setAvailable(!document.hidden && navigator.onLine !== false);
+      // available 只反映网络可达性，不再混入页面可见性：标签页隐藏不代表节点
+      // 掉线，卡片应保持切走前的状态，由快照新鲜度决定切回后是否直接恢复。
+      nodeObservation.current.setAvailable(navigator.onLine !== false);
       refreshObservation();
       if (document.hidden || navigator.onLine === false) {
         livePlayback.current.clear();

@@ -41,6 +41,34 @@ describe("dashboard status observation", () => {
     expect(observation.status(node(100), 180, 285_000)).toBe("offline");
   });
 
+  test("hiding the tab keeps the last confirmed state instead of flashing pending", () => {
+    // 方案 B：标签页隐藏 ≠ 节点掉线。AppProvider 在 visibilitychange 时只断开
+    // WS（setConnected(false)），network availability 保持 true。因此卡片在
+    // 隐藏期间不应被标记为 pending——那是导致 Brave 切回时闪「待刷新」的根因。
+    const observation = createNodeObservation();
+    observation.acceptSnapshot(observation.beginSnapshot(100_000));
+    observation.setConnected(true, 100_500);
+    observation.observe(["node-1"]);
+    expect(observation.status(node(100), 180, 101_000)).toBe("online");
+
+    // 隐藏：只断 WS，available 保持 true（与 AppProvider 的新行为一致）。
+    observation.setConnected(false);
+    // 隐藏期间任意时刻、任意时长，只要快照仍新鲜，状态就保持切走前的 online。
+    expect(observation.status(node(100), 180, 105_000)).toBe("online");
+    expect(observation.status(node(100), 180, 125_000)).toBe("online");
+    // 隐藏期间 WS 一直断开，超过快照宽限期（30s）后仍不谎报，转为 pending。
+    expect(observation.status(node(100), 180, 131_000)).toBe("pending");
+
+    // 切回：WS 重连但尚无上报，快照若仍新鲜则立即恢复，不闪 pending。
+    const o2 = createNodeObservation();
+    o2.acceptSnapshot(o2.beginSnapshot(200_000));
+    o2.setConnected(true, 200_500);
+    o2.observe(["node-1"]);
+    o2.setConnected(false);            // 隐藏
+    o2.setConnected(true, 205_000);    // 5s 后切回，WS 重连，尚无新快照/上报
+    expect(o2.status(node(200), 180, 205_100)).toBe("online");
+  });
+
   test("an absence longer than the snapshot grace period still waits for fresh data", () => {
     const observation = createNodeObservation();
     observation.acceptSnapshot(observation.beginSnapshot(100_000));
