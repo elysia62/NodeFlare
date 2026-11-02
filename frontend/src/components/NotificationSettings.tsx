@@ -8,6 +8,7 @@ import { WEBHOOK_PRESETS, WEBHOOK_PREVIEW_VALUES, renderWebhookBody } from "../w
 import { AlertRuleManager } from "./AlertRuleManager";
 import { PasswordInput } from "./PasswordInput";
 import { Select } from "./admin/Select";
+import { trafficTimezones } from "./admin/shared";
 
 const emptySaved: SavedNotificationChannels = { telegram: null, webhooks: [] };
 
@@ -87,6 +88,7 @@ export function NotificationSettings({ locale, settings, servers, updateSettings
       if (failures.length) throw new Error(`${ui(locale, "通知设置未全部保存，请重试。", "Notification settings were not fully saved; retry.")} ${failures.join("；")}`);
       const result = await api.saveSettings({
         notification_enabled: channels.length > 0,
+        notification_timezone: settings.notification_timezone,
         offline_alert_minutes: settings.offline_alert_minutes,
         expiry_alert_days: settings.expiry_alert_days,
         traffic_alert_percentage: settings.traffic_alert_percentage,
@@ -117,14 +119,20 @@ export function NotificationSettings({ locale, settings, servers, updateSettings
       <div className="section-title"><Bell size={15} />{ui(locale, "通知", "Notifications")}</div>
       {loading ? <p className="settings-hint" role="status">{ui(locale, "正在读取通知配置…", "Loading notification settings…")}</p> : !saved ? <button type="button" className="secondary-btn" onClick={() => setReload((value) => value + 1)}><RotateCw size={15} />{ui(locale, "重新读取通知配置", "Reload notification settings")}</button> : null}
       <fieldset className="notification-form-fields" disabled={locked}>
-        <Select multiple label={ui(locale, "启用通知渠道", "Enabled notification channels")}
-          value={channels} onChange={(value) => setDraft((current) => ({ ...current, channels: value as NotificationChannel[] }))}
-          placeholder={ui(locale, "未启用通知渠道", "No notification channels enabled")} disabled={locked}
-          options={NOTIFICATION_CHANNELS.map((channel) => ({
-            value: channel, label: channelName(channel, locale),
-            description: (channel === "telegram" ? saved?.telegram : saved?.webhooks.some((item) => item.preset === channel))
-              ? ui(locale, "已配置", "Configured") : ui(locale, "未配置", "Not configured"),
-          }))} />
+        <div className="notification-channel-row">
+          <Select multiple label={ui(locale, "启用通知渠道", "Enabled notification channels")}
+            value={channels} onChange={(value) => setDraft((current) => ({ ...current, channels: value as NotificationChannel[] }))}
+            placeholder={ui(locale, "未启用通知渠道", "No notification channels enabled")} disabled={locked}
+            options={NOTIFICATION_CHANNELS.map((channel) => ({
+              value: channel, label: channelName(channel, locale),
+              description: (channel === "telegram" ? saved?.telegram : saved?.webhooks.some((item) => item.preset === channel))
+                ? ui(locale, "已配置", "Configured") : ui(locale, "未配置", "Not configured"),
+            }))} />
+          <Select label={ui(locale, "通知时区", "Notification timezone")}
+            value={settings.notification_timezone} disabled={locked}
+            onChange={(value) => updateSettings("notification_timezone", value)}
+            options={trafficTimezones(locale, settings.notification_timezone)} />
+        </div>
         <div className="form-grid three">
           <label><span>{ui(locale, "离线告警延迟（分钟）", "Offline alert delay (min)")}</span><input type="number" required min="2" max="1440" value={settings.offline_alert_minutes} onChange={(event) => updateSettings("offline_alert_minutes", Number(event.target.value))} /></label>
           <label><span>{ui(locale, "到期提醒（天）", "Expiry reminder (days)")}</span><input type="number" required min="0" max="365" value={settings.expiry_alert_days} onChange={(event) => updateSettings("expiry_alert_days", Number(event.target.value))} /></label>

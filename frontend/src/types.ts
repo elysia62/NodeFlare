@@ -287,6 +287,7 @@ export interface Settings extends Omit<Config, "password_client_salt"> {
   current_totp_code?: string;
   turnstile_secret_key: string;
   notification_enabled: boolean;
+  notification_timezone: string;
   offline_alert_minutes: number;
   expiry_alert_days: number;
   traffic_alert_percentage: number;

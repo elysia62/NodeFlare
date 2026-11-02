@@ -275,6 +275,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!configReady || access !== "ok" || demoMode) return;
     let active = true;
+    // 新订阅从"未连接"开始。上一个订阅是主动切换（静默关闭）时不会上报 false，
+    // 若这里不先复位，liveConnected 会一直停在 true：既压制 bootstrap 轮询
+    // （shouldSyncBootstrap 会在 5 分钟内跳过），又让界面假装连接正常。
+    // 只复位调用方的视图状态，不清理 nodeObservation 的在线证据。
+    liveConnectedRef.current = false;
+    setLiveConnected(false);
     const disconnect = connectLive({ serverId: selectedId }, {
       onBatch: (updates) => {
         livePlayback.current.enqueue(updates, serversRef.current);
@@ -311,6 +317,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+
+  // 从详情页回到看板时补一次快照。详情页的 WS 只订阅单节点，
+  // 看板快照可能已超过 30s 宽限期；不补的话所有卡片会闪"待刷新"。
+  // 统一放在 selectedId 变化处，goHome()、浏览器后退、直接改 URL 都能覆盖。
+  const previousSelectedRef = useRef<string | null>(routeServerId());
+  useEffect(() => {
+    const wasDetail = previousSelectedRef.current !== null;
+    previousSelectedRef.current = selectedId;
+    if (wasDetail && selectedId === null && access === "ok" && !demoMode) {
+      void reload(true);
+    }
+  }, [access, reload, selectedId]);
 
   // Merge live metrics into servers with identity preservation: a server's object
   // only changes when its own data changes, and the array itself

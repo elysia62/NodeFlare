@@ -227,4 +227,59 @@ describe("live connection lifecycle", () => {
       expect(h.batches).toEqual([]);
     } finally { h.restore(); }
   });
+
+  test("disposing for a route change does not report the stream as disconnected", () => {
+    // 点卡片跳转 / 返回看板会重建订阅。这不是连接失败：
+    // 若仍上报 false，AppProvider 会清空在线证据，返回时全部闪"待刷新"。
+    const h = transportHarness();
+    try {
+      h.sockets[0].open();
+      h.sockets[0].receive("pong");
+      expect(h.connections).toEqual([true]);
+      h.dispose();
+      expect(h.connections).toEqual([true]);
+      expect(h.sockets[0].readyState).toBe(FakeSocket.CLOSED);
+      expect(h.timers.size).toBe(0);
+    } finally { h.restore(); }
+  });
+
+  test("a real socket failure still reports disconnection", () => {
+    // 与上面的主动切换相对：真正的断线必须照常上报，否则离线节点永远不会变灰。
+    const h = transportHarness();
+    try {
+      h.sockets[0].open();
+      h.sockets[0].receive("pong");
+      h.sockets[0].close();
+      expect(h.connections).toEqual([true, false]);
+    } finally { h.restore(); }
+  });
+
+  test("a replacement subscription never inherits the previous one's connected state", () => {
+    // 主动切换后新订阅若连不上，不能因为"没人上报 false"就让调用方一直以为还在线：
+    // 那会把 bootstrap 轮询压制到 5 分钟一次，界面也不再显示断开。
+    for (const label of ["replacement fails to connect", "replacement opens normally"]) {
+      const first = transportHarness();
+      try {
+        first.sockets[0].open();
+        first.sockets[0].receive("pong");
+        expect(first.connections, label).toEqual([true]);
+        first.dispose();
+        expect(first.connections, label).toEqual([true]);
+
+        // 调用方在新 useEffect 里会显式复位，这里验证复位后的语义。
+        const second = transportHarness();
+        try {
+          expect(second.connections, label).toEqual([]);
+          if (label === "replacement opens normally") {
+            second.sockets[0].open();
+            expect(second.connections, label).toEqual([true]);
+          } else {
+            // 连接一直没建立：调用方保持"未连接"，轮询照常接管。
+            second.advance(9_000);
+            expect(second.connections, label).toEqual([]);
+          }
+        } finally { second.restore(); }
+      } finally { first.restore(); }
+    }
+  });
 });

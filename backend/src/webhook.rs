@@ -52,10 +52,8 @@ fn request_headers(input: &str) -> Result<HeaderMap> {
     Ok(headers)
 }
 
-pub fn render(template: &str, message: &Message<'_>) -> Result<String> {
-    let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
-        .format("%Y-%m-%d %H:%M:%S UTC")
-        .to_string();
+pub fn render(template: &str, message: &Message<'_>, tz: &str) -> Result<String> {
+    let time = crate::notify::format_notification_time(tz);
     let mut remaining = template;
     let mut output = String::with_capacity(template.len());
     while let Some(start) = remaining.find("{{") {
@@ -117,6 +115,7 @@ pub fn validate(settings: &WebhookSettingsInput) -> Result<()> {
             event: "test",
             site: "NodeFlare \"站点\"",
         },
+        crate::db::DEFAULT_NOTIFICATION_TIMEZONE,
     )?;
     Ok(())
 }
@@ -125,13 +124,14 @@ pub async fn send(
     client: &reqwest::Client,
     settings: &WebhookSettingsInput,
     message: &Message<'_>,
+    tz: &str,
 ) -> Result<()> {
     validate(settings)?;
     let mut response = client
         .post(&settings.url)
         .timeout(Duration::from_secs(10))
         .headers(request_headers(&settings.headers)?)
-        .body(render(&settings.body, message)?)
+        .body(render(&settings.body, message, tz)?)
         .send()
         .await
         .map_err(reqwest::Error::without_url)?;
@@ -206,16 +206,16 @@ mod tests {
             event: "offline",
             site: "站点",
         };
-        let body = render(DEFAULT_BODY, &message).unwrap();
+        let body = render(DEFAULT_BODY, &message, "Asia/Shanghai").unwrap();
         let value: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(value["title"], message.title);
         assert_eq!(value["node"], message.node);
         assert_eq!(value["message"], message.message);
         assert_eq!(value["event"], "offline");
         assert_eq!(value["site"], message.site);
-        assert!(render(r#"{"message":{{message}}}"#, &message).is_err());
+        assert!(render(r#"{"message":{{message}}}"#, &message, "Asia/Shanghai").is_err());
         assert_eq!(
-            render(r#"{"unknown":"{{unknown}}"}"#, &message).unwrap(),
+            render(r#"{"unknown":"{{unknown}}"}"#, &message, "Asia/Shanghai").unwrap(),
             r#"{"unknown":"{{unknown}}"}"#
         );
     }
@@ -319,7 +319,7 @@ mod tests {
         };
         // Keep local fixtures independent of the machine's HTTP_PROXY settings.
         let http = client_builder().no_proxy().build().unwrap();
-        let success = send(&http, &settings, &message).await;
+        let success = send(&http, &settings, &message, "Asia/Shanghai").await;
         let rejection = send(
             &http,
             &settings,
@@ -327,10 +327,11 @@ mod tests {
                 message: "reject",
                 ..message
             },
+            "Asia/Shanghai",
         )
         .await;
         settings.url = format!("http://{address}/redirect");
-        let redirect = send(&http, &settings, &message).await;
+        let redirect = send(&http, &settings, &message, "Asia/Shanghai").await;
         task.abort();
         success.unwrap();
         assert!(rejection.unwrap_err().to_string().contains("code=400"));

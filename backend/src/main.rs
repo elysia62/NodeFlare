@@ -408,15 +408,16 @@ fn spawn_notifications(state: Arc<AppState>) {
             let Ok(_activity) = state.database_activity.write() else {
                 continue;
             };
-            match db::load_settings(&state.db).await {
+            let settings = match db::load_settings(&state.db).await {
                 Ok(settings) if !settings.notification_enabled => continue,
+                Ok(settings) => settings,
                 Err(error) => {
                     tracing::error!(%error, "notification settings load failed");
                     continue;
                 }
-                Ok(_) => {}
-            }
-            match notify::deliver_next(&state.db, &state.http, &state.webhook_http).await {
+            };
+            match notify::deliver_next(&state.db, &settings, &state.http, &state.webhook_http).await
+            {
                 Ok(true) => state.notification_wake.notify_one(),
                 Ok(false) => {}
                 Err(error) => tracing::error!(%error, "notification delivery failed"),

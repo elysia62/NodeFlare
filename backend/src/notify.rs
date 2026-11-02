@@ -6,15 +6,17 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 pub async fn test_telegram(db: &Database, client: &reqwest::Client) -> Result<()> {
-    let settings = queries::raw_telegram_settings(db)
+    let telegram = queries::raw_telegram_settings(db)
         .await?
         .context("尚未配置 Telegram")?;
+    let global = db::load_settings(db).await?;
     send_telegram(
-        &settings,
+        &telegram,
         client,
         "NodeFlare 测试通知",
         "NodeFlare",
         "Telegram 通知配置有效。",
+        &global.notification_timezone,
     )
     .await
 }
@@ -24,10 +26,11 @@ pub async fn test_webhook(
     client: &reqwest::Client,
     preset: WebhookPreset,
 ) -> Result<()> {
+    // settings 指 webhook 自身配置，global 是站点级设置（站点名、通知时区）。
     let settings = queries::raw_webhook_settings(db, preset)
         .await?
         .context("尚未配置 Webhook")?;
-    let site = db::load_settings(db).await?.site_name;
+    let global = db::load_settings(db).await?;
     crate::webhook::send(
         client,
         &settings,
@@ -36,8 +39,9 @@ pub async fn test_webhook(
             node: "NodeFlare",
             message: "Webhook 通知配置有效。",
             event: "test",
-            site: &site,
+            site: &global.site_name,
         },
+        &global.notification_timezone,
     )
     .await
 }
@@ -253,6 +257,7 @@ fn traffic_milestones(start: i64) -> Vec<i64> {
 
 pub async fn deliver_next(
     db: &Database,
+    settings: &Settings,
     client: &reqwest::Client,
     webhook_client: &reqwest::Client,
 ) -> Result<bool> {
@@ -274,11 +279,14 @@ pub async fn deliver_next(
     if channels.is_empty() {
         return Ok(false);
     }
-    let site = db::load_settings(db).await?.site_name;
+    let site = settings.site_name.as_str();
+    let tz = settings.notification_timezone.as_str();
     deliver_next_with(db, |notification| async move {
         let telegram = telegram.as_ref();
         let webhooks = &webhooks;
-        let site = &site;
+        // 闭包每次投递都会调用，显式复制这些借用以免被移动。
+        let site = site;
+        let tz = tz;
         let notification = &notification;
         deliver_channels_with(db, &notification.id, &channels, |channel| async move {
             match channel {
@@ -289,6 +297,7 @@ pub async fn deliver_next(
                         &notification.title,
                         &notification.server_name,
                         &notification.message,
+                        tz,
                     )
                     .await
                 }
@@ -303,6 +312,7 @@ pub async fn deliver_next(
                             event: notification_event(&notification.title),
                             site,
                         },
+                        tz,
                     )
                     .await
                 }
@@ -383,9 +393,10 @@ async fn send_telegram(
     title: &str,
     server: &str,
     message: &str,
+    tz: &str,
 ) -> Result<()> {
     validate_settings(settings)?;
-    let text = render(&settings.template, title, server, message);
+    let text = render(&settings.template, title, server, message, tz);
     let mut payload = serde_json::json!({
         "chat_id": settings.chat_id,
         "text": text,
@@ -454,10 +465,21 @@ fn validate_settings(settings: &TelegramSettingsView) -> Result<()> {
     Ok(())
 }
 
-fn render(template: &str, title: &str, server: &str, message: &str) -> String {
-    let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
-        .format("%Y-%m-%d %H:%M:%S UTC")
-        .to_string();
+/// 用配置的时区格式化通知时间，输出 "2026-10-30 22:15:00"。
+/// 默认北京时间，非法时区回退到默认，避免通知因格式化失败而发不出去。
+pub(crate) fn format_notification_time(tz: &str) -> String {
+    let zone = tz
+        .trim()
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::Asia::Shanghai);
+    chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .with_timezone(&zone)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+fn render(template: &str, title: &str, server: &str, message: &str, tz: &str) -> String {
+    let time = format_notification_time(tz);
     template
         .replace("{{title}}", title)
         .replace("{{server}}", server)
@@ -467,6 +489,44 @@ fn render(template: &str, title: &str, server: &str, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::format_notification_time;
+
+    #[test]
+    fn notification_time_uses_configured_timezone() {
+        // 格式为 "YYYY-MM-DD HH:MM:SS"，不带时区后缀。
+        for tz in ["Asia/Shanghai", "UTC", "America/New_York"] {
+            let text = format_notification_time(tz);
+            assert_eq!(text.len(), 19, "{tz}: {text}");
+            assert_eq!(&text[4..5], "-");
+            assert_eq!(&text[10..11], " ");
+            assert_eq!(&text[13..14], ":");
+        }
+    }
+
+    #[test]
+    fn invalid_notification_timezone_falls_back_without_panicking() {
+        let text = format_notification_time("Not/AZone");
+        assert_eq!(text.len(), 19);
+        let empty = format_notification_time("");
+        assert_eq!(empty.len(), 19);
+    }
+
+    #[test]
+    fn shanghai_is_eight_hours_ahead_of_utc() {
+        // 确保不只是改了格式：同一时刻在不同时区下的小时必须真的不同。
+        let ts = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let utc = chrono::DateTime::<chrono::Utc>::from(ts);
+        let sh = utc.with_timezone(&chrono_tz::Asia::Shanghai);
+        assert_eq!(
+            utc.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2023-11-14 22:13:20"
+        );
+        assert_eq!(
+            sh.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2023-11-15 06:13:20"
+        );
+    }
+
     #[tokio::test]
     async fn enabled_services_receive_the_same_event_and_only_failures_are_retried() {
         use axum::{
@@ -547,7 +607,12 @@ mod tests {
             .unwrap()
             .unwrap();
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
-        assert!(!super::deliver_next(&db, &http, &http).await.unwrap());
+        let settings = crate::db::load_settings(&db).await.unwrap();
+        assert!(
+            !super::deliver_next(&db, &settings, &http, &http)
+                .await
+                .unwrap()
+        );
         assert_eq!(
             crate::db::queries::delivered_notification_channels(&db, &pending.id)
                 .await
@@ -558,7 +623,11 @@ mod tests {
             .execute(db.pool())
             .await
             .unwrap();
-        assert!(super::deliver_next(&db, &http, &http).await.unwrap());
+        assert!(
+            super::deliver_next(&db, &settings, &http, &http)
+                .await
+                .unwrap()
+        );
         assert!(
             crate::db::queries::next_notification(&db)
                 .await

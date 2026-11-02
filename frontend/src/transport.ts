@@ -99,7 +99,9 @@ export function connectLive(
     deadlineTimer = null;
   };
 
-  const closeCurrentSocket = (retry = false) => {
+  // silent: 主动切换订阅（如路由跳转）时静默关闭，不把连接标为"断开"。
+  // 这不是连接失败，保留已观察到的在线证据，避免返回看板时全部闪"待刷新"。
+  const closeCurrentSocket = (retry = false, silent = false) => {
     const current = socket;
     socket = null;
     if (openedAt !== null && Date.now() - openedAt >= STABLE_CONNECTION_MS) reconnectAttempt = 0;
@@ -114,7 +116,7 @@ export function connectLive(
       current.onmessage = null;
       try { if (current.readyState < WebSocket.CLOSING) current.close(); } catch {}
     }
-    setConnected(false);
+    if (!silent) setConnected(false);
     if (retry) scheduleReconnect();
   };
 
@@ -211,6 +213,7 @@ export function connectLive(
     window.removeEventListener("online", updateSuspension);
     window.removeEventListener("offline", updateSuspension);
     clearReconnect();
-    closeCurrentSocket();
+    // 主动切换订阅：静默关闭，保留在线证据（连接状态由新订阅接管）。
+    closeCurrentSocket(false, true);
   };
 }

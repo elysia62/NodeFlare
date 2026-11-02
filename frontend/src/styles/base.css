@@ -11,7 +11,8 @@
   --primary: #0f766e;
   --primary-foreground: #fff;
   --muted: #e7ecee;
-  --muted-foreground: #59666f;
+  /* 次要文字还要穿过半透明卡片和背景图；比纯色底 AA 再多留一些余量。 */
+  --muted-foreground: #46545e;
   --border: rgb(83 104 116 / 0.18);
   /* 文本语义色保证浅色底 4.5:1 对比；*-bar 供进度条/圆点/图表等图形使用 */
   --success: #047a52;
@@ -55,7 +56,7 @@
   --primary: #39c79a;
   --primary-foreground: #07130f;
   --muted: #22282a;
-  --muted-foreground: #9fa9a7;
+  --muted-foreground: #b2bab8;
   --border: rgb(218 234 230 / 0.12);
   --success: #38c895;
   --warning: #f0ad3d;

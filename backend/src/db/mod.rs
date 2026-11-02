@@ -17,6 +17,8 @@ use std::time::Duration;
 
 pub const SECRET_MASK: &str = "********";
 const PASSWORD_SCHEME: &str = "argon2-client-pbkdf2-v1";
+/// 通知时间默认使用北京时间（UTC+8），与大多数国内用户的阅读习惯一致。
+pub const DEFAULT_NOTIFICATION_TIMEZONE: &str = "Asia/Shanghai";
 const SESSION_ACTIVITY_WRITE_INTERVAL_SECONDS: i64 = 60;
 
 pub(super) static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
@@ -272,6 +274,7 @@ pub struct Settings {
     pub turnstile_site_key: String,
     pub turnstile_secret_key: String,
     pub notification_enabled: bool,
+    pub notification_timezone: String,
     pub offline_alert_minutes: i64,
     pub expiry_alert_days: i64,
     pub traffic_alert_percentage: i64,
@@ -329,6 +332,7 @@ impl Settings {
             admin_password_configured: !self.admin_password_hash.is_empty(),
             turnstile_secret_key: mask_secret(&self.turnstile_secret_key),
             notification_enabled: self.notification_enabled,
+            notification_timezone: self.notification_timezone.clone(),
             offline_alert_minutes: self.offline_alert_minutes,
             expiry_alert_days: self.expiry_alert_days,
             traffic_alert_percentage: self.traffic_alert_percentage,
@@ -483,6 +487,7 @@ pub async fn initialize(pool: &Database, config: &Config) -> Result<()> {
             config.turnstile_secret_key.trim().to_string(),
         ),
         ("notification_enabled", "false".to_string()),
+        ("notification_timezone", "Asia/Shanghai".to_string()),
         ("offline_alert_minutes", "5".to_string()),
         ("expiry_alert_days", "7".to_string()),
         ("traffic_alert_percentage", "80".to_string()),
@@ -585,6 +590,7 @@ pub async fn load_settings(pool: &Database) -> Result<Settings> {
         turnstile_site_key: string(&values, "turnstile_site_key", ""),
         turnstile_secret_key: string(&values, "turnstile_secret_key", ""),
         notification_enabled: boolean(&values, "notification_enabled", false),
+        notification_timezone: timezone(&values, "notification_timezone"),
         offline_alert_minutes: integer(&values, "offline_alert_minutes", 5).clamp(2, 1440),
         expiry_alert_days: integer(&values, "expiry_alert_days", 7).clamp(0, 365),
         traffic_alert_percentage: integer(&values, "traffic_alert_percentage", 80).clamp(50, 100),
@@ -665,6 +671,12 @@ pub async fn update_settings(
         updates.push(("turnstile_secret_key", value.trim().to_string()));
     }
     boolean!(notification_enabled, "notification_enabled");
+    if let Some(value) = input.notification_timezone.as_deref() {
+        let trimmed = value.trim();
+        if trimmed.parse::<chrono_tz::Tz>().is_ok() {
+            updates.push(("notification_timezone", trimmed.to_string()));
+        }
+    }
     if let Some(value) = input.offline_alert_minutes {
         updates.push(("offline_alert_minutes", value.clamp(2, 1440).to_string()));
     }
@@ -896,6 +908,15 @@ fn string(values: &HashMap<String, String>, key: &str, fallback: &str) -> String
         .get(key)
         .cloned()
         .unwrap_or_else(|| fallback.to_string())
+}
+
+/// 通知时间使用的 IANA 时区。非法值回退到默认（北京时间），保证通知时间始终可格式化。
+fn timezone(values: &HashMap<String, String>, key: &str) -> String {
+    values
+        .get(key)
+        .filter(|value| value.parse::<chrono_tz::Tz>().is_ok())
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_NOTIFICATION_TIMEZONE.to_string())
 }
 
 fn integer(values: &HashMap<String, String>, key: &str, fallback: i64) -> i64 {

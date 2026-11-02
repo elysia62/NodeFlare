@@ -330,6 +330,9 @@
 
 .notification-settings { display: grid; gap: 15px; border-top: 1px solid var(--admin-border); padding-top: 18px; }
 .notification-form-fields { display: grid; min-width: 0; gap: 17px; margin: 0; border: 0; padding: 0; }
+/* 渠道选择与时区并排；窄屏退回单列，避免选择器被压扁。 */
+.notification-channel-row { display: grid; min-width: 0; gap: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+@media (max-width: 640px) { .notification-channel-row { grid-template-columns: minmax(0, 1fr); } }
 .notification-rules .alert-rule-manager { margin: 0; border-top: 0; padding-top: 0; }
 .notification-settings-header { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 14px; }
 .notification-settings-header h3 { margin: 0; color: var(--admin-text); font-size: 15px; }

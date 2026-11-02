@@ -92,3 +92,45 @@ test.describe("切标签页（真实数据）", () => {
     expect(await card.isVisible()).toBe(true);
   });
 });
+
+test.describe("卡片跳转后返回看板（真实数据）", () => {
+  test.skip(({ browserName }) => browserName !== "chromium", "仅在 chromium 下运行");
+
+  /**
+   * 详情页的 WS 只订阅单节点，看板快照可能因此超过 30s 宽限期。
+   * 过去返回时会清空在线证据且不补快照，导致所有卡片闪"待刷新"。
+   * 这里用 route 让快照时间戳保持新鲜，模拟 agent 持续上报。
+   */
+  test("停留超过快照宽限期后返回仍保持在线", async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.route("**/api/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      if (!Array.isArray(body?.servers) || body.servers.length === 0) {
+        await route.fulfill({ response });
+        return;
+      }
+      const now = Math.floor(Date.now() / 1000);
+      for (const server of body.servers) server.timestamp = now;
+      await route.fulfill({ response, json: body });
+    });
+
+    const dash = new Dashboard(page);
+    await dash.open({ path: `${BASE}/` });
+    await dash.settle();
+    const label = ((await dash.cards.first().getAttribute("aria-label")) ?? "").split("，")[0];
+    await expect(dash.card(label)).toHaveClass(/online/);
+
+    await dash.cards.first().click();
+    await expect(page).toHaveURL(/\/instance\//);
+
+    // 超过 SNAPSHOT_MAX_AGE_MS（= 2 × 15s）
+    await page.waitForTimeout(35_000);
+
+    await page.goBack();
+    const card = dash.card(label);
+    await expect(card).toBeVisible();
+    await expect(card, "返回后不应闪待刷新").not.toHaveClass(/pending/);
+    await expect(card).toHaveClass(/online/);
+  });
+});
