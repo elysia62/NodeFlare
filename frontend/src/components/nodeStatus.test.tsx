@@ -13,14 +13,18 @@ test("a pending card does not render a false offline overlay for an old timestam
   const markup = renderToStaticMarkup(<NodeCard server={server} status="pending" config={config} liveConnected={false} onOpen={() => {}} />);
   expect(markup).toContain("待刷新");
   expect(markup).toContain('class="status-dot pending"');
-  expect(markup).not.toContain("node-offline-overlay");
+  expect(markup).not.toContain("node-offline-note");
   expect(markup).not.toContain("离线");
 });
 
-test("confirmed offline cards still display the outage overlay", () => {
+test("confirmed offline cards mark the outage and show when the node was last seen", () => {
+  // 离线不再用模糊遮罩盖住数值（模糊下数值仍可辨读），改为底部一行
+  // 明确写出"离线 + 最后在线多久之前"，让过期程度一眼可见。
   const markup = renderToStaticMarkup(<NodeCard server={server} status="offline" config={config} liveConnected onOpen={() => {}} />);
-  expect(markup).toContain("node-offline-overlay");
+  expect(markup).toContain("node-offline-note");
   expect(markup).toContain("离线");
+  expect(markup).toContain("最后在线");
+  expect(markup).not.toContain("node-offline-overlay");
 });
 
 test("overview distinguishes pending nodes and traffic from zero online nodes", () => {

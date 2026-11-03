@@ -64,6 +64,20 @@ pub async fn list_servers(db: &Database, include_hidden: bool) -> Result<Vec<Ser
     list_servers_with_live(db, include_hidden, &HashMap::new()).await
 }
 
+/// 站点设置里 `offline_threshold_seconds` 的默认值，与 `load_settings` 保持一致。
+const DEFAULT_OFFLINE_THRESHOLD_SECONDS: i64 = 180;
+
+/// 单个节点判定离线所需的静默时长。
+///
+/// 固定窗口在上报间隔较长的节点上会误判（例如 60 秒一报、窗口 30 秒，
+/// 每次正常间隔都会短暂显示离线），所以取「站点下限」与「3 个上报周期」
+/// 的较大者：既保留了站点级的兜底，又让窗口随节点节奏自适应。
+fn offline_after_seconds(report_interval: i64, site_threshold: i64) -> i64 {
+    let interval = report_interval.clamp(15, 3600);
+    let adaptive = interval.saturating_mul(3);
+    site_threshold.clamp(30, 3600).max(adaptive).min(3600)
+}
+
 pub async fn list_servers_with_live(
     db: &Database,
     include_hidden: bool,
@@ -75,7 +89,8 @@ pub async fn list_servers_with_live(
          s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, s.reset_timezone, \
          s.report_interval, s.collect_interval, s.rx_correction, s.tx_correction, \
          s.agent_mirror, s.agent_remote_control, s.offline_notify_disabled, s.auto_update, \
-         l.latest_json \
+         l.latest_json, \
+         (SELECT value FROM settings WHERE key='offline_threshold_seconds') AS offline_threshold \
          FROM servers s LEFT JOIN server_latest_state l ON l.server_id=s.id \
          ORDER BY s.sort_order, s.created_at"
     } else {
@@ -84,7 +99,8 @@ pub async fn list_servers_with_live(
          s.auto_renewal, s.last_ip, s.ip_v4, s.ip_v6, s.network_interface, s.reset_day, s.reset_timezone, \
          s.report_interval, s.collect_interval, s.rx_correction, s.tx_correction, \
          s.agent_mirror, s.agent_remote_control, s.offline_notify_disabled, s.auto_update, \
-         l.latest_json \
+         l.latest_json, \
+         (SELECT value FROM settings WHERE key='offline_threshold_seconds') AS offline_threshold \
          FROM servers s LEFT JOIN server_latest_state l ON l.server_id=s.id \
          WHERE s.hidden=0 ORDER BY s.sort_order, s.created_at"
     };
@@ -132,6 +148,12 @@ pub async fn list_servers_with_live(
                 reset_day: row.try_get("reset_day")?,
                 reset_timezone: row.try_get("reset_timezone")?,
                 report_interval: row.try_get("report_interval")?,
+                offline_after_seconds: offline_after_seconds(
+                    row.try_get::<i64, _>("report_interval")?,
+                    row.try_get::<Option<String>, _>("offline_threshold")?
+                        .and_then(|value| value.trim().parse::<i64>().ok())
+                        .unwrap_or(DEFAULT_OFFLINE_THRESHOLD_SECONDS),
+                ),
                 collect_interval: row
                     .try_get::<i64, _>("collect_interval")?
                     .max(nodeflare_telemetry::MIN_UPLOAD_INTERVAL as i64),
@@ -449,6 +471,21 @@ pub async fn public_server_exists(db: &Database, server_id: &str) -> Result<bool
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn offline_window_scales_with_the_report_interval() {
+        // 站点下限 180s：短周期节点用下限，长周期节点用 3 个周期。
+        assert_eq!(super::offline_after_seconds(60, 180), 180);
+        assert_eq!(super::offline_after_seconds(15, 180), 180);
+        assert_eq!(super::offline_after_seconds(120, 180), 360);
+        assert_eq!(super::offline_after_seconds(300, 180), 900);
+        // 站点下限调低时也不能低于 3 个周期，避免长间隔节点被误判。
+        assert_eq!(super::offline_after_seconds(60, 30), 180);
+        // 站点下限调高时以站点为准。
+        assert_eq!(super::offline_after_seconds(15, 600), 600);
+        // 结果始终落在 30..=3600 内。
+        assert_eq!(super::offline_after_seconds(3600, 3600), 3600);
+    }
+
     use super::renewed_expiry;
 
     #[test]

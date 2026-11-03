@@ -138,13 +138,18 @@
 .quality-panel:hover .quality-bars i { opacity: .6; }
 .quality-panel:hover .quality-bar:hover i { opacity: 1; transform: scaleY(1.6); }
 
-.node-offline-overlay { position: absolute; z-index: 20; display: flex; inset: 0; flex-direction: column; align-items: center; justify-content: center; background: rgb(255 255 255 / .2); }
-.dark .node-offline-overlay { background: rgb(0 0 0 / .2); }
-html[data-blur="on"] .node-offline-overlay { backdrop-filter: blur(2px); }
-.node-offline-overlay span { color: var(--danger); font-size: 14px; font-weight: 600; }
-.node-offline-overlay small { margin-top: 4px; color: var(--muted-foreground); font-size: 11px; }
-/* 离线遮罩下细小色柱仍在滚动，再压一层避免显得还活着 */
-.node-card.offline .quality-panel { opacity: .5; filter: blur(1px); }
+/* 离线不再整卡模糊：模糊下数值仍可辨读，反而"想藏没藏住"。
+   改为降低饱和度、指标区轻微降透明（数值保持可读，明示数据已过期），
+   底部另起一行说明最后在线时间。 */
+.node-card.offline { filter: grayscale(.35); }
+.node-card.offline .metric-grid,
+.node-card.offline .data-grid,
+.node-card.offline .quality-grid { opacity: .62; }
+/* 离线的延迟色柱不再跳动，再压一层避免显得还活着 */
+.node-card.offline .quality-panel { opacity: .45; }
+.node-offline-note { display: flex; align-items: baseline; gap: 7px; margin-top: 2px; border-top: 1px solid var(--border); padding-top: 7px; }
+.node-offline-note span { color: var(--danger); font-size: 12px; font-weight: 650; }
+.node-offline-note small { color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
 
 .error-band { display: flex; align-items: center; justify-content: space-between; border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border)); border-radius: var(--radius-md); padding: 12px 14px; color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, transparent); font-size: 12px; }
 .error-band button { font-weight: 700; }

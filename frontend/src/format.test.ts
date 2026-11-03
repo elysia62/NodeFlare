@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
-import { formatByteSize, formatExpire, formatPrice, formatSpeedParts, parseByteSize, remainingAssetValue } from "./format";
+import { formatByteSize, formatExpire, formatLastSeen, formatPrice, formatSpeedParts, parseByteSize, remainingAssetValue } from "./format";
 
 describe("parseByteSize", () => {
   test("accepts manual units and defaults to GB", () => {
@@ -88,5 +88,22 @@ describe("remainingAssetValue", () => {
     expect(remainingAssetValue(36, 30, null)).toBe(0);
     expect(remainingAssetValue(36, 0, expiresIn(-1))).toBe(0);
     expect(remainingAssetValue(0, 30, expiresIn(3650))).toBe(0);
+  });
+});
+
+describe("formatLastSeen", () => {
+  const at = 1_700_000_000;
+  test("无上报时间时说明没有数据", () => {
+    expect(formatLastSeen(0, "zh-CN", at)).toBe("暂无上报");
+    expect(formatLastSeen(null, "zh-CN", at)).toBe("暂无上报");
+  });
+  test("按量级切换单位", () => {
+    expect(formatLastSeen(at - 30, "zh-CN", at)).toBe("30 秒前");
+    expect(formatLastSeen(at - 90, "zh-CN", at)).toBe("1 分钟前");
+    expect(formatLastSeen(at - 7200, "zh-CN", at)).toBe("2 小时前");
+    expect(formatLastSeen(at - 86400 * 3, "zh-CN", at)).toBe("3 天前");
+  });
+  test("未来时间不会出现负数", () => {
+    expect(formatLastSeen(at + 500, "zh-CN", at)).toBe("0 秒前");
   });
 });

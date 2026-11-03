@@ -112,18 +112,20 @@ export function AdminPanel({
     setBusy(true);
     setError("");
     try {
-      const [serverResult, settingsResult, themesResult, twoFactorResult] = await Promise.all([
+      // 先单独探测鉴权，再拉取其余需要登录的数据。未登录时只产生一个 401，
+      // 而不是四个并发请求一起失败刷满控制台。
+      const twoFactorResult = await api.twoFactorStatus();
+      setTwoFactorStatus(twoFactorResult);
+      const [serverResult, settingsResult, themesResult] = await Promise.all([
         api.adminServers(),
         api.settings(),
         api.themes(),
-        api.twoFactorStatus(),
       ]);
       setServers(serverResult.servers);
       const serverIds = new Set(serverResult.servers.filter((server) => server.remote_control !== false).map((server) => server.id));
       setRemoteSelectedIds((current) => current.filter((id) => serverIds.has(id)));
       setThemes(themesResult.themes);
       setSettings(settingsResult);
-      setTwoFactorStatus(twoFactorResult);
       setAuthenticated(true);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) {

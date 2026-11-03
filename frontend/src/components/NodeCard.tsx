@@ -13,6 +13,7 @@ import {
   formatExpire,
   formatPrice,
   remainingAssetValue,
+  formatLastSeen,
   formatSpeed,
   number,
   percent,
@@ -116,7 +117,6 @@ export const NodeCard = memo(function NodeCard({ server, status, config, liveLat
   const price = formatPrice(server, locale);
   const remainingValue = remainingAssetValue(server.price, server.billing_cycle, server.expires_at);
   const showExpiryPanel = config.show_expiry || config.show_price;
-  const lastUpdated = new Date(number(server.timestamp) * 1000).toLocaleString(locale, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
   return (
     <button className={`node-card glass-panel ${status}`} onClick={() => onOpen(server)} type="button" aria-label={ui(locale, `${server.name}，${statusLabel}，查看详情`, `${server.name}, ${statusLabel}, view details`)}>
@@ -168,11 +168,9 @@ export const NodeCard = memo(function NodeCard({ server, status, config, liveLat
           </>}
         </div> : null}
 
-        {status === "offline" ? <div className="node-offline-overlay" aria-hidden="true">
+        {status === "offline" ? <div className="node-offline-note">
           <span>{ui(locale, "离线", "Offline")}</span>
-          <small>{server.timestamp
-            ? ui(locale, `最后更新 ${lastUpdated}`, `Last update ${lastUpdated}`)
-            : ui(locale, "暂无更新时间", "No update yet")}</small>
+          <small>{ui(locale, `最后在线 ${formatLastSeen(server.timestamp, locale)}`, `Last seen ${formatLastSeen(server.timestamp, locale)}`)}</small>
         </div> : null}
       </div>
     </button>

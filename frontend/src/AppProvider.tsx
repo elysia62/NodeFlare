@@ -362,9 +362,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const nodeStatuses = useMemo(() => {
     const next: NodeStatuses = {};
     for (const server of liveServers) {
+      // 每个节点用后端算好的窗口（站点下限与 3 个上报周期的较大者），
+      // 而不是站点级的单一阈值：上报间隔长的节点不会被误判离线。
+      const threshold = server.offline_after_seconds ?? config.offline_threshold_seconds;
       next[server.id] = demoMode
-        ? isOnline(server, config.offline_threshold_seconds, clockNow / 1000) ? "online" : "offline"
-        : nodeObservation.current.status(server, config.offline_threshold_seconds, clockNow);
+        ? isOnline(server, threshold, clockNow / 1000) ? "online" : "offline"
+        : nodeObservation.current.status(server, threshold, clockNow);
     }
     const previous = nodeStatusesRef.current;
     if (Object.keys(previous).length === liveServers.length

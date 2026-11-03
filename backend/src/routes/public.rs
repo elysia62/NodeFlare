@@ -228,7 +228,7 @@ async fn require_public_server(state: &AppState, server_id: &str) -> Result<(), 
 /// This is an allow list: a `ServerView` field stays private until it is listed
 /// here, so adding a field to the struct can never leak it by accident.
 /// Registered in `public_projection_keeps_private_server_fields_out`.
-const PUBLIC_SERVER_FIELDS: [&str; 49] = [
+const PUBLIC_SERVER_FIELDS: [&str; 50] = [
     "id",
     "name",
     "region",
@@ -269,6 +269,7 @@ const PUBLIC_SERVER_FIELDS: [&str; 49] = [
     "gpu_usage",
     "gpu_model",
     "agent_version",
+    "offline_after_seconds",
     "disk_read_bps",
     "disk_write_bps",
     "disk_read_iops",
@@ -341,6 +342,7 @@ mod tests {
             reset_day: 1,
             reset_timezone: "UTC".to_string(),
             report_interval: 60,
+            offline_after_seconds: 180,
             collect_interval: 1,
             rx_correction: 0,
             tx_correction: 0,

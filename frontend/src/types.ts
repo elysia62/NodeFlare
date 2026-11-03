@@ -197,6 +197,8 @@ interface ServerSummary {
 }
 
 export interface Server extends ServerSummary {
+  /** 该节点实际生效的离线判定窗口（秒），由后端按上报间隔算好。 */
+  offline_after_seconds?: number;
   disks: DiskMetric[];
   gpus: GpuMetric[];
   latency: LatencySample[];

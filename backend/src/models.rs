@@ -171,6 +171,9 @@ pub struct ServerView {
     pub reset_day: i64,
     pub reset_timezone: String,
     pub report_interval: i64,
+    /// 该节点实际生效的离线判定窗口（秒）：取站点下限与"3 倍上报间隔"的较大者。
+    /// 单独下发而不是让前端用 report_interval 自己算，避免把上报频率暴露给游客。
+    pub offline_after_seconds: i64,
     pub collect_interval: i64,
     pub rx_correction: i64,
     pub tx_correction: i64,

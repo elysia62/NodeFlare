@@ -124,6 +124,24 @@ export function isOnline(server: Pick<Server, "timestamp">, threshold: number, a
   return !!server.timestamp && at - server.timestamp <= threshold;
 }
 
+/**
+ * 把"最后一次上报距今多久"渲染成人能一眼读懂的短语。
+ * 离线卡上用它替代模糊遮罩：数值保留可读，但明确标出数据有多旧。
+ */
+export function formatLastSeen(timestamp: number | null | undefined, locale: UiLocale = "zh-CN", at = Date.now() / 1000) {
+  if (!timestamp) return ui(locale, "暂无上报", "No report yet");
+  const elapsed = Math.max(0, Math.floor(at - timestamp));
+  if (elapsed < 60) return ui(locale, `${elapsed} 秒前`, `${elapsed}s ago`);
+  const minutes = Math.floor(elapsed / 60);
+  if (minutes < 60) return ui(locale, `${minutes} 分钟前`, `${minutes}m ago`);
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return ui(locale, `${hours} 小时前`, `${hours}h ago`);
+  const days = Math.floor(hours / 24);
+  // 超过一年就不再数天数了：那个量级用户也判断不了新鲜度，直接给日期。
+  if (days < 365) return ui(locale, `${days} 天前`, `${days}d ago`);
+  return new Date(timestamp * 1000).toLocaleDateString(locale === "en" ? "en-US" : "zh-CN");
+}
+
 export function countryFlag(region: string) {
   const code = region.trim().slice(0, 2).toUpperCase();
   if (!/^[A-Z]{2}$/.test(code)) return "";
