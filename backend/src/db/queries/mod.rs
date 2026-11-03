@@ -60,7 +60,9 @@ pub use exchange::{
 pub use history::HISTORY_AGGREGATE_COLUMNS;
 pub use history::history;
 pub use ingest::save_agent_batch;
-pub(crate) use ingest::{agent_traffic_state, apply_traffic, valid_agent_report};
+pub(crate) use ingest::{
+    agent_traffic_state, apply_traffic, server_corrections, valid_agent_report,
+};
 pub use latency::{
     create_latency_task, delete_latency_task, latency_history, latency_task_server_ids,
     list_latency_tasks, update_latency_task,
@@ -268,6 +270,30 @@ mod tests {
         let stored = agent_traffic_state(&db, &id).await.unwrap();
         assert_eq!(stored.reset_timezone, input.reset_timezone);
         assert_eq!(stored.used_rx, 123);
+    }
+
+    #[tokio::test]
+    async fn invalid_stored_timezone_falls_back_instead_of_blocking_the_agent() {
+        // 库里出现非法时区（手改、旧备份导入）时，agent_identity 不能整体失败：
+        // 那会让该节点的 agent 再也连不上，而修它又需要后台正常工作。
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        let input = server_input(0);
+        let (_, token) = create_server(&db, &input).await.unwrap();
+        sqlx::query("UPDATE servers SET reset_timezone='Not/AZone'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let identity = agent_identity(&db, &token)
+            .await
+            .expect("非法时区不应让查询失败")
+            .expect("节点应当仍然可查");
+        assert_eq!(
+            identity.reset_timezone,
+            crate::db::DEFAULT_NOTIFICATION_TIMEZONE
+                .parse::<chrono_tz::Tz>()
+                .unwrap()
+        );
     }
 
     #[tokio::test]

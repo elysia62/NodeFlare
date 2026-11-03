@@ -385,12 +385,29 @@ pub async fn agent_identity(db: &Database, token: &str) -> Result<Option<AgentId
     .fetch_optional(db.pool())
     .await?;
     row.map(|row| {
+        let stored_timezone: String = row.try_get("reset_timezone")?;
+        // 时区非法（手改过数据库、从旧备份导入）时不能整体失败：那会让该节点的
+        // agent 再也连不上，而修复它又需要后台本身能正常工作。回退到默认时区
+        // 并留下日志，其余字段照常可用。
+        let reset_timezone = match stored_timezone.parse() {
+            Ok(timezone) => timezone,
+            Err(_) => {
+                tracing::warn!(
+                    server_id = %row.try_get::<String, _>("id")?,
+                    reset_timezone = %stored_timezone,
+                    "invalid traffic reset timezone; falling back to the default"
+                );
+                crate::db::DEFAULT_NOTIFICATION_TIMEZONE
+                    .parse()
+                    .expect("default timezone is a valid IANA name")
+            }
+        };
         Ok::<AgentIdentity, anyhow::Error>(AgentIdentity {
             server_id: row.try_get("id")?,
             hidden: row.try_get::<i64, _>("hidden")? != 0,
             report_interval: row.try_get("report_interval")?,
             reset_day: row.try_get("reset_day")?,
-            reset_timezone: row.try_get::<String, _>("reset_timezone")?.parse()?,
+            reset_timezone,
             rx_correction: row.try_get("rx_correction")?,
             tx_correction: row.try_get("tx_correction")?,
         })
