@@ -94,24 +94,18 @@ pub async fn save_agent_batch(
     }
 
     let mut traffic = load_traffic_state(db, &mut transaction, &identity.server_id).await?;
-    // 手动校准量以数据库当前值为准，而不是连接建立时的缓存：账期切换的同一批
-    // 上报会把它清零，后续批次必须立刻看到新值，否则看板会一直把上个周期的量
-    // 算进本周期，直到 agent 重连才恢复。
+    // Read once under the transaction's write lock. A previous flush may have
+    // cleared the corrections while the connection still holds the old identity.
     let mut identity = identity.clone();
+    if let Some((rx_correction, tx_correction)) =
+        load_corrections(db, &mut transaction, &identity.server_id).await?
+    {
+        identity.rx_correction = rx_correction;
+        identity.tx_correction = tx_correction;
+    }
     let mut rolled_over = false;
     for report in &mut reports {
-        if let Some((rx_correction, tx_correction)) =
-            load_corrections(db, &mut transaction, &identity.server_id).await?
-        {
-            identity.rx_correction = rx_correction;
-            identity.tx_correction = tx_correction;
-        }
-        if apply_traffic(report, &mut traffic, &identity) {
-            rolled_over = true;
-            // 本批已经跨入新账期：后续样本不能再套用旧校准量。
-            identity.rx_correction = 0;
-            identity.tx_correction = 0;
-        }
+        rolled_over |= apply_traffic(report, &mut traffic, &identity);
     }
     if rolled_over {
         // 落库清零，避免下批上报又加回来。
@@ -302,6 +296,7 @@ pub(crate) async fn load_traffic_state(
             raw_tx: row.try_get("raw_tx")?,
             used_rx: row.try_get("used_rx")?,
             used_tx: row.try_get("used_tx")?,
+            corrections_expired: false,
         })
     })
     .transpose()
@@ -337,25 +332,6 @@ pub(crate) async fn agent_traffic_state(db: &Database, server_id: &str) -> Resul
     Ok(state)
 }
 
-/// 读取节点当前的手动校准量，供实时路径与落库路径各自刷新使用。
-pub(crate) async fn server_corrections(
-    db: &Database,
-    server_id: &str,
-) -> Result<Option<(i64, i64)>> {
-    let row = sqlx::query(db.sql("SELECT rx_correction, tx_correction FROM servers WHERE id=?"))
-        .bind(server_id)
-        .fetch_optional(db.pool())
-        .await?;
-    row.map(|row| {
-        Ok::<_, sqlx::Error>((
-            row.try_get::<i64, _>("rx_correction")?,
-            row.try_get::<i64, _>("tx_correction")?,
-        ))
-    })
-    .transpose()
-    .map_err(Into::into)
-}
-
 /// 把一批上报折算成"本周期已用流量"，并把结果写回 report 的累计字段。
 ///
 /// 返回值表示本次是否跨入了新的账期：手动校准只对设置它时所在的那个账期有意义，
@@ -366,8 +342,7 @@ pub(crate) fn apply_traffic(
     identity: &AgentIdentity,
 ) -> bool {
     if report.timestamp <= state.timestamp {
-        report.net_rx_total = state.used_rx.saturating_add(identity.rx_correction).max(0);
-        report.net_tx_total = state.used_tx.saturating_add(identity.tx_correction).max(0);
+        apply_corrections(report, state, identity);
         return false;
     }
     let cycle_key = traffic_cycle_key(
@@ -386,6 +361,7 @@ pub(crate) fn apply_traffic(
     } else if rolled_over {
         state.used_rx = 0;
         state.used_tx = 0;
+        state.corrections_expired = true;
     } else {
         let rx_delta = if report.net_rx_total >= state.raw_rx {
             report.net_rx_total - state.raw_rx
@@ -406,9 +382,18 @@ pub(crate) fn apply_traffic(
     state.timestamp = report.timestamp;
     state.raw_rx = report.net_rx_total.max(0);
     state.raw_tx = report.net_tx_total.max(0);
-    report.net_rx_total = state.used_rx.saturating_add(identity.rx_correction).max(0);
-    report.net_tx_total = state.used_tx.saturating_add(identity.tx_correction).max(0);
+    apply_corrections(report, state, identity);
     rolled_over
+}
+
+fn apply_corrections(report: &mut AgentReport, state: &TrafficState, identity: &AgentIdentity) {
+    let (rx, tx) = if state.corrections_expired {
+        (0, 0)
+    } else {
+        (identity.rx_correction, identity.tx_correction)
+    };
+    report.net_rx_total = state.used_rx.saturating_add(rx).max(0);
+    report.net_tx_total = state.used_tx.saturating_add(tx).max(0);
 }
 pub(crate) async fn save_traffic_state(
     db: &Database,
@@ -781,7 +766,7 @@ mod traffic_tests {
     fn manual_correction_does_not_carry_into_the_next_cycle() {
         // 回归：手动校准只属于设置它的那个账期。跨周期后继续套用，
         // 新周期的已用流量会凭空多出上个月那部分（实测看板 134 GB 对实际 4.7 GB）。
-        let mut identity = AgentIdentity {
+        let identity = AgentIdentity {
             server_id: "node".into(),
             hidden: false,
             report_interval: 60,
@@ -807,7 +792,8 @@ mod traffic_tests {
             "周期内应计入校准量"
         );
 
-        // 跨入 11 月：调用方会立刻把校准量清零，随后重算这一条。
+        // The first sample and subsequent calls must work with the unchanged
+        // connection identity; callers do not repair/recalculate the report.
         let mut report = AgentReport {
             timestamp: timestamp("2026-11-01T00:00:01+08:00"),
             net_rx_total: 1_000,
@@ -818,10 +804,9 @@ mod traffic_tests {
             apply_traffic(&mut report, &mut state, &identity),
             "跨账期应报告切换"
         );
-        identity.rx_correction = 0;
-        let mut cleared = report.clone();
-        apply_traffic(&mut cleared, &mut state, &identity);
-        assert_eq!(cleared.net_rx_total, 0, "新周期从 0 起算，不叠加旧校准量");
+        assert_eq!(report.net_rx_total, 0, "新周期从 0 起算，不叠加旧校准量");
+        apply_traffic(&mut report, &mut state, &identity);
+        assert_eq!(report.net_rx_total, 0, "重复样本也不能恢复旧校准量");
 
         // 之后正常累计增量。
         let mut report = AgentReport {

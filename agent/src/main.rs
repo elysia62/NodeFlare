@@ -757,7 +757,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         .timeout_global(Some(Duration::from_secs(20)))
         .build()
         .into();
-    let mut collector = Collector::new(&config);
+    let mut collector = Collector::new(&config)?;
     collector.public_ip.refresh();
     if once || print_only {
         collector.public_ip.wait_initial();

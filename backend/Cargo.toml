@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nodeflare-telemetry = { path = "../shared" }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "any", "sqlite-bundled", "postgres", "migrate", "macros"] }
-toml = "1.1.6"
+toml = "1.2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
@@ -39,7 +39,7 @@ data-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
 url = "2.5"
 ipnet = { version = "2", features = ["serde"] }
-zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.3.0", default-features = false, features = ["deflate"] }
 tempfile = "3"
 
 [profile.release]

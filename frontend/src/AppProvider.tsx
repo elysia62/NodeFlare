@@ -275,12 +275,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!configReady || access !== "ok" || demoMode) return;
     let active = true;
-    // 新订阅从"未连接"开始。上一个订阅是主动切换（静默关闭）时不会上报 false，
-    // 若这里不先复位，liveConnected 会一直停在 true：既压制 bootstrap 轮询
-    // （shouldSyncBootstrap 会在 5 分钟内跳过），又让界面假装连接正常。
-    // 只复位调用方的视图状态，不清理 nodeObservation 的在线证据。
-    liveConnectedRef.current = false;
-    setLiveConnected(false);
     const disconnect = connectLive({ serverId: selectedId }, {
       onBatch: (updates) => {
         livePlayback.current.enqueue(updates, serversRef.current);

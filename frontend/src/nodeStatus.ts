@@ -15,6 +15,9 @@ export function createNodeObservation() {
   let snapshotAt: number | null = null;
   let connectedAt: number | null = null;
   const observed = new Set<string>();
+  // Per-node receipts survive a route handoff for the same bounded grace as an
+  // HTTP snapshot. They never imply that a closed stream is still connected.
+  const receivedAt = new Map<string, number>();
 
   // Suspension only discards what the socket itself confirmed, because that
   // evidence cannot outlive the connection it arrived on, and the generation bump
@@ -47,9 +50,15 @@ export function createNodeObservation() {
       // Use request time, not completion time: a slow response is not a fresh heartbeat.
       snapshotAt = request.startedAt;
     },
-    observe(serverIds: readonly string[]) {
+    observe(serverIds: readonly string[], now = Date.now()) {
       if (available && connectedAt !== null) {
-        for (const id of serverIds) observed.add(id);
+        for (const [id, at] of receivedAt) {
+          if (now - at > SNAPSHOT_MAX_AGE_MS) receivedAt.delete(id);
+        }
+        for (const id of serverIds) {
+          observed.add(id);
+          receivedAt.set(id, now);
+        }
       }
     },
     status(server: Pick<Server, "id" | "timestamp">, threshold: number, now = Date.now()): NodeStatus {
@@ -62,6 +71,11 @@ export function createNodeObservation() {
         || now - connectedAt >= threshold * 1000
       );
       if (streamObserved) return isOnline(server, threshold, now / 1000) ? "online" : "offline";
+      const receipt = receivedAt.get(server.id);
+      if (receipt !== undefined && (snapshotAt === null || receipt > snapshotAt)
+        && now - receipt <= SNAPSHOT_MAX_AGE_MS) {
+        return isOnline(server, threshold, receipt / 1000) ? "online" : "offline";
+      }
       if (snapshotAt === null || now - snapshotAt > SNAPSHOT_MAX_AGE_MS) return "pending";
       // Without a live stream, only a refreshed snapshot can confirm an outage.
       // Advancing the local clock alone must not turn missed reports into outages.

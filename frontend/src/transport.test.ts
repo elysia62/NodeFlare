@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { connectLive, reconnectDelay } from "./transport";
 import type { BatchUpdate } from "./live";
 import { gzipSync } from "node:zlib";
+import { createNodeObservation } from "./nodeStatus";
 
 function compressed(value: unknown): ArrayBuffer {
   return Uint8Array.from(gzipSync(JSON.stringify(value))).buffer;
@@ -75,16 +76,27 @@ function transportHarness() {
   FakeSocket.instances = [];
   const connections: boolean[] = [];
   const batches: BatchUpdate[][] = [];
-  const dispose = connectLive({ serverId: "node/1" }, {
+  const observation = createNodeObservation();
+  const handlers = {
     onBatch: (batch) => { batches.push(batch); },
-    onConnectedChange: (connected) => { connections.push(connected); },
-  });
+    onConnectedChange: (connected: boolean) => {
+      connections.push(connected);
+      observation.setConnected(connected);
+    },
+  } satisfies Parameters<typeof connectLive>[1];
+  let disconnect = connectLive({ serverId: "node/1" }, handlers);
+  const dispose = () => disconnect();
   return {
     sockets: FakeSocket.instances,
     connections,
     batches,
     timers,
     dispose,
+    observation,
+    replace(serverId: string | null) {
+      disconnect();
+      disconnect = connectLive({ serverId }, handlers);
+    },
     advance(ms: number) {
       const target = now + ms;
       while (true) {
@@ -228,16 +240,14 @@ describe("live connection lifecycle", () => {
     } finally { h.restore(); }
   });
 
-  test("disposing for a route change does not report the stream as disconnected", () => {
-    // 点卡片跳转 / 返回看板会重建订阅。这不是连接失败：
-    // 若仍上报 false，AppProvider 会清空在线证据，返回时全部闪"待刷新"。
+  test("disposing closes the stream and clears its connected state", () => {
     const h = transportHarness();
     try {
       h.sockets[0].open();
       h.sockets[0].receive("pong");
       expect(h.connections).toEqual([true]);
       h.dispose();
-      expect(h.connections).toEqual([true]);
+      expect(h.connections).toEqual([true, false]);
       expect(h.sockets[0].readyState).toBe(FakeSocket.CLOSED);
       expect(h.timers.size).toBe(0);
     } finally { h.restore(); }
@@ -254,32 +264,26 @@ describe("live connection lifecycle", () => {
     } finally { h.restore(); }
   });
 
-  test("a replacement subscription never inherits the previous one's connected state", () => {
-    // 主动切换后新订阅若连不上，不能因为"没人上报 false"就让调用方一直以为还在线：
-    // 那会把 bootstrap 轮询压制到 5 分钟一次，界面也不再显示断开。
-    for (const label of ["replacement fails to connect", "replacement opens normally"]) {
-      const first = transportHarness();
-      try {
-        first.sockets[0].open();
-        first.sockets[0].receive("pong");
-        expect(first.connections, label).toEqual([true]);
-        first.dispose();
-        expect(first.connections, label).toEqual([true]);
+  test("failed replacement expires receipt evidence instead of declaring an outage", () => {
+    const h = transportHarness();
+    try {
+      h.sockets[0].open();
+      h.sockets[0].receive("pong");
+      h.observation.observe(["node/1"]);
+      const node = { id: "node/1", timestamp: 100 };
+      h.replace(null);
+      expect(h.connections).toEqual([true, false]);
+      expect(h.observation.status(node, 180)).toBe("online");
+      h.sockets[1].onerror?.();
+      h.advance(181_000);
+      expect(h.connections).toEqual([true, false]);
+      expect(h.observation.status(node, 180)).toBe("pending");
 
-        // 调用方在新 useEffect 里会显式复位，这里验证复位后的语义。
-        const second = transportHarness();
-        try {
-          expect(second.connections, label).toEqual([]);
-          if (label === "replacement opens normally") {
-            second.sockets[0].open();
-            expect(second.connections, label).toEqual([true]);
-          } else {
-            // 连接一直没建立：调用方保持"未连接"，轮询照常接管。
-            second.advance(9_000);
-            expect(second.connections, label).toEqual([]);
-          }
-        } finally { second.restore(); }
-      } finally { first.restore(); }
-    }
+      h.replace(null);
+      h.sockets.at(-1)!.open();
+      h.sockets.at(-1)!.receive("pong");
+      h.observation.observe(["node/1"]);
+      expect(h.observation.status({ ...node, timestamp: Date.now() / 1000 }, 180)).toBe("online");
+    } finally { h.restore(); }
   });
 });

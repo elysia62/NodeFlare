@@ -600,7 +600,7 @@ pub(crate) struct Collector {
 
 #[cfg(target_os = "linux")]
 impl Collector {
-    pub(crate) fn new(config: &RuntimeConfig) -> Self {
+    pub(crate) fn new(config: &RuntimeConfig) -> Result<Self> {
         let mut collector = Self {
             previous_cpu: cpu_sample(),
             previous_io: io_sample(&config.network_interface),
@@ -615,7 +615,7 @@ impl Collector {
         };
         collector.refresh_basic();
         collector.refresh_slow();
-        collector
+        Ok(collector)
     }
 
     pub(crate) fn refresh_basic(&mut self) {
@@ -809,11 +809,11 @@ pub(crate) struct Collector {
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))]
 impl Collector {
-    pub(crate) fn new(_config: &RuntimeConfig) -> Self {
+    pub(crate) fn new(_config: &RuntimeConfig) -> Result<Self> {
         let mut collector = Self {
-            system: System::new_all(),
-            networks: Networks::new_with_refreshed_list(),
-            disks: Disks::new_with_refreshed_list(),
+            system: System::new_all()?,
+            networks: Networks::new_with_refreshed_list()?,
+            disks: Disks::new_with_refreshed_list()?,
             previous_at: Instant::now(),
             basic: BasicMetrics::default(),
             basic_at: Instant::now(),
@@ -824,7 +824,7 @@ impl Collector {
         };
         collector.refresh_basic();
         collector.refresh_slow();
-        collector
+        Ok(collector)
     }
 
     pub(crate) fn refresh_basic(&mut self) {
@@ -837,7 +837,7 @@ impl Collector {
                 .first()
                 .map(|cpu| cpu.brand().to_string())
                 .unwrap_or_default(),
-            os: System::long_os_version().unwrap_or_else(|| env::consts::OS.to_string()),
+            os: System::long_os_version().unwrap_or_else(|_| env::consts::OS.to_string()),
             kernel: System::kernel_version().unwrap_or_default(),
             arch: env::consts::ARCH.to_string(),
             virtualization: String::new(),
@@ -928,7 +928,7 @@ impl Collector {
         let mut net_rx_total = 0_u64;
         let mut net_tx_total = 0_u64;
         for (name, network) in &self.networks {
-            if !selected_interface(name, &config.network_interface) {
+            if !selected_interface(&name.to_string_lossy(), &config.network_interface) {
                 continue;
             }
             net_in = net_in.saturating_add(network.received());
@@ -936,7 +936,8 @@ impl Collector {
             net_rx_total = net_rx_total.saturating_add(network.total_received());
             net_tx_total = net_tx_total.saturating_add(network.total_transmitted());
         }
-        let load = System::load_average();
+        // Windows does not provide a Unix load average.
+        let load = System::load_average().unwrap_or_default();
         Report {
             timestamp,
             cpu: self.system.global_cpu_usage() as f64,
@@ -957,7 +958,7 @@ impl Collector {
             net_out: per_second(net_out, elapsed),
             net_rx_total: u64_to_i64(net_rx_total),
             net_tx_total: u64_to_i64(net_tx_total),
-            uptime: u64_to_i64(System::uptime()),
+            uptime: u64_to_i64(System::uptime().unwrap_or_default()),
             processes: self.slow.processes,
             tcp_connections,
             udp_connections,

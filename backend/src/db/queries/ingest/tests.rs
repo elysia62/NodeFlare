@@ -1,5 +1,182 @@
 use super::*;
 
+async fn rollover_fixture() -> (Database, AgentIdentity, i64) {
+    let db = crate::db::connect("sqlite::memory:").await.unwrap();
+    db.migrate().await.unwrap();
+    sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at,rx_correction,tx_correction) VALUES ('node','Node','hash',1,1,10000,-50)")
+        .execute(db.pool()).await.unwrap();
+    let identity = AgentIdentity {
+        server_id: "node".into(),
+        hidden: false,
+        report_interval: 60,
+        reset_day: 1,
+        reset_timezone: chrono_tz::UTC,
+        rx_correction: 10000,
+        tx_correction: -50,
+    };
+    let at = now() - 10;
+    let mut transaction = db.pool().begin().await.unwrap();
+    // A previous cycle, with a recent timestamp so the public ingest path's
+    // validation remains active. Avoid tests depending on the day they run.
+    save_traffic_state(
+        &db,
+        &mut transaction,
+        "node",
+        &TrafficState {
+            cycle_key: -1,
+            reset_day: 1,
+            reset_timezone: "UTC".into(),
+            timestamp: at,
+            raw_rx: 100,
+            raw_tx: 200,
+            used_rx: 100,
+            used_tx: 200,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    (db, identity, at)
+}
+
+fn traffic_report(timestamp: i64, raw: i64) -> AgentReport {
+    AgentReport {
+        timestamp,
+        net_rx_total: raw,
+        net_tx_total: raw * 2,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn rollover_persists_uncorrected_samples_and_replays_without_double_counting() {
+    let (db, identity, at) = rollover_fixture().await;
+    let reports = [traffic_report(at + 1, 1000), traffic_report(at + 2, 1100)];
+    let result = save_agent_batch(&db, &identity, "rollover", &reports, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .reports
+            .iter()
+            .map(|r| (r.net_rx_total, r.net_tx_total))
+            .collect::<Vec<_>>(),
+        [(0, 0), (100, 200)]
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT rx_correction,tx_correction FROM servers WHERE id='node'"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        (0, 0)
+    );
+    let saved = super::super::list_servers(&db, true)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (saved.net_rx_total, saved.net_tx_total),
+        (Some(100), Some(200))
+    );
+    assert!(
+        save_agent_batch(&db, &identity, "rollover", &reports, "")
+            .await
+            .unwrap()
+            .reports
+            .is_empty()
+    );
+    let result = save_agent_batch(&db, &identity, "next", &[traffic_report(at + 3, 1200)], "")
+        .await
+        .unwrap();
+    assert_eq!(result.reports[0].net_rx_total, 200);
+}
+
+#[tokio::test]
+async fn live_rollover_survives_multiple_batches_flush_and_reconnect() {
+    let (db, identity, at) = rollover_fixture().await;
+    let mut buffer = crate::websocket::ingest::AgentBuffer::new(&db, "node")
+        .await
+        .unwrap();
+    for index in 1..=4 {
+        let result = buffer
+            .receive(
+                &db,
+                &identity,
+                "",
+                vec![traffic_report(at + index, 900 + index * 100)],
+                index == 3,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.samples[0].net_rx_total, (index - 1) * 100);
+        assert_eq!(result.samples[0].net_tx_total, (index - 1) * 200);
+    }
+    let mut fresh_identity = identity.clone();
+    fresh_identity.rx_correction = 0;
+    fresh_identity.tx_correction = 0;
+    let mut reconnected = crate::websocket::ingest::AgentBuffer::new(&db, "node")
+        .await
+        .unwrap();
+    let result = reconnected
+        .receive(
+            &db,
+            &fresh_identity,
+            "",
+            vec![traffic_report(at + 4, 1300)],
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.samples[0].net_rx_total, 300);
+    assert_eq!(result.acknowledgement.unwrap().reports[0].net_rx_total, 300);
+}
+
+#[tokio::test]
+async fn failed_rollover_transaction_keeps_corrections_until_a_successful_retry() {
+    let (db, identity, at) = rollover_fixture().await;
+    sqlx::query("CREATE TRIGGER reject_history BEFORE INSERT ON metric_history BEGIN SELECT RAISE(ABORT,'test write failure'); END")
+        .execute(db.pool()).await.unwrap();
+    let reports = [traffic_report(at + 1, 1000)];
+    assert!(
+        save_agent_batch(&db, &identity, "retry", &reports, "")
+            .await
+            .is_err()
+    );
+    let correction: i64 = sqlx::query_scalar("SELECT rx_correction FROM servers WHERE id='node'")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(correction, 10000);
+    sqlx::query("DROP TRIGGER reject_history")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let result = save_agent_batch(&db, &identity, "retry", &reports, "")
+        .await
+        .unwrap();
+    assert_eq!(result.reports[0].net_rx_total, 0);
+}
+
+#[tokio::test]
+async fn history_write_interval_does_not_extend_the_offline_window() {
+    let (db, _, _) = rollover_fixture().await;
+    sqlx::query("UPDATE servers SET report_interval=300,collect_interval=3 WHERE id='node'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('offline_threshold_seconds','30')")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        super::super::list_servers(&db, true).await.unwrap()[0].offline_after_seconds,
+        30
+    );
+}
+
 async fn assert_metadata_updates_preserve_persistence(db: &Database) {
     db.migrate().await.unwrap();
     sqlx::query("INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES ('node','Node','hash',1,1)")

@@ -4,6 +4,22 @@ import { createNodeObservation } from "./nodeStatus";
 const node = (timestamp: number | null, id = "node-1") => ({ id, timestamp });
 
 describe("dashboard status observation", () => {
+  test("route handoff preserves only recent receipts for the nodes actually observed", () => {
+    const observation = createNodeObservation();
+    observation.setConnected(true, 100_000);
+    observation.observe(["node-1"], 200_000);
+    observation.setConnected(false);
+    const stale = observation.beginSnapshot(200_100);
+    observation.setConnected(true, 201_000);
+    expect(observation.status(node(200), 180, 201_000)).toBe("online");
+    expect(observation.status(node(200, "node-2"), 180, 201_000)).toBe("pending");
+    observation.setConnected(false);
+    observation.acceptSnapshot(stale);
+    expect(observation.status(node(200), 180, 231_000)).toBe("pending");
+    observation.acceptSnapshot(observation.beginSnapshot(400_000));
+    expect(observation.status(node(200), 180, 400_100)).toBe("offline");
+  });
+
   test("resuming after a long hidden interval waits for a new snapshot, not the local clock", () => {
     const observation = createNodeObservation();
     observation.acceptSnapshot(observation.beginSnapshot(100_000));
@@ -23,7 +39,7 @@ describe("dashboard status observation", () => {
     const observation = createNodeObservation();
     observation.acceptSnapshot(observation.beginSnapshot(100_000));
     observation.setConnected(true, 100_500);
-    observation.observe(["node-1"]);
+    observation.observe(["node-1"], 100_500);
     expect(observation.status(node(100), 180, 101_000)).toBe("online");
 
     // Switch away briefly and come back. The socket reconnects, but no report has
@@ -48,7 +64,7 @@ describe("dashboard status observation", () => {
     const observation = createNodeObservation();
     observation.acceptSnapshot(observation.beginSnapshot(100_000));
     observation.setConnected(true, 100_500);
-    observation.observe(["node-1"]);
+    observation.observe(["node-1"], 100_500);
     expect(observation.status(node(100), 180, 101_000)).toBe("online");
 
     // 隐藏：只断 WS，available 保持 true（与 AppProvider 的新行为一致）。
@@ -73,7 +89,7 @@ describe("dashboard status observation", () => {
     const observation = createNodeObservation();
     observation.acceptSnapshot(observation.beginSnapshot(100_000));
     observation.setConnected(true, 100_500);
-    observation.observe(["node-1"]);
+    observation.observe(["node-1"], 100_500);
 
     // Come back after the snapshot has aged out: nothing confirms the node yet, so
     // the dashboard must not assert a state from data that is already too old.
@@ -111,7 +127,7 @@ describe("dashboard status observation", () => {
   test("one node receiving new samples cannot confirm other nodes after reconnect", () => {
     const observation = createNodeObservation();
     observation.setConnected(true, 200_000);
-    observation.observe(["node-1"]);
+    observation.observe(["node-1"], 200_000);
     expect(observation.status(node(200), 30, 201_000)).toBe("online");
     expect(observation.status(node(100, "node-2"), 30, 201_000)).toBe("pending");
   });
@@ -119,7 +135,7 @@ describe("dashboard status observation", () => {
   test("healthy streaming still detects a node that really stops reporting", () => {
     const observation = createNodeObservation();
     observation.setConnected(true, 100_000);
-    observation.observe(["node-1"]);
+    observation.observe(["node-1"], 100_000);
     expect(observation.status(node(100), 30, 130_000)).toBe("online");
     expect(observation.status(node(100), 30, 131_000)).toBe("offline");
     expect(observation.status(node(131, "node-2"), 30, 131_000)).toBe("online");
@@ -161,11 +177,11 @@ describe("dashboard status observation", () => {
     const observation = createNodeObservation();
     const server = node(100);
     observation.setConnected(true, 100_000);
-    observation.observe([server.id]);
+    observation.observe([server.id], 100_000);
     observation.setAvailable(false);
     observation.acceptSnapshot(observation.beginSnapshot(200_000));
     observation.setConnected(true, 200_000);
-    observation.observe([server.id]);
+    observation.observe([server.id], 200_000);
     expect(observation.status(server, 30, 200_000)).toBe("pending");
     expect(server.timestamp).toBe(100);
   });

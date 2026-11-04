@@ -31,6 +31,9 @@ pub(crate) struct TrafficState {
     raw_tx: i64,
     used_rx: i64,
     used_tx: i64,
+    // Connection-local: a rollover invalidates the identity's cached corrections.
+    // Persisted connections start fresh with corrections read from the server row.
+    corrections_expired: bool,
 }
 
 mod alerts;
@@ -60,9 +63,7 @@ pub use exchange::{
 pub use history::HISTORY_AGGREGATE_COLUMNS;
 pub use history::history;
 pub use ingest::save_agent_batch;
-pub(crate) use ingest::{
-    agent_traffic_state, apply_traffic, server_corrections, valid_agent_report,
-};
+pub(crate) use ingest::{agent_traffic_state, apply_traffic, valid_agent_report};
 pub use latency::{
     create_latency_task, delete_latency_task, latency_history, latency_task_server_ids,
     list_latency_tasks, update_latency_task,

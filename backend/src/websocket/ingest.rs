@@ -65,21 +65,11 @@ impl AgentBuffer {
         }
         let mut samples = Vec::with_capacity(reports.len());
         let mut latency = Vec::new();
-        // 校准量以数据库为准：账期切换会把它清零，这里必须跟着失效，
-        // 否则看板会一直显示"本周期用量 + 上一周期的校准量"。
-        let mut effective = identity.clone();
-        if let Ok(Some((rx, tx))) = queries::server_corrections(db, &identity.server_id).await {
-            effective.rx_correction = rx;
-            effective.tx_correction = tx;
-        }
+        // Manual edits reconnect the agent. Within this connection TrafficState
+        // remembers a rollover, even before the pending batch reaches the DB.
         for report in &reports {
             let mut live = report.clone();
-            if queries::apply_traffic(&mut live, &mut self.traffic, &effective) {
-                effective.rx_correction = 0;
-                effective.tx_correction = 0;
-                live.net_rx_total = 0;
-                live.net_tx_total = 0;
-            }
+            queries::apply_traffic(&mut live, &mut self.traffic, identity);
             self.received_through = live.timestamp;
             latency.extend(live.latency_results.iter().cloned());
             samples.push(live);

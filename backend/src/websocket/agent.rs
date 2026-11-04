@@ -165,11 +165,12 @@ async fn run(
 
     // Recheck the token after registration in case the node changed meanwhile.
     let initialized = super::ingest::AgentBuffer::new(&state.db, &identity.server_id).await;
-    let still_authorized = matches!(
-        crate::db::queries::agent_identity(&state.db, &token).await,
-        Ok(Some(current)) if current.server_id == identity.server_id
-    );
-    if !still_authorized || initialized.is_err() {
+    let current_identity = crate::db::queries::agent_identity(&state.db, &token)
+        .await
+        .ok()
+        .flatten()
+        .filter(|current| current.server_id == identity.server_id);
+    if current_identity.is_none() || initialized.is_err() {
         let mut agents = state.agents.write().await;
         if agents
             .get(&identity.server_id)
@@ -183,6 +184,7 @@ async fn run(
         return;
     }
     let mut buffer = initialized.expect("Agent buffer was initialized");
+    let identity = current_identity.expect("Agent identity was revalidated");
     tracing::info!(server_id = %identity.server_id, remote_ip, "Agent connected");
 
     if let Some(config) = crate::db::queries::agent_config(&state.db, &identity.server_id)

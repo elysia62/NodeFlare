@@ -13,7 +13,7 @@ serde_json = "1"
 nodeflare-telemetry = { path = "../shared" }
 sha2 = "0.11"
 httpdate = "1"
-ureq = { version = "3.4.2", default-features = false, features = ["json", "rustls"] }
+ureq = { version = "3.5.1", default-features = false, features = ["json", "rustls"] }
 url = "2.5"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
@@ -21,7 +21,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 libc = "0.2"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "freebsd"))'.dependencies]
-sysinfo = { version = "0.39.6", default-features = false, features = ["disk", "network", "system"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["disk", "network", "system"] }
 
 [profile.release]
 codegen-units = 1
