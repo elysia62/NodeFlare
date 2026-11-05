@@ -69,7 +69,7 @@ export function StatsBar({ servers, statuses, config, exchangeRates }: { servers
     icon: WalletCards,
     label: ui(locale, "资产", "Assets"),
     value: formatCurrency(totalValue, displayCurrency),
-    detail: <><span>{ui(locale, `剩余价值 ${formatCurrency(remainingValue, displayCurrency)}`, `Remaining value ${formatCurrency(remainingValue, displayCurrency)}`)}</span>{missingRates ? <span>{ui(locale, `${missingRates} 台汇率缺失`, `${missingRates} missing rates`)}</span> : null}</>,
+    detail: <><span title={ui(locale, "按周期价格和全部剩余天数估算，提前续费不封顶", "Estimated from the period price and all remaining days, including prepaid renewals")}>{ui(locale, `剩余价值 ${formatCurrency(remainingValue, displayCurrency)}`, `Remaining value ${formatCurrency(remainingValue, displayCurrency)}`)}</span>{missingRates ? <span>{ui(locale, `${missingRates} 台汇率缺失`, `${missingRates} missing rates`)}</span> : null}</>,
   });
   if (config.show_traffic) stats.push({
     icon: Database,

@@ -65,20 +65,39 @@ describe("remainingAssetValue", () => {
   beforeEach(() => setSystemTime(new Date(now * 1000)));
   afterEach(() => setSystemTime());
 
-  test("never exceeds the price of one billing period", () => {
-    // A monthly node with more than a month left is still only worth one month:
-    // only that period has been paid for. Counting every remaining period would
-    // report 3904.8 for a node whose period costs 36, making the dashboard's
-    // asset total smaller than the remaining value shown next to it.
-    expect(remainingAssetValue(36, 30, expiresIn(3254))).toBeCloseTo(36, 8);
-    expect(remainingAssetValue(36, 30, expiresIn(3650))).toBeCloseTo(36, 8);
-    expect(remainingAssetValue(120, 365, expiresIn(730))).toBeCloseTo(120, 8);
+  test("counts all prepaid periods instead of capping at one period", () => {
+    expect(remainingAssetValue(30, 30, expiresIn(90))).toBe(90);
+    expect(remainingAssetValue(36, 30, expiresIn(3254))).toBeCloseTo(3904.8, 8);
+    expect(remainingAssetValue(36, 30, expiresIn(3650))).toBeCloseTo(4380, 8);
+    expect(remainingAssetValue(120, 365, expiresIn(730))).toBeCloseTo(240, 8);
   });
 
   test("prorates within a period and supports multi-year annual billing", () => {
     expect(remainingAssetValue(36, 30, expiresIn(15))).toBeCloseTo(18, 8);
-    expect(remainingAssetValue(36, 30, expiresIn(45))).toBeCloseTo(36, 8);
+    expect(remainingAssetValue(36, 30, expiresIn(45))).toBeCloseTo(54, 8);
     expect(remainingAssetValue(120, 365, expiresIn(100))).toBeCloseTo(120 * 100 / 365, 8);
+  });
+
+  test("rounds future partial days up and expires at the exact deadline", () => {
+    expect(remainingAssetValue(30, 30, now + 1)).toBe(1);
+    expect(remainingAssetValue(30, 30, expiresIn(30) + 1)).toBeCloseTo(31, 8);
+    expect(remainingAssetValue(30, 30, now)).toBe(0);
+    expect(remainingAssetValue(30, 30, now - 1)).toBe(0);
+    expect(formatExpire({ price: 30, expires_at: now })).toBe("已过期");
+    expect(formatExpire({ price: 30, expires_at: now - 1 }, "en")).toBe("Expired");
+  });
+
+  test("uses the same long-term convention for the amount and expiry label", () => {
+    expect(remainingAssetValue(30, 30, expiresIn(36500))).toBe(36500);
+    expect(remainingAssetValue(30, 30, expiresIn(36501))).toBe(30);
+    expect(formatExpire({ price: 30, expires_at: expiresIn(36501) })).toBe("长期");
+  });
+
+  test("ignores invalid prices and expiry dates", () => {
+    expect(remainingAssetValue(Number.NaN, 30, expiresIn(30))).toBe(0);
+    expect(remainingAssetValue(Number.POSITIVE_INFINITY, 30, expiresIn(30))).toBe(0);
+    expect(remainingAssetValue(30, 30, Number.NaN)).toBe(0);
+    expect(remainingAssetValue(30, 30, Number.POSITIVE_INFINITY)).toBe(0);
   });
 
   test("keeps one-time charges fixed and excludes expired or unpriced terms", () => {

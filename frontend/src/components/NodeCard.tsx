@@ -150,7 +150,7 @@ export const NodeCard = memo(function NodeCard({ server, status, config, liveLat
             <CompactLine icon={<Upload size={11} />}>{formatBytes(server.net_tx_total)}</CompactLine>
             <CompactLine icon={<Download size={11} />}>{formatBytes(server.net_rx_total)}</CompactLine>
           </div>
-          {showExpiryPanel ? <div className="data-panel" title={ui(locale, "剩余周期", "Billing cycle")}>
+          {showExpiryPanel ? <div className="data-panel" title={ui(locale, "剩余时间与估算价值", "Remaining time and estimated value")}>
             {config.show_expiry ? <CompactLine icon={<CalendarDays size={11} />}>{formatExpire(server, locale)}</CompactLine> : null}
             {config.show_price ? <CompactLine icon={<Coins size={11} />}>{server.price === 0
               ? ui(locale, "免费", "Free")

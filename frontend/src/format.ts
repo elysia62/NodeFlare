@@ -182,37 +182,33 @@ export function formatPrice(server: Pick<Server, "price" | "billing_cycle" | "cu
   return `${formatCurrency(server.price, server.currency)} / ${cycle}`;
 }
 
+const LONG_TERM_DAYS = 365 * 100;
+
 function daysUntil(timestamp: number | null) {
-  if (!timestamp) return null;
-  return Math.ceil((timestamp * 1000 - Date.now()) / 86_400_000);
+  if (!timestamp || !Number.isFinite(timestamp)) return null;
+  const days = (timestamp * 1000 - Date.now()) / 86_400_000;
+  return days <= 0 ? Math.floor(days) : Math.ceil(days);
 }
 
 export function formatExpire(server: Pick<Server, "expires_at" | "price">, locale: UiLocale = "zh-CN") {
   if (server.price === 0 && !server.expires_at) return ui(locale, "长期", "Lifetime");
   const days = daysUntil(server.expires_at);
   if (days === null) return ui(locale, "未设置", "Not set");
-  if (days < 0) return ui(locale, "已过期", "Expired");
+  if (days <= 0) return ui(locale, "已过期", "Expired");
+  if (days > LONG_TERM_DAYS) return ui(locale, "长期", "Lifetime");
   return ui(locale, `${days} 天`, `${days} days`);
 }
 
 /**
- * Value of a node that has been paid for but not yet consumed.
- *
- * `price` is what one billing period costs, and the period covers
- * `billingCycle` days, so a node is worth at most one `price` — the amount the
- * operator has already committed to spending. The remaining days are prorated
- * against that period and capped at it: a node paid to the minute counts as a
- * full period, while one with several periods still outstanding counts as one,
- * because only the next period has actually been paid for.
- *
- * Without the cap the result could exceed the node's own price (a monthly node
- * with 46 days left would read as 1.53× its price), and the dashboard's asset
- * total would end up smaller than the remaining value it is compared against.
+ * Estimate service value from the period price and all remaining days, including
+ * prepaid renewals. Like the Glassmorphism theme, partial days round up and
+ * one-time or long-term (> 100 years) nodes retain one full price.
+ * This estimate does not establish the amount actually paid or refundable.
  */
 export function remainingAssetValue(price: number, billingCycle: number, expiresAt: number | null) {
-  if (price <= 0) return 0;
+  if (!Number.isFinite(price) || price <= 0) return 0;
   const days = daysUntil(expiresAt);
   if (days === null || days <= 0) return 0;
-  if (billingCycle <= 0) return price;
-  return price * Math.min(days, billingCycle) / billingCycle;
+  if (!Number.isFinite(billingCycle) || billingCycle <= 0 || days > LONG_TERM_DAYS) return price;
+  return price * (days / billingCycle);
 }
