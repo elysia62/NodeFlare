@@ -11,13 +11,13 @@ NodeFlare is a lightweight, self-hosted server monitoring panel: view server sta
 > [!WARNING]
 > NodeFlare is a self-hosted monitoring and control program and should only be deployed on systems you own or are authorized to manage. Deploying, accessing, or executing commands on unauthorized systems is at the deployer's own responsibility.
 
-[Documentation](https://elysia62.github.io/NodeFlareWiki/en/) | [Live Demo](https://elysia62.github.io/NodeFlareWiki/demo/) | [FAQ](https://elysia62.github.io/NodeFlareWiki/en/faq.html) | [Releases](https://github.com/elysia62/NodeFlare/releases)
+[Documentation](https://elysia62.github.io/NodeFlareWiki/en/) | [Live Demo](https://dash.elysiaya.xyz) | [FAQ](https://elysia62.github.io/NodeFlareWiki/en/faq.html) | [Releases](https://github.com/elysia62/NodeFlare/releases)
 
 ## Screenshots
 
-**Public dashboard** · [Live Demo](https://elysia62.github.io/NodeFlareWiki/demo/)
+**Public dashboard** · [Live Demo](https://dash.elysiaya.xyz)
 
-[![Public dashboard](frontend.png)](https://elysia62.github.io/NodeFlareWiki/demo/)
+[![Public dashboard](frontend.png)](https://dash.elysiaya.xyz)
 
 **Admin panel**
 

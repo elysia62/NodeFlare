@@ -58,7 +58,10 @@
 }
 
 .node-grid { display: grid; align-items: start; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-.node-card { position: relative; display: flex; width: 100%; min-width: 0; min-height: var(--node-card-min-height); align-self: start; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); padding: 0; text-align: left; box-shadow: var(--node-card-shadow); transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease; }
+/* Older WebKit/Blink buttons default to align-items: flex-start, shrinking the
+   header and body to their content width. Override it on the card itself.
+   https://bugs.webkit.org/show_bug.cgi?id=289441 */
+.node-card { position: relative; display: flex; width: 100%; min-width: 0; min-height: var(--node-card-min-height); align-self: start; align-items: stretch; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); padding: 0; text-align: left; box-shadow: var(--node-card-shadow); transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease; }
 .node-grid.carrier-latency .node-card { min-height: var(--node-card-carrier-min-height); }
 .node-card:hover { z-index: 2; border-color: color-mix(in srgb, var(--foreground) 24%, var(--node-card-border)); background: var(--node-card-hover); box-shadow: 0 12px 38px rgb(15 23 42 / .2); }
 .dark .node-card:hover { box-shadow: 0 12px 38px rgb(0 0 0 / .54); }
@@ -78,8 +81,7 @@
 .node-chips { display: flex; height: 19px; flex: 0 0 auto; align-items: center; gap: 6px; overflow: hidden; margin-top: -4px; }
 .node-chips span { min-width: 0; overflow: hidden; border-radius: 999px; padding: 2px 8px; color: var(--muted-foreground); background: color-mix(in srgb, var(--muted) 82%, transparent); font-size: 12px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .node-chips span + span { margin-left: auto; text-align: right; }
-/* Keep equal columns independent of the content's intrinsic minimum width. */
-.metric-grid { display: grid; gap: 10px 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.metric-grid { display: grid; gap: 10px 16px; grid-template-columns: 1fr 1fr; }
 .metric { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
 .metric.muted { opacity: .55; }
 /* 固定行高:CJK 回退字体的 normal 行高大于拉丁文本,浮动行高会把进度条与下一行顶偏 */
@@ -100,7 +102,7 @@
 .data-panel b > span { display: inline-flex; width: 10px; height: 10px; flex: 0 0 10px; align-items: center; justify-content: center; }
 .data-panel b svg { width: 10px; height: 10px; }
 .data-panel em { overflow: hidden; font-style: normal; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.quality-grid { display: grid; gap: 6px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.quality-grid { display: grid; gap: 6px; grid-template-columns: 1fr 1fr; }
 .quality-panel { display: flex; min-width: 0; height: var(--quality-panel-height); flex-direction: column; gap: 6px; overflow: visible; border-radius: var(--radius-md); padding: 8px; background: var(--node-data-bg); }
 .quality-panel > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted-foreground); font-size: 12px; line-height: 1; }
 .carrier-panel { height: var(--carrier-panel-height); }

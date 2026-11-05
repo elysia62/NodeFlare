@@ -17,7 +17,7 @@ NodeFlare 是一款轻量级、可自托管的服务器监控面板：通过 Web
 
 **公开看板** · [在线演示](https://dash.elysiaya.xyz)
 
-[![公开看板](docs/frontend.png)](https://elysia62.github.io/NodeFlareWiki/demo/)
+[![公开看板](docs/frontend.png)](https://dash.elysiaya.xyz)
 
 **管理后台**
 
