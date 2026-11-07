@@ -83,9 +83,7 @@ pub async fn create_task(
     state.sensitive_attempts.clear(&user.session_id);
     let known_server_ids = crate::db::queries::all_server_ids(&state.db)
         .await
-        .map_err(ApiResponse::internal)?
-        .into_iter()
-        .collect::<HashSet<_>>();
+        .map_err(ApiResponse::internal)?;
     if let Some(missing) = server_ids
         .iter()
         .find(|server_id| !known_server_ids.contains(*server_id))

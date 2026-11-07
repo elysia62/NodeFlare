@@ -39,6 +39,7 @@ export function StatsBar({ servers, statuses, config, exchangeRates }: { servers
   const paid = servers.filter((server) => server.price > 0);
   const toDisplayCurrency = (value: number, currency: string) => {
     const code = currency.trim().toUpperCase();
+    if (code === displayCurrency) return value;
     const sourceRate = code === "CNY" ? 1 : exchangeRates?.rates[code];
     const targetRate = displayCurrency === "CNY" ? 1 : exchangeRates?.rates[displayCurrency];
     if (typeof sourceRate !== "number" || !Number.isFinite(sourceRate) || sourceRate <= 0) return null;

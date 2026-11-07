@@ -356,8 +356,11 @@ pub(crate) fn apply_traffic(
             || state.reset_day != identity.reset_day
             || state.reset_timezone != identity.reset_timezone.name());
     if state.timestamp == 0 {
-        state.used_rx = report.net_rx_total.max(0);
-        state.used_tx = report.net_tx_total.max(0);
+        // The first counters include traffic from before enrollment, possibly
+        // from earlier billing cycles. Establish a baseline without charging it
+        // to this cycle; explicit corrections can supply known prior usage.
+        state.used_rx = 0;
+        state.used_tx = 0;
     } else if rolled_over {
         state.used_rx = 0;
         state.used_tx = 0;
@@ -787,8 +790,7 @@ mod traffic_tests {
             "周期内不算切换"
         );
         assert_eq!(
-            report.net_rx_total,
-            100 + identity.rx_correction,
+            report.net_rx_total, identity.rx_correction,
             "周期内应计入校准量"
         );
 
@@ -834,7 +836,7 @@ mod traffic_tests {
         let boundary = timestamp("2026-09-30T16:00:00Z");
         let mut state = TrafficState::default();
         for (ts, raw, used) in [
-            (boundary - 1, 100, 100),
+            (boundary - 1, 100, 0),
             (boundary, 150, 0),
             (boundary + 1, 180, 30),
         ] {

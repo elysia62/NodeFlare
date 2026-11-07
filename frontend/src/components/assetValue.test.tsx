@@ -29,3 +29,14 @@ test("overview converts the full remaining value and reports excluded currencies
   expect(markup).toContain("剩余价值 ¥180");
   expect(markup).toContain("1 台汇率缺失");
 });
+
+test("same-currency assets remain visible without exchange rates", () => {
+  const usd = { ...prepaid, currency: "USD" };
+  const display = { ...config, theme_options: { assetCurrency: "USD" } };
+  for (const exchangeRates of [null, { ...demoExchangeRates, rates: { CNY: 1 } }]) {
+    const markup = renderToStaticMarkup(<StatsBar servers={[usd]} statuses={{}} config={display} exchangeRates={exchangeRates} />);
+    expect(markup).toContain("<strong>$30</strong>");
+    expect(markup).toContain("剩余价值 $90");
+    expect(markup).not.toContain("汇率缺失");
+  }
+});

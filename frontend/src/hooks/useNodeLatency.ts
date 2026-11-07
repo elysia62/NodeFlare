@@ -197,17 +197,15 @@ export function useNodeLatency(
       samples.push(point);
       byTask.set(point.task_id, samples);
     }
-    const usable = new Set([...byTask.entries()]
-      .filter(([, samples]) => samples.some((sample) => Number.isFinite(sample.latency_ms) && sample.latency_ms >= 0))
-      .map(([taskId]) => taskId));
-    const included = points.filter((point) => usable.has(point.task_id));
-    const buckets = bucketSamples(included, windowSeconds);
-    const averageLatency = averageOf(included.map((point) => point.latency_ms));
-    const averageLoss = averageOf(included.map((point) => point.packet_loss));
+    // Failed probes still carry measured loss. Do not remove an entire task
+    // merely because none of its probes produced a successful latency.
+    const buckets = bucketSamples(points, windowSeconds);
+    const averageLatency = averageOf(points.map((point) => point.latency_ms));
+    const averageLoss = averageOf(points.map((point) => point.packet_loss));
 
     const carriers: CarrierLatencyRow[] = [];
     if (carrierSelection) {
-      const available = taskRefs(points).filter((task) => usable.has(task.id));
+      const available = taskRefs(points);
       const selected = selectCarrierTasks(available, carrierSelection);
       for (const slot of CARRIER_SLOTS) {
         const task = selected.get(slot.key);

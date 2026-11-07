@@ -332,11 +332,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const cache = cardCacheRef.current;
     const next = servers.map((server) => {
       const live = liveMetrics[server.id];
-      const merged = mergeServerLive(server, live);
       const cached = cache.get(server.id);
       if (cached && cached.server === server && cached.live === live) {
         return cached.result;
       }
+      const merged = mergeServerLive(server, live);
       cache.set(server.id, { server, live, result: merged });
       return merged;
     });

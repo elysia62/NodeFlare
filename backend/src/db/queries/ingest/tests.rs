@@ -50,6 +50,61 @@ fn traffic_report(timestamp: i64, raw: i64) -> AgentReport {
 }
 
 #[tokio::test]
+async fn enrollment_counts_only_observed_deltas_across_flush_replay_and_reconnect() {
+    let (db, mut identity, at) = rollover_fixture().await;
+    sqlx::query("DELETE FROM server_traffic_state WHERE server_id='node'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE servers SET rx_correction=0,tx_correction=0 WHERE id='node'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    identity.rx_correction = 0;
+    identity.tx_correction = 0;
+    let mut buffer = crate::websocket::ingest::AgentBuffer::new(&db, "node")
+        .await
+        .unwrap();
+    let reports = vec![
+        traffic_report(at, 1_000_000),
+        traffic_report(at + 1, 1_000_050),
+    ];
+    let result = buffer
+        .receive(&db, &identity, "", reports.clone(), true)
+        .await
+        .unwrap();
+    assert_eq!(result.samples[0].net_rx_total, 0);
+    assert_eq!(result.samples[1].net_rx_total, 50);
+    assert_eq!(result.acknowledgement.unwrap().reports[1].net_rx_total, 50);
+
+    let mut reconnected = crate::websocket::ingest::AgentBuffer::new(&db, "node")
+        .await
+        .unwrap();
+    let retry = reconnected
+        .receive(&db, &identity, "", reports, true)
+        .await
+        .unwrap();
+    assert!(retry.samples.is_empty());
+    let result = reconnected
+        .receive(
+            &db,
+            &identity,
+            "",
+            vec![traffic_report(at + 2, 1_000_080)],
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.samples[0].net_rx_total, 80);
+    assert_eq!(result.acknowledgement.unwrap().reports[0].net_tx_total, 160);
+    let saved = super::super::list_servers(&db, true)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(saved.net_rx_total, Some(80));
+}
+
+#[tokio::test]
 async fn rollover_persists_uncorrected_samples_and_replays_without_double_counting() {
     let (db, identity, at) = rollover_fixture().await;
     let reports = [traffic_report(at + 1, 1000), traffic_report(at + 2, 1100)];
@@ -297,7 +352,7 @@ async fn assert_metadata_updates_preserve_persistence(db: &Database) {
         let persisted: AgentReport = serde_json::from_str(&latest.1).unwrap();
         assert_eq!(persisted.timestamp, timestamp);
         assert_eq!(persisted.cpu, index as f64);
-        assert_eq!(persisted.net_rx_total, 100 + index as i64);
+        assert_eq!(persisted.net_rx_total, index as i64);
         let traffic: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT timestamp,raw_rx,raw_tx,used_rx,used_tx FROM server_traffic_state WHERE server_id='node'",
         ).fetch_one(db.pool()).await.unwrap();
@@ -307,8 +362,8 @@ async fn assert_metadata_updates_preserve_persistence(db: &Database) {
                 timestamp,
                 100 + index as i64,
                 200 + index as i64 * 2,
-                100 + index as i64,
-                200 + index as i64 * 2
+                index as i64,
+                index as i64 * 2
             )
         );
         let samples: i64 = sqlx::query_scalar(
@@ -355,7 +410,7 @@ async fn assert_metadata_updates_preserve_persistence(db: &Database) {
         .remove(0);
     assert_eq!(saved.timestamp, Some(base + 8));
     assert_eq!(saved.cpu, Some(8.0));
-    assert_eq!(saved.net_rx_total, Some(108));
+    assert_eq!(saved.net_rx_total, Some(8));
     let samples: i64 = sqlx::query_scalar(
         "SELECT CAST(SUM(sample_count) AS BIGINT) FROM metric_history WHERE server_id='node'",
     )

@@ -270,7 +270,8 @@ mod tests {
         transaction.commit().await.unwrap();
         let stored = agent_traffic_state(&db, &id).await.unwrap();
         assert_eq!(stored.reset_timezone, input.reset_timezone);
-        assert_eq!(stored.used_rx, 123);
+        assert_eq!(stored.raw_rx, 123);
+        assert_eq!(stored.used_rx, 0);
     }
 
     #[tokio::test]
@@ -666,7 +667,10 @@ mod tests {
         assert_eq!(point.mem_used_max, 900);
         assert_eq!(point.net_in, 90.0 * 1_048_576.0);
         assert_eq!(point.disk_read_bps, 9000.0);
-        assert_eq!(point.net_rx_total, reports[2].net_rx_total);
+        assert_eq!(
+            point.net_rx_total,
+            reports[2].net_rx_total - reports[0].net_rx_total
+        );
         let latest = list_servers(&db, true).await.unwrap().remove(0);
         assert_eq!(latest.timestamp, Some(start + 2));
         assert_eq!(latest.cpu, Some(20.0));
