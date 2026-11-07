@@ -268,8 +268,17 @@ request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/admin/ser
 
 step "persisted metrics: public snapshot"
 post_report_bootstrap=$(request -H "Authorization: Bearer $admin_token" "$MONITOR_BASE_URL/api/bootstrap")
-if ! printf '%s' "$post_report_bootstrap" | jq -e --arg id "$server_id" --arg task_id "$latency_task_id" '.servers | any(.id == $id and .cpu == 18.5 and .gpu_usage == 32.5 and .disk_await_ms == 1.4 and (.gpus | length) == 1 and (.disks | length) == 1 and .disk_used == 21474836480 and .traffic_limit == 107374182400 and .net_rx_total == 2684354560 and .net_tx_total == 1342177280 and .price == 9.9 and (has("last_ip") | not) and (.latency | any(.task_id == $task_id and .latency_ms == 48.4 and .packet_loss == 75)))' >/dev/null; then
+if ! printf '%s' "$post_report_bootstrap" | jq -e --arg id "$server_id" --arg task_id "$latency_task_id" '.servers | any(.id == $id and .cpu == 18.5 and .gpu_usage == 32.5 and .disk_await_ms == 1.4 and (.gpus | length) == 1 and (.disks | length) == 1 and .disk_used == 21474836480 and .traffic_limit == 107374182400 and .price == 9.9 and (has("last_ip") | not) and (.latency | any(.task_id == $task_id and .latency_ms == 48.4 and .packet_loss == 75)))' >/dev/null; then
   printf '%s' "$post_report_bootstrap" | jq --arg id "$server_id" '.servers[] | select(.id == $id)' >&2
+  exit 1
+fi
+step "persisted metrics: traffic baseline and counter reset"
+# websocket-smoke.mjs starts at 1 GiB RX / 0.5 GiB TX (baseline only),
+# observes another 1 GiB / 0.5 GiB, then a reset and 0.5 GiB / 0.25 GiB.
+if ! printf '%s' "$post_report_bootstrap" | jq -e --arg id "$server_id" \
+  '.servers | any(.id == $id and .net_rx_total == 1610612736 and .net_tx_total == 805306368)' >/dev/null; then
+  printf '%s\n' 'smoke: traffic assertion failed; expected RX 1610612736 and TX 805306368 bytes after excluding the initial baseline' >&2
+  printf '%s' "$post_report_bootstrap" | jq --arg id "$server_id" '.servers[] | select(.id == $id) | {id, net_rx_total, net_tx_total}' >&2
   exit 1
 fi
 step "persisted metrics: GPU history"

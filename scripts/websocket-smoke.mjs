@@ -737,6 +737,16 @@ try {
     samples.map((sample) => sample.timestamp), "Browser receives every real sample in order");
   assert.equal(update.updates[0].samples.flatMap((sample) => sample.data.latency_results).length,
     2, "All new latency results are retained");
+  assert.deepEqual(
+    update.updates[0].samples.map(({ data }) => [data.net_rx_total, data.net_tx_total]),
+    [
+      [0, 0], [0, 0], [0, 0],
+      [1073741824, 536870912],
+      [1342177280, 671088640],
+      [1610612736, 805306368],
+    ],
+    "Live traffic excludes the first counters and accumulates increments across a counter reset",
+  );
 
   const publicIdentityFields = [
     "cpu_model",

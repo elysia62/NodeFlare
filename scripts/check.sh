@@ -1,6 +1,6 @@
 #!/bin/sh
-# Run every check the CI quality and dependency-security jobs run, so a push is
-# not the first time the formatting, lint, test and audit steps meet this code.
+# Run the local formatting, lint, unit-test and dependency-audit checks.
+# Service smoke tests and Agent runtime tests are separate CI steps.
 #
 # Steps that need a service or tool CI provides are skipped with a notice
 # instead of failing: PostgreSQL tests only run when NODEFLARE_TEST_POSTGRES_URL
@@ -61,9 +61,11 @@ else
   printf '\n▶ 测试（PostgreSQL）\n  已跳过：设置 NODEFLARE_TEST_POSTGRES_URL 后重跑\n'
 fi
 
+printf '\n▶ 服务集成测试\n  未运行：本命令不启动测试服务；发版前还需运行 scripts/smoke-test.sh（SQLite/PostgreSQL）和 scripts/agent-runtime-test.mjs\n'
+
 printf '\n%s\n' "────────────────────────────────────────"
 if [ "$failures" -eq 0 ]; then
-  printf '✅ 全部检查通过\n'
+  printf '✅ 本次已执行的检查通过\n'
 else
   printf '❌ %s 项检查失败\n' "$failures"
 fi
