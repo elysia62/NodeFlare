@@ -14,6 +14,7 @@ permissions:
 
 # The ubuntu-latest label migrates to Ubuntu 26 on 2026-10-19, so pin Ubuntu 24.04
 # explicitly until the build and smoke tests are validated on the newer image.
+# macOS 14 runners retired on 2026-11-02; use macOS 15 for ARM64 builds.
 jobs:
   metadata:
     name: Resolve build metadata
@@ -303,7 +304,7 @@ jobs:
             freebsd_arm: false
             rustflags: -C target-feature=+crt-static
           - platform: macOS ARM64
-            runner: macos-14
+            runner: macos-15
             target: aarch64-apple-darwin
             asset: nodeflare-macos-aarch64
             extension: ""
@@ -511,7 +512,7 @@ jobs:
             static_linux: false
             rustflags: -C target-feature=+crt-static
           - platform: macOS ARM64
-            runner: macos-14
+            runner: macos-15
             target: aarch64-apple-darwin
             asset: agent-macos-aarch64
             extension: ""
