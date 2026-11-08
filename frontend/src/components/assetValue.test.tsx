@@ -19,7 +19,7 @@ test("card and overview show all prepaid service even when it exceeds the period
   expect(card).toContain("<em>¥90</em>");
   expect(overview).toContain("剩余价值");
   expect(overview).toContain("<strong>¥90</strong>");
-  expect(overview).toContain("单期价格合计 ¥30");
+  expect(overview).toContain("每月成本 ¥30");
   expect(overview).not.toContain(">资产<");
 });
 
@@ -29,7 +29,7 @@ test("overview converts the full remaining value and reports excluded currencies
   const rates = { ...demoExchangeRates, rates: { CNY: 1, USD: 0.1 } };
   const markup = renderToStaticMarkup(<StatsBar servers={[prepaid, usd, eur]} statuses={{}} config={config} exchangeRates={rates} />);
   expect(markup).toContain("<strong>¥180</strong>");
-  expect(markup).toContain("单期价格合计 ¥60");
+  expect(markup).toContain("每月成本 ¥60");
   expect(markup).toContain("1 台汇率缺失");
 });
 
@@ -39,7 +39,29 @@ test("same-currency assets remain visible without exchange rates", () => {
   for (const exchangeRates of [null, { ...demoExchangeRates, rates: { CNY: 1 } }]) {
     const markup = renderToStaticMarkup(<StatsBar servers={[usd]} statuses={{}} config={display} exchangeRates={exchangeRates} />);
     expect(markup).toContain("<strong>$90</strong>");
-    expect(markup).toContain("单期价格合计 $30");
+    expect(markup).toContain("每月成本 $30");
     expect(markup).not.toContain("汇率缺失");
   }
+});
+
+test("monthly cost normalizes mixed billing cycles and excludes one-time charges", () => {
+  const servers = [
+    prepaid,
+    { ...prepaid, id: "quarterly", price: 90, billing_cycle: 90 },
+    { ...prepaid, id: "yearly", price: 36.5, currency: "USD", billing_cycle: 365 },
+    { ...prepaid, id: "weekly", price: 7, billing_cycle: 7 },
+    { ...prepaid, id: "one-time", price: 999, billing_cycle: 0 },
+    { ...prepaid, id: "free", price: 0 },
+  ];
+  const rates = { ...demoExchangeRates, rates: { CNY: 1, USD: 0.1 } };
+  const markup = renderToStaticMarkup(<StatsBar servers={servers} statuses={{}} config={config} exchangeRates={rates} />);
+  expect(markup).toContain("每月成本 ¥120");
+  expect(markup).toContain("<strong>¥1359</strong>");
+});
+
+test("one-time purchases retain remaining value without recurring monthly cost", () => {
+  const purchase = { ...prepaid, price: 99, billing_cycle: 0 };
+  const markup = renderToStaticMarkup(<StatsBar servers={[purchase]} statuses={{}} config={{ ...config, locale: "en" }} exchangeRates={null} />);
+  expect(markup).toContain("Monthly cost ¥0");
+  expect(markup).toContain("<strong>¥99</strong>");
 });

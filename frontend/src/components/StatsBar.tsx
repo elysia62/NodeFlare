@@ -48,7 +48,10 @@ export function StatsBar({ servers, statuses, config, exchangeRates }: { servers
   };
   const converted = paid.map((server) => ({ server, price: toDisplayCurrency(server.price, server.currency) }));
   const missingRates = converted.filter(({ price }) => price === null).length;
-  const periodPriceTotal = converted.reduce((sum, { price }) => sum + (price ?? 0), 0);
+  const monthlyCost = converted.reduce((sum, { server, price }) => {
+    if (price === null || !Number.isFinite(server.billing_cycle) || server.billing_cycle <= 0) return sum;
+    return sum + price * 30 / server.billing_cycle;
+  }, 0);
   const remainingValue = converted.reduce((sum, { server, price }) => {
     if (price === null) return sum;
     const remaining = remainingAssetValue(server.price, server.billing_cycle, server.expires_at);
@@ -70,7 +73,7 @@ export function StatsBar({ servers, statuses, config, exchangeRates }: { servers
     icon: WalletCards,
     label: ui(locale, "剩余价值", "Remaining value"),
     value: formatCurrency(remainingValue, displayCurrency),
-    detail: <><span title={ui(locale, "各节点按各自计费周期填写的价格合计，不代表累计付款或月均费用", "Sum of each node’s entered period price; not total payments or monthly cost")}>{ui(locale, `单期价格合计 ${formatCurrency(periodPriceTotal, displayCurrency)}`, `Period prices ${formatCurrency(periodPriceTotal, displayCurrency)}`)}</span>{missingRates ? <span>{ui(locale, `${missingRates} 台汇率缺失`, `${missingRates} missing rates`)}</span> : null}</>,
+    detail: <><span title={ui(locale, "按周期价格折算为 30 天成本，一次性费用不计入", "Period prices normalized to 30 days; one-time charges excluded")}>{ui(locale, `每月成本 ${formatCurrency(monthlyCost, displayCurrency)}`, `Monthly cost ${formatCurrency(monthlyCost, displayCurrency)}`)}</span>{missingRates ? <span>{ui(locale, `${missingRates} 台汇率缺失`, `${missingRates} missing rates`)}</span> : null}</>,
   });
   if (config.show_traffic) stats.push({
     icon: Database,
