@@ -48,7 +48,7 @@ export function StatsBar({ servers, statuses, config, exchangeRates }: { servers
   };
   const converted = paid.map((server) => ({ server, price: toDisplayCurrency(server.price, server.currency) }));
   const missingRates = converted.filter(({ price }) => price === null).length;
-  const totalValue = converted.reduce((sum, { price }) => sum + (price ?? 0), 0);
+  const periodPriceTotal = converted.reduce((sum, { price }) => sum + (price ?? 0), 0);
   const remainingValue = converted.reduce((sum, { server, price }) => {
     if (price === null) return sum;
     const remaining = remainingAssetValue(server.price, server.billing_cycle, server.expires_at);
@@ -68,9 +68,9 @@ export function StatsBar({ servers, statuses, config, exchangeRates }: { servers
 
   if (config.show_assets) stats.push({
     icon: WalletCards,
-    label: ui(locale, "资产", "Assets"),
-    value: formatCurrency(totalValue, displayCurrency),
-    detail: <><span title={ui(locale, "按周期价格和全部剩余天数估算，提前续费不封顶", "Estimated from the period price and all remaining days, including prepaid renewals")}>{ui(locale, `剩余价值 ${formatCurrency(remainingValue, displayCurrency)}`, `Remaining value ${formatCurrency(remainingValue, displayCurrency)}`)}</span>{missingRates ? <span>{ui(locale, `${missingRates} 台汇率缺失`, `${missingRates} missing rates`)}</span> : null}</>,
+    label: ui(locale, "剩余价值", "Remaining value"),
+    value: formatCurrency(remainingValue, displayCurrency),
+    detail: <><span title={ui(locale, "各节点按各自计费周期填写的价格合计，不代表累计付款或月均费用", "Sum of each node’s entered period price; not total payments or monthly cost")}>{ui(locale, `单期价格合计 ${formatCurrency(periodPriceTotal, displayCurrency)}`, `Period prices ${formatCurrency(periodPriceTotal, displayCurrency)}`)}</span>{missingRates ? <span>{ui(locale, `${missingRates} 台汇率缺失`, `${missingRates} missing rates`)}</span> : null}</>,
   });
   if (config.show_traffic) stats.push({
     icon: Database,

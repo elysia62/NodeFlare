@@ -17,8 +17,10 @@ test("card and overview show all prepaid service even when it exceeds the period
   const card = renderToStaticMarkup(<NodeCard server={prepaid} status="online" config={config} liveConnected onOpen={() => {}} />);
   const overview = renderToStaticMarkup(<StatsBar servers={[prepaid]} statuses={{ [prepaid.id]: "online" }} config={config} exchangeRates={null} />);
   expect(card).toContain("<em>¥90</em>");
-  expect(overview).toContain("剩余价值 ¥90");
-  expect(overview).toContain("<strong>¥30</strong>");
+  expect(overview).toContain("剩余价值");
+  expect(overview).toContain("<strong>¥90</strong>");
+  expect(overview).toContain("单期价格合计 ¥30");
+  expect(overview).not.toContain(">资产<");
 });
 
 test("overview converts the full remaining value and reports excluded currencies", () => {
@@ -26,7 +28,8 @@ test("overview converts the full remaining value and reports excluded currencies
   const eur = { ...prepaid, id: "eur", price: 10, currency: "EUR" };
   const rates = { ...demoExchangeRates, rates: { CNY: 1, USD: 0.1 } };
   const markup = renderToStaticMarkup(<StatsBar servers={[prepaid, usd, eur]} statuses={{}} config={config} exchangeRates={rates} />);
-  expect(markup).toContain("剩余价值 ¥180");
+  expect(markup).toContain("<strong>¥180</strong>");
+  expect(markup).toContain("单期价格合计 ¥60");
   expect(markup).toContain("1 台汇率缺失");
 });
 
@@ -35,8 +38,8 @@ test("same-currency assets remain visible without exchange rates", () => {
   const display = { ...config, theme_options: { assetCurrency: "USD" } };
   for (const exchangeRates of [null, { ...demoExchangeRates, rates: { CNY: 1 } }]) {
     const markup = renderToStaticMarkup(<StatsBar servers={[usd]} statuses={{}} config={display} exchangeRates={exchangeRates} />);
-    expect(markup).toContain("<strong>$30</strong>");
-    expect(markup).toContain("剩余价值 $90");
+    expect(markup).toContain("<strong>$90</strong>");
+    expect(markup).toContain("单期价格合计 $30");
     expect(markup).not.toContain("汇率缺失");
   }
 });
