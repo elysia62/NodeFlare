@@ -33,24 +33,41 @@ docker run --rm --user 0:0 --entrypoint sh \
     chmod 700 /etc/nodeflare
     chmod 600 /etc/nodeflare/config.toml
   '
-container=$(docker run --detach \
-  --publish 127.0.0.1::2206 \
-  --mount "type=volume,src=$volume,dst=/etc/nodeflare" \
-  "$image")
-address=$(docker port "$container" 2206/tcp)
-base="http://$address"
-curl --noproxy '*' --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 3 \
-  "$base/api/bootstrap" >/dev/null
-for path in / /admin/login; do
-  html=$(curl --noproxy '*' --fail --silent --show-error --max-time 10 "$base$path")
-  script=$(printf '%s\n' "$html" | sed -n 's/.*src="\([^"]*\.js\)".*/\1/p')
-  stylesheet=$(printf '%s\n' "$html" | sed -n 's/.*href="\([^"]*\.css\)".*/\1/p')
-  [ -n "$script" ] && [ -n "$stylesheet" ]
-  curl --noproxy '*' --fail --silent --show-error --max-time 10 "$base$script" >/dev/null
-  curl --noproxy '*' --fail --silent --show-error --max-time 10 "$base$stylesheet" >/dev/null
-done
-docker exec "$container" sh -c '
-  test -s /etc/nodeflare/nodeflare.db
-  ! grep -q DockerSmokePassword123 /etc/nodeflare/config.toml
-'
+check_image() {
+  container=$(docker run --detach "$@" \
+    --publish 127.0.0.1::2207 \
+    --mount "type=volume,src=$volume,dst=/etc/nodeflare" \
+    "$image" --config /etc/nodeflare/config.toml --bind 0.0.0.0:2207)
+  address=$(docker port "$container" 2207/tcp)
+  base="http://$address"
+  curl --noproxy '*' --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 3 \
+    "$base/api/bootstrap" >/dev/null
+  for path in / /admin/login; do
+    html=$(curl --noproxy '*' --fail --silent --show-error --max-time 10 "$base$path")
+    script=$(printf '%s\n' "$html" | sed -n 's/.*src="\([^"]*\.js\)".*/\1/p')
+    stylesheet=$(printf '%s\n' "$html" | sed -n 's/.*href="\([^"]*\.css\)".*/\1/p')
+    [ -n "$script" ] && [ -n "$stylesheet" ]
+    curl --noproxy '*' --fail --silent --show-error --max-time 10 "$base$script" >/dev/null
+    curl --noproxy '*' --fail --silent --show-error --max-time 10 "$base$stylesheet" >/dev/null
+  done
+  docker exec "$container" sh -c '
+    test -s /etc/nodeflare/nodeflare.db
+    ! grep -q DockerSmokePassword123 /etc/nodeflare/config.toml
+  '
+  docker exec "$container" /usr/local/bin/nodeflare --check-container
+  # Exercise the image HEALTHCHECK itself as well as the direct command.
+  healthy=false
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if [ "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy ]; then
+      healthy=true
+      break
+    fi
+    sleep 5
+  done
+  [ "$healthy" = true ] || { docker inspect --format '{{json .State.Health}}' "$container"; exit 1; }
+  docker rm --force "$container" >/dev/null
+  container=""
+}
+check_image
+check_image --init
 printf '%s\n' 'Docker image smoke test passed'

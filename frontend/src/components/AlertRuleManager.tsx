@@ -40,7 +40,7 @@ export function AlertRuleManager({ locale, servers, onError, onNotice }: {
   const load = useCallback(async () => {
     try { setRules((await api.alertRules()).rules); }
     catch (reason) { onError(reason instanceof Error ? reason.message : ui(locale, "读取告警规则失败", "Failed to load alert rules")); }
-  }, [onError]);
+  }, [onError, locale]);
 
   useEffect(() => { void load(); }, [load]);
 

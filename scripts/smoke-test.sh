@@ -255,6 +255,25 @@ server_json=$(request -H "Authorization: Bearer $admin_token" \
   "$MONITOR_BASE_URL/api/admin/servers")
 server_id=$(printf '%s' "$server_json" | jq -er '.id')
 agent_token=$(printf '%s' "$server_json" | jq -er '.agent_token')
+step "Agent credential rotation"
+old_agent_token=$agent_token
+old_install_token=$(request -X POST -H "Authorization: Bearer $admin_token" \
+  "$MONITOR_BASE_URL/api/admin/servers/$server_id/agent-token" | jq -er '.agent_token')
+rotation_without_proof=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X POST -H "Authorization: Bearer $admin_token" \
+  "$MONITOR_BASE_URL/api/admin/servers/$server_id/agent-token/rotate")
+[ "$rotation_without_proof" = "422" ]
+agent_token=$(request -X POST -H "Authorization: Bearer $admin_token" \
+  -H "X-NodeFlare-Password: $password_derived" \
+  "$MONITOR_BASE_URL/api/admin/servers/$server_id/agent-token/rotate" | jq -er '.agent_token')
+for revoked in "$old_agent_token" "$old_install_token"; do
+  revoked_status=$(monitor_curl --silent --output /dev/null --write-out '%{http_code}' \
+    -H "Authorization: Bearer $revoked" -H 'X-NodeFlare-Agent-Protocol: 1' \
+    -H 'X-NodeFlare-Agent-Capabilities: metrics-v1,config-v1,remote-exec-v1,task-ack-v1' \
+    -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$MONITOR_BASE_URL/api/agent/ws")
+  [ "$revoked_status" = "401" ]
+done
 step "websocket report"
 MONITOR_BASE_URL="$MONITOR_BASE_URL" MONITOR_ADMIN_TOKEN="$admin_token" \
   MONITOR_ADMIN_USERNAME="$MONITOR_ADMIN_USERNAME" \

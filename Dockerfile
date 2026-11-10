@@ -49,5 +49,7 @@ WORKDIR /etc/nodeflare
 USER 10001:10001
 VOLUME ["/etc/nodeflare"]
 EXPOSE 2206
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["/usr/local/bin/nodeflare", "--check-container"]
 ENTRYPOINT ["/usr/local/bin/nodeflare"]
 CMD ["--config", "/etc/nodeflare/config.toml"]

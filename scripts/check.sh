@@ -23,6 +23,7 @@ step() {
 }
 
 # Frontend
+step "lint（前端）" bun run lint:frontend
 step "类型检查（前端）" bun run --cwd frontend tsc -b
 step "测试（前端）" bun test --cwd frontend
 step "构建（前端）" bun run build:frontend

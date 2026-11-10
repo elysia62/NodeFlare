@@ -50,6 +50,71 @@ fn traffic_report(timestamp: i64, raw: i64) -> AgentReport {
 }
 
 #[tokio::test]
+async fn invalid_samples_do_not_block_valid_neighbors_or_advance_ack() {
+    let (db, identity, at) = rollover_fixture().await;
+    let good = traffic_report(at + 1, 120);
+    let mut bad = traffic_report(at + 2, 140);
+    bad.cpu = f64::NAN;
+    // Exercise the wire codec too: JSON encodes non-finite floats as null.
+    let wire = nodeflare_telemetry::encode(&nodeflare_telemetry::Update::from_reports(
+        vec![good.clone(), bad.clone()],
+        true,
+        &mut None,
+    ))
+    .unwrap();
+    let reports = nodeflare_telemetry::decode::<nodeflare_telemetry::Update>(&wire)
+        .unwrap()
+        .into_reports(&mut None)
+        .unwrap();
+    let mut buffer = crate::websocket::ingest::AgentBuffer::new(&db, "node")
+        .await
+        .unwrap();
+    let result = buffer
+        .receive(&db, &identity, "", reports, true)
+        .await
+        .unwrap();
+    assert_eq!(result.rejected, vec![at + 2]);
+    assert_eq!(result.samples.len(), 1);
+    assert_eq!(result.acknowledgement.unwrap().persisted_through, at + 1);
+    let mut reconnected = crate::websocket::ingest::AgentBuffer::new(&db, "node")
+        .await
+        .unwrap();
+    let retry = reconnected
+        .receive(&db, &identity, "", vec![good, bad.clone()], true)
+        .await
+        .unwrap();
+    assert_eq!(retry.rejected, vec![at + 2]);
+    assert!(retry.samples.is_empty());
+    assert_eq!(retry.acknowledgement.unwrap().persisted_through, at + 1);
+    // A corrected sample with the same timestamp must still be accepted.
+    bad.cpu = 20.0;
+    let corrected = reconnected
+        .receive(&db, &identity, "", vec![bad], true)
+        .await
+        .unwrap();
+    assert!(corrected.rejected.is_empty());
+    assert_eq!(corrected.acknowledgement.unwrap().persisted_through, at + 2);
+}
+
+#[tokio::test]
+async fn a_valid_duplicate_timestamp_is_not_reported_as_rejected() {
+    let (db, identity, at) = rollover_fixture().await;
+    let good = traffic_report(at + 1, 120);
+    let mut bad = good.clone();
+    bad.cpu = 101.0;
+    let mut buffer = crate::websocket::ingest::AgentBuffer::new(&db, "node")
+        .await
+        .unwrap();
+    let result = buffer
+        .receive(&db, &identity, "", vec![bad, good], false)
+        .await
+        .unwrap();
+    assert!(result.rejected.is_empty());
+    assert_eq!(result.samples.len(), 1);
+    assert!(result.acknowledgement.is_none());
+}
+
+#[tokio::test]
 async fn enrollment_counts_only_observed_deltas_across_flush_replay_and_reconnect() {
     let (db, mut identity, at) = rollover_fixture().await;
     sqlx::query("DELETE FROM server_traffic_state WHERE server_id='node'")

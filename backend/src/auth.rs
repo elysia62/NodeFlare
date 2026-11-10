@@ -52,6 +52,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn client_password_derivation_matches_shared_utf8_vectors() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../../shared/password-vectors.json")).unwrap();
+        for vector in vectors.as_array().unwrap() {
+            assert_eq!(
+                derive_client_password(
+                    vector["password"].as_str().unwrap(),
+                    vector["deployment_salt"].as_str().unwrap()
+                ),
+                vector["derived"].as_str().unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn hashes_and_verifies_derived_passwords() {
         let derived = derive_client_password("correct horse battery staple", "deployment-salt");
         let hash = hash_password(&derived).unwrap();

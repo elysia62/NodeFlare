@@ -7,7 +7,7 @@ use sqlx::any::{AnyArguments, AnyRow, AnyTypeInfoKind};
 use sqlx::{Arguments, AssertSqlSafe, Column, Executor, Row, SqlSafeStr};
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -425,7 +425,13 @@ async fn export(
 }
 
 pub async fn export_archive(db: &Database, theme_dir: &Path) -> Result<DatabaseArchive> {
-    export(db, Some(theme_dir), BACKUP_TABLES).await
+    let db = db.clone();
+    let theme_dir = theme_dir.to_path_buf();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(export(&db, Some(&theme_dir), BACKUP_TABLES))
+    })
+    .await?
 }
 
 fn validate_archive<R: Read + Seek>(
@@ -931,19 +937,35 @@ async fn restore<R: Read + Seek + Send>(
     Ok(restored)
 }
 
-pub async fn restore_archive(db: &Database, theme_dir: &Path, archive: &[u8]) -> Result<usize> {
-    if archive.is_empty() || archive.len() > DATABASE_BACKUP_MAX_BYTES {
-        bail!("数据库备份 ZIP 大小无效");
-    }
-    restore(db, Cursor::new(archive), Some(theme_dir), BACKUP_TABLES).await
+pub async fn restore_file(db: &Database, theme_dir: &Path, mut file: File) -> Result<usize> {
+    let db = db.clone();
+    let theme_dir = theme_dir.to_path_buf();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let size = file.metadata()?.len();
+        if size == 0 || size > DATABASE_BACKUP_MAX_BYTES as u64 {
+            bail!("数据库备份 ZIP 大小无效");
+        }
+        file.seek(SeekFrom::Start(0))?;
+        runtime.block_on(restore(&db, file, Some(&theme_dir), BACKUP_TABLES))
+    })
+    .await?
 }
 
 pub async fn copy_database(source: &Database, target: &Database) -> Result<usize> {
-    let mut tables = BACKUP_TABLES.to_vec();
-    tables.push("server_install_tokens");
-    tables.push("notification_deliveries");
-    let archive = export(source, None, &tables).await?;
-    restore(target, archive.file, None, &tables).await
+    let source = source.clone();
+    let target = target.clone();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(async move {
+            let mut tables = BACKUP_TABLES.to_vec();
+            tables.push("server_install_tokens");
+            tables.push("notification_deliveries");
+            let archive = export(&source, None, &tables).await?;
+            restore(&target, archive.file, None, &tables).await
+        })
+    })
+    .await?
 }
 
 #[cfg(test)]
@@ -1121,10 +1143,8 @@ mod tests {
         // File backups preserve settings and queued events, but replay delivery
         // after an explicit restore, just like the existing outbox policy.
         let directory = tempfile::tempdir().unwrap();
-        let mut exported = export_archive(&source, directory.path()).await.unwrap();
-        let mut bytes = Vec::new();
-        exported.file.read_to_end(&mut bytes).unwrap();
-        restore_archive(&target, directory.path(), &bytes)
+        let exported = export_archive(&source, directory.path()).await.unwrap();
+        restore_file(&target, directory.path(), exported.file)
             .await
             .unwrap();
         assert_eq!(
@@ -1248,10 +1268,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let themes = directory.path().join("themes");
         let mut exported = export_archive(&db, &themes).await.unwrap();
-        let mut bytes = Vec::new();
-        exported.file.read_to_end(&mut bytes).unwrap();
         let manifest = validate_archive(
-            &mut ZipArchive::new(Cursor::new(&bytes)).unwrap(),
+            &mut ZipArchive::new(&mut exported.file).unwrap(),
             BACKUP_TABLES,
         )
         .unwrap();
@@ -1262,7 +1280,7 @@ mod tests {
                 .iter()
                 .any(|table| table == "server_install_tokens")
         );
-        restore_archive(&db, &themes, &bytes).await.unwrap();
+        restore_file(&db, &themes, exported.file).await.unwrap();
         assert!(
             crate::db::queries::agent_identity(&db, "primary-token")
                 .await
@@ -1310,11 +1328,9 @@ mod tests {
             .unwrap();
         }
         let themes = tempfile::tempdir().unwrap();
-        let mut archive = export_archive(&source, themes.path()).await.unwrap();
-        let mut bytes = Vec::new();
-        archive.file.read_to_end(&mut bytes).unwrap();
+        let archive = export_archive(&source, themes.path()).await.unwrap();
         let target_themes = tempfile::tempdir().unwrap();
-        restore_archive(target, target_themes.path(), &bytes)
+        restore_file(target, target_themes.path(), archive.file)
             .await
             .unwrap();
         let rows = sqlx::query(
@@ -1390,7 +1406,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(attempts, 100);
-        assert!(next_attempt >= crate::db::now() + 3590);
+        assert!((1790..=3600).contains(&(next_attempt - crate::db::now())));
         crate::db::queries::delete_server(target, "node")
             .await
             .unwrap();
@@ -1589,13 +1605,13 @@ mod tests {
             .execute(target.pool()).await.unwrap();
         let directory = tempfile::tempdir().unwrap();
         let themes = directory.path().join("themes");
-        let mut exported = export_archive(&source, &themes).await.unwrap();
-        let mut bytes = Vec::new();
-        exported.file.read_to_end(&mut bytes).unwrap();
+        let exported = export_archive(&source, &themes).await.unwrap();
         fs::create_dir(&themes).unwrap();
         fs::write(themes.join("current.txt"), "Preserved").unwrap();
 
-        let error = restore_archive(&target, &themes, &bytes).await.unwrap_err();
+        let error = restore_file(&target, &themes, exported.file)
+            .await
+            .unwrap_err();
         assert!(
             error.to_string().contains("server_latest_state 备份结构"),
             "{error:#}"
@@ -1723,9 +1739,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut exported = export_archive(&db, &theme_dir).await.unwrap();
-        let mut bytes = Vec::new();
-        exported.file.read_to_end(&mut bytes).unwrap();
+        let exported = export_archive(&db, &theme_dir).await.unwrap();
 
         sqlx::query("UPDATE settings SET value='After backup' WHERE key='site_name'")
             .execute(db.pool())
@@ -1743,7 +1757,10 @@ mod tests {
         std::fs::create_dir_all(&theme_dir).unwrap();
         std::fs::write(theme_dir.join("stale.txt"), b"stale").unwrap();
 
-        assert_eq!(restore_archive(&db, &theme_dir, &bytes).await.unwrap(), 7);
+        assert_eq!(
+            restore_file(&db, &theme_dir, exported.file).await.unwrap(),
+            7
+        );
         let site_name =
             sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key='site_name'")
                 .fetch_one(db.pool())
@@ -1779,9 +1796,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut exported = export_archive(&db, &theme_dir).await.unwrap();
-        let mut bytes = Vec::new();
-        exported.file.read_to_end(&mut bytes).unwrap();
+        let exported = export_archive(&db, &theme_dir).await.unwrap();
 
         sqlx::query("UPDATE settings SET value='Current database' WHERE key='site_name'")
             .execute(db.pool())
@@ -1796,7 +1811,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(restore_archive(&db, &theme_dir, &bytes).await.is_err());
+        assert!(restore_file(&db, &theme_dir, exported.file).await.is_err());
         let site_name =
             sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key='site_name'")
                 .fetch_one(db.pool())

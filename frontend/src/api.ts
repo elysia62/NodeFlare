@@ -52,7 +52,7 @@ async function request<T>(path: string, init: RequestInit = {}, admin = false): 
   return response.json() as Promise<T>;
 }
 
-interface SensitiveProof {
+export interface SensitiveProof {
   totpCode?: string;
   passwordDerived?: string;
 }
@@ -65,6 +65,8 @@ function sensitiveHeaders(proof: SensitiveProof): Headers {
 }
 
 export const api = {
+  rotateAgentToken: (id: string, proof: SensitiveProof) =>
+    request<{ agent_token: string }>(`/api/admin/servers/${encodeURIComponent(id)}/agent-token/rotate`, { method: "POST", headers: sensitiveHeaders(proof) }, true),
   bootstrap: () => request<Bootstrap>("/api/bootstrap", { cache: "no-store", signal: AbortSignal.timeout(15_000) }),
   exchangeRates: () => request<ExchangeRates>("/api/exchange-rates"),
   refreshExchangeRates: () => request<ExchangeRates>("/api/admin/exchange-rates/refresh", { method: "POST" }, true),

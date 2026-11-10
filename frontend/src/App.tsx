@@ -7,6 +7,7 @@ import { SiteLogo } from "./components/SiteLogo";
 import { StatsBar } from "./components/StatsBar";
 import { TurnstileWidget } from "./components/TurnstileWidget";
 import { ui } from "./locale";
+import { ThemeFrame } from "./components/ThemeFrame";
 
 const NodeDetails = lazy(() => import("./components/NodeDetails").then((module) => ({ default: module.NodeDetails })));
 
@@ -152,6 +153,11 @@ export default function App() {
         {error ? <div className="error-band"><span>{error}</span><button onClick={() => void reload()}>{ui(locale, "重试", "Retry")}</button></div> : null}
       </div>
     );
+  }
+
+  const preview = location.pathname.match(/^\/__theme-preview\/([a-f0-9]+)\/?$/)?.[1] ?? '';
+  if (!demoMode && access === 'ok' && (preview || config.active_theme_id !== 'builtin-nodeflare-glass')) {
+    return <ThemeFrame themeId={config.active_theme_id} preview={preview} locale={locale} />;
   }
 
   return (

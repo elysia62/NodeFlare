@@ -8,6 +8,8 @@
     "frontend"
   ],
   "scripts": {
+    "lint:frontend": "eslint frontend/src",
+    "test:themes": "node scripts/theme-sandbox-test.mjs",
     "dev": "sh dev.sh",
     "dev:frontend": "bun run --cwd frontend dev",
     "start": "sh start.sh",
@@ -25,7 +27,13 @@
   "devDependencies": {
     "@playwright/test": "^1.64.1",
     "@types/node": "^26.6.6",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "playwright": "^1.64.1",
+    "typescript-eslint": "^8.72.2",
     "ws": "^8.22.1"
+  },
+  "overrides": {
+    "minimatch": "^11.0.5"
   }
 }

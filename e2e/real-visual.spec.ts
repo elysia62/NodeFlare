@@ -1,7 +1,8 @@
 import { gzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test, VISUAL_NOW } from './visual-fixture';
 import { Dashboard } from "./dashboard";
 
 /**
@@ -26,7 +27,7 @@ const fixture = (name: string) =>
  */
 function anchoredBootstrap(ageSeconds = 5) {
   const data = fixture("bootstrap.json");
-  const now = Math.floor(Date.now() / 1000);
+  const now = Math.floor(VISUAL_NOW / 1000);
   // 原始数据里各节点的时间偏移是相对录制时刻的，整体平移保持相对关系
   const recordedAt = Math.max(...data.servers.map((s: { timestamp: number }) => s.timestamp));
   const shift = now - ageSeconds - recordedAt;
@@ -38,7 +39,7 @@ function anchoredBootstrap(ageSeconds = 5) {
 
 /** 由 fixture 派生的一个批次更新，时间戳锚定在固定的过去时刻。 */
 function batchUpdate() {
-  const now = Math.floor(Date.now() / 1000);
+  const now = Math.floor(VISUAL_NOW / 1000);
   const server = anchoredBootstrap().servers[0];
   return {
     type: "batchUpdate",
@@ -71,8 +72,6 @@ async function stubBackend(page: Page, bootstrap = anchoredBootstrap()) {
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(bootstrap) }),
   );
   await page.routeWebSocket(/\/api\/ws/, (ws) => {
-    const server = ws.connectToServer();
-    server.onMessage(() => {});
     ws.send(gzipSync(JSON.stringify(batchUpdate())));
   });
 }
@@ -91,16 +90,14 @@ test.describe("真实数据路径视觉", () => {
     // 正常轮询，snapshotAt 就会被不断刷新，所以让响应带上已超出离线阈值的
     // 时间戳，等价于真实环境中「agent 停止上报」时卡片的样子。
     const stale = anchoredBootstrap();
-    const staleAt = Math.floor(Date.now() / 1000) - 3600;
+    const staleAt = Math.floor(VISUAL_NOW / 1000) - 3600;
     for (const server of stale.servers) {
       server.timestamp = staleAt;
     }
     await page.route("**/api/bootstrap*", (route) =>
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(stale) }),
     );
-    await page.routeWebSocket(/\/api\/ws/, (ws) => {
-      const server = ws.connectToServer();
-      server.onMessage(() => {});
+    await page.routeWebSocket(/\/api\/ws/, () => {
       // 不发任何帧：没有流证据，页面只能依赖快照
     });
 

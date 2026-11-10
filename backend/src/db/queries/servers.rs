@@ -358,6 +358,9 @@ pub async fn reorder_servers(db: &Database, ids: &[String]) -> Result<()> {
 }
 
 pub async fn agent_install_token(db: &Database, id: &str) -> Result<Option<String>> {
+    // Install scripts persist this exact token for ongoing telemetry. It is not
+    // an enrollment-only code: expiring it would disconnect installed agents.
+    // A TTL requires a separate exchange for a durable reporting credential.
     let token = auth::random_token(32);
     // The existence check and the insert share one transaction so a server
     // deleted in between cannot turn a missing node into a foreign-key 500.
@@ -366,11 +369,15 @@ pub async fn agent_install_token(db: &Database, id: &str) -> Result<Option<Strin
     } else {
         db.pool().begin_with("BEGIN IMMEDIATE").await?
     };
-    let exists = sqlx::query_scalar::<_, i64>(db.sql("SELECT COUNT(*) FROM servers WHERE id=?"))
-        .bind(id)
-        .fetch_one(&mut *transaction)
-        .await?;
-    if exists == 0 {
+    let exists = sqlx::query_scalar::<_, String>(db.sql(if db.is_postgres() {
+        "SELECT id FROM servers WHERE id=? FOR UPDATE"
+    } else {
+        "SELECT id FROM servers WHERE id=?"
+    }))
+    .bind(id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if exists.is_none() {
         transaction.rollback().await?;
         return Ok(None);
     }
@@ -382,6 +389,33 @@ pub async fn agent_install_token(db: &Database, id: &str) -> Result<Option<Strin
     .bind(now())
     .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
+    Ok(Some(token))
+}
+
+/// Explicit rotation revokes the primary credential and every installation
+/// alias in one transaction. Generating an installation command does not rotate.
+pub async fn rotate_agent_token(db: &Database, id: &str) -> Result<Option<String>> {
+    let token = auth::random_token(32);
+    let mut transaction = if db.is_postgres() {
+        db.pool().begin().await?
+    } else {
+        db.pool().begin_with("BEGIN IMMEDIATE").await?
+    };
+    let result = sqlx::query(db.sql("UPDATE servers SET token_hash=?, updated_at=? WHERE id=?"))
+        .bind(auth::token_hash(&token))
+        .bind(now())
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    if result.rows_affected() == 0 {
+        transaction.rollback().await?;
+        return Ok(None);
+    }
+    sqlx::query(db.sql("DELETE FROM server_install_tokens WHERE server_id=?"))
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
     Ok(Some(token))
 }
@@ -468,6 +502,49 @@ pub async fn public_server_exists(db: &Database, server_id: &str) -> Result<bool
     .fetch_one(db.pool())
     .await?;
     Ok(count > 0)
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rotation_revokes_all_old_credentials_for_only_the_selected_node() {
+        let db = crate::db::connect("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        for (id, token) in [("one", "primary-one"), ("two", "primary-two")] {
+            sqlx::query(
+                "INSERT INTO servers(id,name,token_hash,created_at,updated_at) VALUES (?,?,?,1,1)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(auth::token_hash(token))
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        let alias = agent_install_token(&db, "one").await.unwrap().unwrap();
+        assert!(agent_identity(&db, "primary-one").await.unwrap().is_some());
+        assert!(agent_identity(&db, &alias).await.unwrap().is_some());
+        let token = rotate_agent_token(&db, "one").await.unwrap().unwrap();
+        for revoked in ["primary-one", &alias] {
+            assert!(agent_identity(&db, revoked).await.unwrap().is_none());
+        }
+        assert_eq!(
+            agent_identity(&db, &token)
+                .await
+                .unwrap()
+                .unwrap()
+                .server_id,
+            "one"
+        );
+        assert!(agent_identity(&db, "primary-two").await.unwrap().is_some());
+        assert!(rotate_agent_token(&db, "missing").await.unwrap().is_none());
+        // A new installation command remains valid without revoking the new primary.
+        let alias = agent_install_token(&db, "one").await.unwrap().unwrap();
+        assert!(agent_identity(&db, &token).await.unwrap().is_some());
+        assert!(agent_identity(&db, &alias).await.unwrap().is_some());
+    }
 }
 
 #[cfg(test)]

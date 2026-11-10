@@ -6,6 +6,7 @@ pub(crate) struct LiveSender {
     pub(crate) persisted_through: Arc<AtomicI64>,
     pub(crate) remote_config: Arc<Mutex<Option<RemoteConfig>>>,
     pub(crate) stats: Arc<runtime_stats::RuntimeStats>,
+    pub(crate) rejected: Arc<Mutex<Vec<i64>>>,
 }
 
 pub(crate) struct LiveSenderWorker {
@@ -16,6 +17,7 @@ pub(crate) struct LiveSenderWorker {
     pub(crate) remote_control: bool,
     pub(crate) clock: SharedClock,
     pub(crate) stats: Arc<runtime_stats::RuntimeStats>,
+    pub(crate) rejected: Arc<Mutex<Vec<i64>>>,
 }
 
 impl LiveSender {
@@ -25,6 +27,8 @@ impl LiveSender {
         stats: Arc<runtime_stats::RuntimeStats>,
     ) -> Result<Self> {
         let pending = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+        let rejected = Arc::new(Mutex::new(Vec::new()));
+        let worker_rejected = Arc::clone(&rejected);
         let send_interval = Arc::new(Mutex::new(live_batch_interval(config.collect_interval)));
         let persisted_through = Arc::new(AtomicI64::new(0));
         let remote_config = Arc::new(Mutex::new(None));
@@ -50,6 +54,7 @@ impl LiveSender {
                         remote_control,
                         clock,
                         stats: sender_stats,
+                        rejected: worker_rejected,
                     },
                 )
             })?;
@@ -59,7 +64,15 @@ impl LiveSender {
             persisted_through,
             remote_config,
             stats,
+            rejected,
         })
+    }
+
+    pub(crate) fn take_rejected(&self) -> Vec<i64> {
+        self.rejected
+            .lock()
+            .map(|mut values| std::mem::take(&mut *values))
+            .unwrap_or_default()
     }
 
     pub(crate) fn send(&self, report: &Report) {
@@ -166,7 +179,8 @@ pub(crate) fn connect_live(
         .is_some_and(|value| value == AGENT_PROTOCOL_VERSION)
     {
         return Err(format!(
-            "backend protocol mismatch; update the backend to protocol {AGENT_PROTOCOL_VERSION}"
+            "Agent/backend protocol mismatch: Agent expects {AGENT_PROTOCOL_VERSION}, backend returned {}; use matching versions and check proxy response headers",
+            response.headers().get(AGENT_PROTOCOL_HEADER).and_then(|value| value.to_str().ok()).unwrap_or("<missing>")
         )
         .into());
     }
@@ -252,6 +266,7 @@ pub(crate) enum LiveRead {
     Config(RemoteConfig),
     RemoteTask(RemoteTaskMessage),
     TaskResultAck(String),
+    Rejected(Vec<i64>),
     Closed,
     Pending,
 }
@@ -263,6 +278,14 @@ pub(crate) fn read_live_ack(socket: &mut LiveSocket) -> Result<LiveRead> {
                 return Ok(LiveRead::Pending);
             };
             match value.get("type").and_then(serde_json::Value::as_str) {
+                Some("rejected_samples") => {
+                    let timestamps =
+                        serde_json::from_value::<Vec<i64>>(value["timestamps"].clone())?;
+                    if timestamps.len() > telemetry::MAX_SAMPLES {
+                        return Err("too many rejected sample timestamps".into());
+                    }
+                    Ok(LiveRead::Rejected(timestamps))
+                }
                 Some("ack") => {
                     let Ok(ack) = serde_json::from_value::<LiveAck>(value) else {
                         return Ok(LiveRead::Pending);
@@ -371,6 +394,7 @@ pub(crate) fn wait_for_live_ack(
             LiveRead::TaskResultAck(task_id) => {
                 remote_executor.acknowledge(&task_id);
             }
+            LiveRead::Rejected(values) => return Ok(LiveRead::Rejected(values)),
             LiveRead::Closed => return Ok(LiveRead::Closed),
             LiveRead::Pending => {}
         }
@@ -463,6 +487,7 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
         remote_control,
         clock,
         stats,
+        rejected,
     } = worker;
     let mut socket: Option<LiveSocket> = None;
     let mut backoff = ReconnectBackoff::new(token);
@@ -589,6 +614,9 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
                         Ok(LiveRead::TaskResultAck(task_id)) => {
                             remote_executor.acknowledge(&task_id);
                         }
+                        Ok(LiveRead::Rejected(values)) => {
+                            reject_live_samples(&pending, &rejected, values)
+                        }
                         Ok(LiveRead::Pending) => {}
                         Err(error) => {
                             eprintln!("live hint read failed: {error}");
@@ -651,7 +679,15 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
 
         let mut drop_socket = false;
         if let Some(socket) = socket.as_mut() {
-            match wait_for_live_ack(socket, &remote_config, &mut remote_executor) {
+            let reply = loop {
+                match wait_for_live_ack(socket, &remote_config, &mut remote_executor) {
+                    Ok(LiveRead::Rejected(values)) => {
+                        reject_live_samples(&pending, &rejected, values)
+                    }
+                    reply => break reply,
+                }
+            };
+            match reply {
                 Ok(LiveRead::Closed) => drop_socket = true,
                 Ok(LiveRead::Ack(ack)) => {
                     observe_persisted_through(&persisted_through, &ack);
@@ -680,7 +716,9 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
                     }
                     drop_socket = true;
                 }
-                Ok(LiveRead::RemoteTask(_) | LiveRead::TaskResultAck(_)) => {}
+                Ok(
+                    LiveRead::RemoteTask(_) | LiveRead::TaskResultAck(_) | LiveRead::Rejected(_),
+                ) => {}
                 Ok(LiveRead::Pending) => {
                     eprintln!("live ACK timed out");
                     drop_socket = true;
@@ -698,5 +736,67 @@ pub(crate) fn live_sender_loop(endpoint: &str, token: &str, worker: LiveSenderWo
             next_probe_at = Instant::now();
             thread::sleep(backoff.next_delay());
         }
+    }
+}
+
+// Only remember timestamps that are still queued. The collector removes these
+// same entries from the disk spool; rejection never advances the persisted ACK.
+fn reject_live_samples(
+    pending: &Arc<(Mutex<VecDeque<Report>>, Condvar)>,
+    rejected: &Mutex<Vec<i64>>,
+    timestamps: Vec<i64>,
+) {
+    let timestamps: HashSet<_> = timestamps.into_iter().collect();
+    if let (Ok(mut queue), Ok(mut discarded)) = (pending.0.lock(), rejected.lock()) {
+        let mut known: HashSet<_> = discarded.iter().copied().collect();
+        queue.retain(|report| {
+            if timestamps.contains(&report.timestamp) {
+                if discarded.len() < LIVE_QUEUE_CAPACITY && known.insert(report.timestamp) {
+                    discarded.push(report.timestamp);
+                }
+                false
+            } else {
+                true
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejection_removes_only_matching_samples_and_reports_them_to_the_spool() {
+        let pending = Arc::new((
+            Mutex::new(VecDeque::from([
+                Report {
+                    timestamp: 10,
+                    ..Report::default()
+                },
+                Report {
+                    timestamp: 11,
+                    ..Report::default()
+                },
+                Report {
+                    timestamp: 12,
+                    ..Report::default()
+                },
+            ])),
+            Condvar::new(),
+        ));
+        let rejected = Mutex::new(Vec::new());
+        reject_live_samples(&pending, &rejected, vec![11, 11, 999]);
+        assert_eq!(
+            pending
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.timestamp)
+                .collect::<Vec<_>>(),
+            vec![10, 12]
+        );
+        assert_eq!(*rejected.lock().unwrap(), vec![11]);
     }
 }

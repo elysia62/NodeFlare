@@ -267,8 +267,18 @@ async fn bounded_body(response: reqwest::Response, limit: usize, message: &str) 
 
 fn rewrite_index(html: &str, prefix: &str) -> String {
     let asset_prefix = format!("{}/assets/", prefix.trim_end_matches('/'));
-    html.replace("\"/assets/", &format!("\"{asset_prefix}"))
-        .replace("'/assets/", &format!("'{asset_prefix}"))
+    let html = html
+        .replace("\"/assets/", &format!("\"{asset_prefix}"))
+        .replace("'/assets/", &format!("'{asset_prefix}"));
+    if prefix.is_empty() {
+        return html;
+    }
+    // Keep location.pathname for theme routers while resolving relative assets
+    // against the installed theme. The bridge must precede every theme script.
+    // Keep standards mode even when the original document has a doctype.
+    format!(
+        "<!doctype html><base href=\"{prefix}/\"><script src=\"/__theme-bridge.js\"></script>{html}"
+    )
 }
 
 fn empty_settings_schema() -> Value {

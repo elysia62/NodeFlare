@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import { liveLatencySamples } from "../live";
 import {
@@ -93,10 +93,13 @@ export function useNodeLatency(
   const [fetched, setFetched] = useState<LatencySample[]>(server.latency);
   const [loading, setLoading] = useState(enabled);
 
+  const latencySnapshot = useRef(server.latency);
+  latencySnapshot.current = server.latency;
   const taskSignature = JSON.stringify(server.latency.map((point) => [point.task_id, point.name, point.task_type, point.target, point.port]));
 
   useEffect(() => {
-    setFetched(server.latency);
+    // Reset history when the node/task list changes, not on each live sample.
+    setFetched(latencySnapshot.current);
   }, [server.id, taskSignature]);
 
   useEffect(() => {
@@ -183,10 +186,6 @@ export function useNodeLatency(
     return mergePoints(fetched, server.latency, liveLatencySamples(server.latency, liveResults))
       .filter((point) => point.timestamp >= cutoff);
   }, [server.latency, fetched, liveResults]);
-  const carrierKey = carrierSelection
-    ? `${carrierSelection.telecom}\0${carrierSelection.unicom}\0${carrierSelection.mobile}`
-    : "";
-
   return useMemo<NodeLatencyStats>(() => {
     const windowSeconds = WINDOW_HOURS * 3600;
     const placeholder = loading ? ui(locale, "加载中", "Loading") : ui(locale, "无采样数据", "No samples");
@@ -233,5 +232,5 @@ export function useNodeLatency(
       lossBars: buckets.length ? lossBars(buckets, "all", locale) : emptyBars(placeholder),
       carriers,
     };
-  }, [carrierKey, carrierSelection !== null, loading, locale, points]);
+  }, [carrierSelection, loading, locale, points]);
 }

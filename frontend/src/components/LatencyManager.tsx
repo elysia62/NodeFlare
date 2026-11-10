@@ -74,7 +74,7 @@ export function LatencyManager({
     } finally {
       setBusy(false);
     }
-  }, [onError]);
+  }, [onError, locale]);
 
   useEffect(() => { void load(); }, [load]);
 

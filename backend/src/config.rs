@@ -28,6 +28,10 @@ pub struct Args {
     /// Check the local HTTP service is ready, then exit without opening a database.
     #[arg(long)]
     pub check_ready: bool,
+
+    /// Check the container's server using its actual --config and --bind arguments (Linux, including --init).
+    #[arg(long)]
+    pub check_container: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

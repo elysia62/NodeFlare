@@ -121,6 +121,11 @@ async fn main() -> Result<()> {
         .init();
 
     let args = config::Args::parse();
+    let args = if args.check_container {
+        readiness::container_args()?
+    } else {
+        args
+    };
     let mut config = config::Config::load(&args.config)?;
     let database_overridden = args.database.is_some();
     if let Some(database) = args.database {
@@ -221,6 +226,30 @@ async fn main() -> Result<()> {
         password_verifications: Arc::new(Semaphore::new(4)),
     });
 
+    // Maintenance owns its activity guards and must not inherit a shared request guard.
+    let maintenance = Router::new()
+        .route(
+            "/api/admin/database/reclaim",
+            post(routes::admin::database_reclaim),
+        )
+        .route(
+            "/api/admin/database/migrate",
+            post(routes::admin::database_migrate),
+        )
+        .route(
+            "/api/admin/database/backup",
+            get(routes::admin::database_backup),
+        )
+        .route(
+            "/api/admin/database/restore",
+            post(routes::admin::database_restore),
+        )
+        .layer(axum_middleware::from_fn(middleware::finish_maintenance))
+        .layer(axum_middleware::from_fn_with_state(
+            Arc::clone(&state),
+            middleware::auth_middleware,
+        ));
+
     let protected = Router::new()
         .route("/api/admin/logout", post(routes::auth::logout))
         .route("/api/admin/sessions", get(routes::auth::sessions_get))
@@ -245,6 +274,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/admin/servers/{id}/agent-token",
             post(routes::admin::server_agent_token),
+        )
+        .route(
+            "/api/admin/servers/{id}/agent-token/rotate",
+            post(routes::admin::server_rotate_token),
         )
         .route(
             "/api/admin/servers/{id}",
@@ -320,24 +353,8 @@ async fn main() -> Result<()> {
         )
         .route("/api/admin/database", get(routes::admin::database_stats))
         .route(
-            "/api/admin/database/reclaim",
-            post(routes::admin::database_reclaim),
-        )
-        .route(
-            "/api/admin/database/migrate",
-            post(routes::admin::database_migrate),
-        )
-        .route(
             "/api/admin/database/restart",
             post(routes::admin::database_restart),
-        )
-        .route(
-            "/api/admin/database/backup",
-            get(routes::admin::database_backup),
-        )
-        .route(
-            "/api/admin/database/restore",
-            post(routes::admin::database_restore),
         )
         .route("/api/admin/remote/task", post(routes::remote::create_task))
         .route("/api/admin/remote/task/{id}", get(routes::remote::get_task))
@@ -349,6 +366,7 @@ async fn main() -> Result<()> {
     let app =
         Router::new()
             .route("/api/bootstrap", get(routes::public::bootstrap))
+            .route("/api/theme-frame", get(routes::site::theme_frame))
             .route("/api/favicon", get(routes::public::favicon))
             .route("/api/history/{id}", get(routes::public::history))
             .route("/api/latency/{id}", get(routes::public::latency_history))
@@ -367,6 +385,7 @@ async fn main() -> Result<()> {
                 Arc::clone(&state),
                 middleware::database_activity,
             ))
+            .merge(maintenance)
             .layer(TraceLayer::new_for_http())
             // Compression sits above the response-generating layers so frontend
             // assets, JSON payloads and the SSE-less API all shrink on the wire.

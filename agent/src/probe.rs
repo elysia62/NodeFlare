@@ -5,72 +5,7 @@
 
 use super::*;
 
-pub(crate) fn valid_probe_host(host: &str) -> bool {
-    if host.is_empty() || host.len() > 50 || host.starts_with('.') || host.ends_with('.') {
-        return false;
-    }
-    let labels = host.split('.').collect::<Vec<_>>();
-    let ipv4_like = labels.len() == 4
-        && labels
-            .iter()
-            .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_digit()));
-    if ipv4_like {
-        return host
-            .parse()
-            .is_ok_and(|address| is_public_probe_ip(IpAddr::V4(address)));
-    }
-    let lower = host.to_ascii_lowercase();
-    if labels.len() < 2
-        || ["local", "localhost", "internal", "lan", "localdomain"]
-            .iter()
-            .any(|suffix| lower == *suffix || lower.ends_with(&format!(".{suffix}")))
-        || lower == "home.arpa"
-        || lower.ends_with(".home.arpa")
-    {
-        return false;
-    }
-    labels.iter().all(|label| {
-        !label.is_empty()
-            && label
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '-')
-            && label
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-            && label
-                .chars()
-                .last()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-    })
-}
-
-pub(crate) fn is_public_probe_ip(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            let [a, b, c, _] = address.octets();
-            !(a == 0
-                || a == 10
-                || a == 127
-                || (a == 100 && (64..=127).contains(&b))
-                || (a == 169 && b == 254)
-                || (a == 172 && (16..=31).contains(&b))
-                || (a == 192 && b == 0 && c == 0)
-                || (a == 192 && b == 0 && c == 2)
-                || (a == 192 && b == 168)
-                || (a == 198 && (b == 18 || b == 19))
-                || (a == 198 && b == 51 && c == 100)
-                || (a == 203 && b == 0 && c == 113)
-                || a >= 224)
-        }
-        IpAddr::V6(address) => {
-            if let Some(mapped) = address.to_ipv4_mapped() {
-                return is_public_probe_ip(IpAddr::V4(mapped));
-            }
-            address.segments()[0] & 0xe000 == 0x2000
-        }
-    }
-}
+pub(crate) use telemetry::probe::{is_public_probe_ip, valid_probe_host};
 
 pub(crate) fn resolve_public_probe_address(host: &str, port: u16) -> Option<SocketAddr> {
     let addresses = (host, port)
@@ -178,10 +113,17 @@ pub(crate) fn icmp_latency_probe(target: &str) -> (f64, f64) {
     ping.args(["-n", "-c", "4", "-W", "1000", destination.as_str()]);
     #[cfg(target_os = "windows")]
     ping.args(["-n", "4", "-w", "1000", destination.as_str()]);
-    let mut latencies = ping
-        .output()
-        .map(|output| ping_latencies(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or_default();
+    let mut latencies = match ping.output() {
+        Ok(output) => ping_latencies(&String::from_utf8_lossy(&output.stdout)),
+        Err(error) => {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("ICMP probe unavailable: cannot execute ping: {error}");
+            }
+            return (-1.0, -1.0);
+        }
+    };
     latencies.truncate(PROBE_ATTEMPTS);
     let loss = (PROBE_ATTEMPTS - latencies.len()) as f64 * 100.0 / PROBE_ATTEMPTS as f64;
     if latencies.is_empty() {

@@ -614,7 +614,7 @@ fn update_check_jitter(token: &str) -> Duration {
 }
 
 fn prune_report_samples(samples: &mut Vec<Report>, now: i64) {
-    samples.retain(|report| (report.timestamp - now).abs() <= MAX_REPORT_AGE_SECONDS);
+    samples.retain(|report| report.timestamp.abs_diff(now) <= MAX_REPORT_AGE_SECONDS as u64);
     let mut remaining = MAX_PENDING_LATENCY_RESULTS;
     for report in samples.iter_mut().rev() {
         if report.latency_results.len() > remaining {
@@ -625,6 +625,15 @@ fn prune_report_samples(samples: &mut Vec<Report>, now: i64) {
             remaining -= report.latency_results.len();
         }
     }
+}
+
+fn sanitize_spooled_samples(samples: &mut Vec<Report>, now: i64) {
+    // Only validate the full payload once when loading. Revalidating every
+    // queued sample each second would repeatedly serialize the whole backlog.
+    // The saved timestamps may already include the backend clock correction,
+    // while startup has not yet received a fresh clock calibration.
+    samples.retain(|report| telemetry::valid_report(report, report.timestamp));
+    prune_report_samples(samples, now);
 }
 
 fn agent_state_directory() -> Result<PathBuf> {
@@ -782,6 +791,9 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         }
     };
     let mut last_spool_rewrite: Option<Instant> = None;
+    let mut rejected_spool_dirty = false;
+    let mut next_rejected_spool_retry = Instant::now();
+    let mut next_invalid_warning = Instant::now();
     let mut pending_samples = load_pending_spool(&spool_path).unwrap_or_else(|error| {
         eprintln!("pending report spool ignored: {error}");
         Vec::new()
@@ -791,7 +803,7 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
         .iter()
         .map(|report| report.latency_results.len())
         .sum::<usize>();
-    prune_report_samples(&mut pending_samples, unix_timestamp());
+    sanitize_spooled_samples(&mut pending_samples, unix_timestamp());
     if (loaded_len != pending_samples.len()
         || loaded_latency
             != pending_samples
@@ -823,6 +835,20 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
     let mut once_target_timestamp = None;
     loop {
         if let Some(live) = &live {
+            let rejected: HashSet<_> = live.take_rejected().into_iter().collect();
+            if !rejected.is_empty() {
+                pending_samples.retain(|report| !rejected.contains(&report.timestamp));
+                rejected_spool_dirty = true;
+            }
+            if rejected_spool_dirty && Instant::now() >= next_rejected_spool_retry {
+                next_rejected_spool_retry = Instant::now() + Duration::from_secs(30);
+                match rewrite_pending_spool(&spool_path, &pending_samples) {
+                    Ok(()) => rejected_spool_dirty = false,
+                    Err(error) => {
+                        eprintln!("failed to remove rejected samples from spool: {error}")
+                    }
+                }
+            }
             let persisted_through = live.persisted_through();
             let before = pending_samples.len();
             pending_samples.retain(|report| report.timestamp > persisted_through);
@@ -884,6 +910,9 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
             let offset_ms = shared_clock_offset(&clock);
             let mut latest_results = HashMap::new();
             for mut result in std::mem::take(&mut pending_results) {
+                if result.packet_loss < 0.0 {
+                    continue;
+                }
                 result.timestamp = corrected_timestamp(result.timestamp, offset_ms);
                 latest_results.insert(result.task_id.clone(), result);
             }
@@ -899,6 +928,19 @@ fn run(options: &CliOptions, once: bool, print_only: bool) -> Result<()> {
                 collector.collect(&config, latest_results.into_values().collect(), timestamp);
             stats.collection_finished(collection_started.elapsed());
             last_emitted_timestamp = report.timestamp;
+            if !telemetry::valid_report(&report, report.timestamp) {
+                if once {
+                    return Err("collected an invalid telemetry sample".into());
+                }
+                if Instant::now() >= next_invalid_warning {
+                    eprintln!(
+                        "discarded invalid telemetry sample before spool/encoding; check collector metrics"
+                    );
+                    next_invalid_warning = Instant::now() + Duration::from_secs(60);
+                }
+                next_collect = advance_deadline(next_collect, SAMPLE_INTERVAL, Instant::now());
+                continue;
+            }
             if print_only {
                 println!("{}", serde_json::to_string_pretty(&report)?);
                 return Ok(());

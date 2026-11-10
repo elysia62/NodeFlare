@@ -77,7 +77,7 @@ pub use rollup::compact_history;
 pub use servers::{
     agent_config, agent_identity, agent_install_token, all_server_ids, create_server,
     delete_server, delete_servers, list_servers, list_servers_with_live, public_server_exists,
-    renew_expired_servers, reorder_servers, server_name, update_server,
+    renew_expired_servers, reorder_servers, rotate_agent_token, server_name, update_server,
 };
 pub use telegram::{raw_telegram_settings, save_telegram_settings, telegram_settings};
 pub use themes::{
@@ -573,6 +573,12 @@ mod tests {
         let (id, primary_token) = create_server(&db, &server_input(0)).await.unwrap();
         let first_install_token = agent_install_token(&db, &id).await.unwrap().unwrap();
         let second_install_token = agent_install_token(&db, &id).await.unwrap().unwrap();
+        // This credential is stored by the installer and must survive weeks of
+        // uptime; created_at alone cannot be used as an enrollment-code TTL.
+        sqlx::query("UPDATE server_install_tokens SET created_at=1")
+            .execute(db.pool())
+            .await
+            .unwrap();
         assert!(agent_identity(&db, &primary_token).await.unwrap().is_some());
         assert!(
             agent_identity(&db, &first_install_token)

@@ -248,11 +248,14 @@ async fn run(
                     let result = buffer
                         .receive(&state.db, &identity, &remote_ip, reports, persist)
                         .await?;
-                    state
-                        .last_agent_reports
-                        .write()
-                        .await
-                        .insert(identity.server_id.clone(), crate::db::now());
+                    send_rejections(&outbound_tx, &result.rejected);
+                    if result.latest.is_some() || result.rejected.is_empty() {
+                        state
+                            .last_agent_reports
+                            .write()
+                            .await
+                            .insert(identity.server_id.clone(), crate::db::now());
+                    }
                     if let Some(acknowledgement) = result.acknowledgement {
                         send_ack(&outbound_tx, &acknowledgement);
                         if !acknowledgement.reports.is_empty() {
@@ -424,6 +427,28 @@ fn evaluate_alerts(state: &Arc<AppState>, server_id: &str) {
     });
 }
 
+fn send_rejections(outbound: &mpsc::Sender<AgentCommand>, timestamps: &[i64]) {
+    if timestamps.is_empty() {
+        return;
+    }
+    // This is a best-effort hint, never a durable ACK. Backpressure must not
+    // disconnect the agent and cause it to replay the same invalid samples.
+    if outbound
+        .try_send(AgentCommand::Text(
+            serde_json::json!({
+                "type": "rejected_samples", "timestamps": timestamps,
+            })
+            .to_string(),
+        ))
+        .is_err()
+    {
+        tracing::debug!(
+            count = timestamps.len(),
+            "skipped Agent rejection notification: queue full or closed"
+        );
+    }
+}
+
 fn send_ack(outbound: &mpsc::Sender<AgentCommand>, result: &PersistResult) {
     let _ = outbound.try_send(AgentCommand::Text(
         serde_json::json!({
@@ -533,6 +558,26 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use std::collections::HashSet;
+
+    #[test]
+    fn rejection_notification_drops_on_backpressure_without_closing_channel() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender.try_send(AgentCommand::Text("busy".into())).unwrap();
+        send_rejections(&sender, &[10]);
+        assert!(
+            matches!(receiver.try_recv().unwrap(), AgentCommand::Text(value) if value == "busy")
+        );
+        send_rejections(&sender, &[11]);
+        let AgentCommand::Text(value) = receiver.try_recv().unwrap() else {
+            panic!("unexpected close");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&value).unwrap(),
+            serde_json::json!({"type": "rejected_samples", "timestamps": [11]})
+        );
+        drop(receiver);
+        send_rejections(&sender, &[12]);
+    }
 
     /// `Report` fields a public dashboard must never receive.
     ///

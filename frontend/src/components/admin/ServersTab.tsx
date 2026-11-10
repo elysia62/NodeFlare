@@ -1,5 +1,5 @@
 import type { DragEvent } from "react";
-import { ChevronDown, ChevronUp, Download, GripVertical, Pencil, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Download, GripVertical, Pencil, Plus, Trash2, KeyRound } from "lucide-react";
 import { ui } from "../../locale";
 import type { AdminServer } from "../../types";
 import { Checkbox } from "../Checkbox";
@@ -50,6 +50,7 @@ export function ServersTab({
   onEndDrag,
   onDrop,
   onInstallCommand,
+  onRotateToken,
   onEdit,
   onRemove,
 }: {
@@ -69,6 +70,7 @@ export function ServersTab({
   onEndDrag: () => void;
   onDrop: (event: DragEvent<HTMLDivElement>, targetId: string) => void;
   onInstallCommand: (server: AdminServer) => void;
+  onRotateToken: (server: AdminServer) => void;
   onEdit: (server: AdminServer) => void;
   onRemove: (server: AdminServer) => void;
 }) {
@@ -97,7 +99,7 @@ export function ServersTab({
             <ServerIpAddresses server={server} onCopy={onCopyIp} locale={locale} />
             <span className="server-agent-version" title={server.agent_version || undefined}>{server.agent_version ? `v${server.agent_version.replace(/^v/, "")}` : ui(locale, "未上报", "Not reported")}</span>
             <span className="server-expiry">{formatDate(server.expires_at) || ui(locale, "未设置", "Not set")}</span>
-            <div className="row-actions"><button className="icon-btn" disabled={index === 0} onClick={() => onMove(index, -1)} title={ui(locale, "上移", "Move up")} aria-label={ui(locale, "上移", "Move up")}><ChevronUp size={15} /></button><button className="icon-btn" disabled={index === servers.length - 1} onClick={() => onMove(index, 1)} title={ui(locale, "下移", "Move down")} aria-label={ui(locale, "下移", "Move down")}><ChevronDown size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => onInstallCommand(server)} title={ui(locale, "下载 Agent", "Download Agent")} aria-label={ui(locale, "下载 Agent", "Download Agent")}><Download size={15} /></button><button className="icon-btn" onClick={() => onEdit(server)} title={ui(locale, "编辑节点", "Edit server")} aria-label={ui(locale, "编辑节点", "Edit server")}><Pencil size={15} /></button><button className="icon-btn danger" onClick={() => onRemove(server)} title={ui(locale, "删除节点", "Delete server")} aria-label={ui(locale, "删除节点", "Delete server")}><Trash2 size={15} /></button></div>
+            <div className="row-actions"><button className="icon-btn" disabled={index === 0} onClick={() => onMove(index, -1)} title={ui(locale, "上移", "Move up")} aria-label={ui(locale, "上移", "Move up")}><ChevronUp size={15} /></button><button className="icon-btn" disabled={index === servers.length - 1} onClick={() => onMove(index, 1)} title={ui(locale, "下移", "Move down")} aria-label={ui(locale, "下移", "Move down")}><ChevronDown size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => onInstallCommand(server)} title={ui(locale, "下载 Agent", "Download Agent")} aria-label={ui(locale, "下载 Agent", "Download Agent")}><Download size={15} /></button><button className="icon-btn" onClick={() => onEdit(server)} title={ui(locale, "编辑节点", "Edit server")} aria-label={ui(locale, "编辑节点", "Edit server")}><Pencil size={15} /></button><button className="icon-btn" disabled={busy} onClick={() => onRotateToken(server)} title={ui(locale, "重置 Agent 凭证", "Reset Agent credentials")} aria-label={ui(locale, "重置 Agent 凭证", "Reset Agent credentials")}><KeyRound size={15} /></button><button className="icon-btn danger" onClick={() => onRemove(server)} title={ui(locale, "删除节点", "Delete server")} aria-label={ui(locale, "删除节点", "Delete server")}><Trash2 size={15} /></button></div>
           </div>
         ))}
         {!servers.length && !busy ? <div className="list-empty">{ui(locale, "暂无节点", "No servers yet")}</div> : null}

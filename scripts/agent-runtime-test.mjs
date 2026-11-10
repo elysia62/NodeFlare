@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -279,6 +279,56 @@ setTimeout(() => process.stdout.write("10, Runtime test GPU, 256, 1024\\n"), wai
   assert(!existsSync(blockedMarker), "The remote command must not run");
   assert(!existsSync(join(directory, "disabled", "remote-tasks.json")), "Disabled Agent must not initialize remote execution");
   await stopAgent(disabled);
+
+  console.log("agent runtime: rejected samples leave memory and disk without acknowledging valid neighbors");
+  websocketServer.removeAllListeners("connection");
+  const rejectionDirectory = join(directory, "rejected");
+  mkdirSync(rejectionDirectory);
+  const rejectedAt = Math.floor(Date.now() / 1000) - 20;
+  const retainedAt = rejectedAt + 1;
+  const corruptAt = rejectedAt + 2;
+  const spool = join(rejectionDirectory, "pending.jsonl");
+  writeFileSync(spool, [
+    { timestamp: rejectedAt, cpu: 10 }, { timestamp: retainedAt, cpu: 20 },
+    { timestamp: corruptAt, cpu: null },
+  ].map(value => JSON.stringify(value)).join("\n") + "\n");
+  let rejectedSent = false;
+  let restarted = false;
+  const replayed = [];
+  websocketServer.on("connection", socket => {
+    socket.send(JSON.stringify({ type: "config", ts: Math.floor(Date.now() / 1000), config: {
+      report_interval: 15, collect_interval: 3, auto_update: false, latency_tasks: [],
+    } }));
+    socket.on("message", (raw, binary) => {
+      if (!binary) return;
+      const message = JSON.parse(gunzipSync(raw).toString());
+      const timestamps = message.samples.map(sample => sample.metrics.timestamp);
+      assert(!timestamps.includes(corruptAt), "An invalid spooled sample must be removed before encoding");
+      if (restarted) replayed.push(...timestamps);
+      else if (timestamps.includes(rejectedAt)) {
+        rejectedSent = true;
+        socket.send(JSON.stringify({ type: "rejected_samples", timestamps: [rejectedAt] }));
+      }
+      if (message.persist) socket.send(JSON.stringify({
+        type: "ack", ts: Math.floor(Date.now() / 1000), persisted: true,
+        persistenceError: false, persistedThroughTs: 0, nextPersistAfterMs: 15_000,
+      }));
+    });
+  });
+  const rejecting = startAgent(upgradeServer.address().port, "runtime-rejected", "rejected");
+  await waitUntil(() => {
+    if (!rejectedSent || !existsSync(spool)) return false;
+    try {
+      const timestamps = readFileSync(spool, "utf8").trim().split("\n").map(line => JSON.parse(line).timestamp);
+      return !timestamps.includes(rejectedAt) && !timestamps.includes(corruptAt) && timestamps.includes(retainedAt);
+    } catch { return false; }
+  }, 15_000, "The rejected sample was not removed from disk, or a valid unacknowledged neighbor was lost");
+  await stopAgent(rejecting);
+  restarted = true;
+  const replaying = startAgent(upgradeServer.address().port, "runtime-rejected", "rejected");
+  await waitUntil(() => replayed.includes(retainedAt), 15_000, "Restart must replay valid unacknowledged samples");
+  assert(!replayed.includes(rejectedAt), "Restart must not replay a rejected sample from the spool");
+  await stopAgent(replaying);
 
   console.log("agent runtime: stalled handshake times out and reconnects");
   let connections = 0;

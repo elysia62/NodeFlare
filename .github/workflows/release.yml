@@ -101,6 +101,8 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Typecheck frontend
         run: bun run --cwd frontend tsc -b
+      - name: Lint frontend hooks and correctness
+        run: bun run lint:frontend
       - name: Test frontend
         run: bun test --cwd frontend
       - name: Build frontend
@@ -147,6 +149,22 @@ jobs:
         run: MONITOR_AGENT_BINARY=target/agent/debug/nodeflare-agent node scripts/agent-runtime-test.mjs
       - name: Build backend
         run: CARGO_TARGET_DIR=target/backend cargo build --locked --manifest-path backend/Cargo.toml
+      - name: Install browser for theme isolation tests
+        run: bunx playwright install --with-deps chromium
+      - name: Test theme isolation and compatibility
+        run: bun run test:themes
+      - name: Check browser test types
+        run: bun run test:e2e:types
+      - name: Compare visual baselines
+        run: bun run test:visual
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: browser-test-results
+          path: |
+            e2e-results/
+            e2e-report/
+          if-no-files-found: ignore
       - name: Smoke test SQLite and PostgreSQL
         shell: bash
         env:

@@ -492,8 +492,6 @@ fn progress_resets_after_clock_reversal_or_retention_change() {
 
 #[tokio::test]
 async fn restoring_and_copying_into_a_scanned_database_reset_progress() {
-    use std::io::Read;
-
     let source = crate::db::connect("sqlite::memory:").await.unwrap();
     let target = crate::db::connect("sqlite::memory:").await.unwrap();
     setup(&source).await;
@@ -503,11 +501,6 @@ async fn restoring_and_copying_into_a_scanned_database_reset_progress() {
     let current = now().div_euclid(3600) * 3600;
     seed(&source, current - 10 * DAY).await;
     let themes = tempfile::tempdir().unwrap();
-    let mut archive = crate::backup::export_archive(&source, themes.path())
-        .await
-        .unwrap();
-    let mut bytes = Vec::new();
-    archive.file.read_to_end(&mut bytes).unwrap();
     for copy in [true, false] {
         compact(&target, current).await;
         if copy {
@@ -515,7 +508,10 @@ async fn restoring_and_copying_into_a_scanned_database_reset_progress() {
                 .await
                 .unwrap();
         } else {
-            crate::backup::restore_archive(&target, themes.path(), &bytes)
+            let archive = crate::backup::export_archive(&source, themes.path())
+                .await
+                .unwrap();
+            crate::backup::restore_file(&target, themes.path(), archive.file)
                 .await
                 .unwrap();
         }

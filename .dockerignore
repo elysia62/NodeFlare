@@ -16,6 +16,7 @@
 !shared/Cargo.toml
 !shared/Cargo.lock
 !shared/*.rs
+!shared/password-vectors.json
 **/node_modules
 **/dist
 **/admin-dist

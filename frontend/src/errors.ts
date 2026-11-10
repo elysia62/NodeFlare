@@ -13,6 +13,12 @@ import type { UiLocale } from "./locale";
  * use `{placeholders}` and are matched by pattern.
  */
 const MESSAGES: Record<string, string> = {
+  "服务器内部错误": "Internal server error",
+  "主题导航路径无效": "Invalid theme navigation path",
+  "数据库备份 ZIP 上传失败": "Database backup upload failed",
+  "数据库备份 ZIP 上传超时": "Database backup upload timed out",
+  "无权访问看板": "Dashboard access is required",
+  "主题预览链接已失效": "The theme preview link has expired",
   "尚未配置 Webhook": "Webhook is not configured",
   "通知渠道配置无效": "Invalid notification channel configuration",
   "Webhook URL 无效": "Invalid Webhook URL",

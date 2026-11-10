@@ -1,12 +1,75 @@
 use crate::AppState;
 use crate::routes::ApiResponse;
 use axum::body::Body;
-use axum::extract::{OriginalUri, State};
+use axum::extract::{OriginalUri, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+
+/// Applied to every theme resource, including HTML/SVG opened directly.
+#[derive(Clone, Copy)]
+pub struct SandboxedTheme;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeFrameQuery {
+    path: String,
+    preview: Option<String>,
+}
+
+fn dashboard_path(path: &str) -> bool {
+    path == "/"
+        || path.strip_prefix("/instance/").is_some_and(|id| {
+            let id = id.strip_suffix('/').unwrap_or(id);
+            !id.is_empty()
+                && id.len() <= 80
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+}
+
+pub async fn theme_frame(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ThemeFrameQuery>,
+) -> Result<axum::Json<serde_json::Value>, ApiResponse> {
+    let path = query.path.as_str();
+    if !dashboard_path(path) {
+        return Err(ApiResponse::bad_request("主题导航路径无效"));
+    }
+    let settings = crate::db::load_settings(&state.db)
+        .await
+        .map_err(ApiResponse::internal)?;
+    if super::public::dashboard_access(&state, &headers, &settings).await?
+        != super::public::DashboardAccess::Ok
+    {
+        return Err(ApiResponse::forbidden("无权访问看板"));
+    }
+    let selector = if let Some(token) = query.preview.as_deref() {
+        if token.len() != 48
+            || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || crate::db::queries::theme_preview_url(&state.db, token)
+                .await
+                .map_err(ApiResponse::internal)?
+                .is_none()
+        {
+            return Err(ApiResponse::not_found("主题预览链接已失效"));
+        }
+        format!("preview-{token}")
+    } else {
+        let (_, key) = crate::db::queries::theme_asset(&state.db, &settings.active_theme_id)
+            .await
+            .map_err(ApiResponse::internal)?
+            .ok_or_else(|| ApiResponse::not_found("主题不存在"))?;
+        format!("active-{key}")
+    };
+    Ok(axum::Json(
+        serde_json::json!({"src": format!("{path}?__nodeflare_theme={selector}")}),
+    ))
+}
 
 pub async fn handle(
     State(state): State<Arc<AppState>>,
@@ -15,8 +78,51 @@ pub async fn handle(
 ) -> Response {
     let path = uri.path();
     let validators = if_none_match(&headers);
+    // Keep the original dashboard pathname inside the iframe. Query selection
+    // serves only sandboxed theme HTML, never a privileged application route.
+    if dashboard_path(path)
+        && let Some((_, selector)) =
+            url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
+                .find(|(key, _)| key == "__nodeflare_theme")
+    {
+        let (base, prefix) = if let Some(token) = selector.strip_prefix("preview-") {
+            match crate::db::queries::theme_preview_url(&state.db, token).await {
+                Ok(Some(base)) => (base, format!("/__theme-preview/{token}")),
+                Ok(None) => return StatusCode::FORBIDDEN.into_response(),
+                Err(error) => return ApiResponse::internal(error).into_response(),
+            }
+        } else if let Some(key) = selector.strip_prefix("active-") {
+            let settings = match crate::db::load_settings(&state.db).await {
+                Ok(settings) => settings,
+                Err(error) => return ApiResponse::internal(error).into_response(),
+            };
+            match crate::db::queries::theme_asset(&state.db, &settings.active_theme_id).await {
+                Ok(Some((base, current_key))) if key == current_key => {
+                    (base, format!("/__theme-active/{key}"))
+                }
+                Ok(_) => return StatusCode::NOT_FOUND.into_response(),
+                Err(error) => return ApiResponse::internal(error).into_response(),
+            }
+        } else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        return theme_file(&state, &base, "index.html", &prefix, false, &[]).await;
+    }
     if path.starts_with("/api/") {
         return ApiResponse::not_found("接口不存在").into_response();
+    }
+    if path == "/__theme-bridge.js" {
+        let mut response = response(
+            include_bytes!("../theme-client.js").to_vec(),
+            "text/javascript; charset=utf-8",
+            false,
+            &[],
+        );
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        return response;
     }
     if path == "/admin" || path.starts_with("/admin/") {
         return local_file(
@@ -43,6 +149,9 @@ pub async fn handle(
             Ok(None) => return (StatusCode::FORBIDDEN, "主题预览链接已失效").into_response(),
             Err(error) => return ApiResponse::internal(error).into_response(),
         };
+        if relative.is_empty() {
+            return local_file(&state.config.frontend_dir, "index.html", false, &validators).await;
+        }
         return theme_file(
             &state,
             &base,
@@ -80,26 +189,6 @@ pub async fn handle(
         .await;
     }
 
-    let settings = match crate::db::load_settings(&state.db).await {
-        Ok(settings) => settings,
-        Err(error) => return ApiResponse::internal(error).into_response(),
-    };
-    if settings.active_theme_id != crate::theme::BUILTIN_THEME_ID
-        && let Ok(Some((base, cache_key))) =
-            crate::db::queries::theme_asset(&state.db, &settings.active_theme_id).await
-    {
-        let relative = path.trim_start_matches('/');
-        return theme_file(
-            &state,
-            &base,
-            relative,
-            &format!("/__theme-active/{cache_key}"),
-            false,
-            &validators,
-        )
-        .await;
-    }
-
     let relative = path.trim_start_matches('/');
     if relative.is_empty() || path.starts_with("/instance/") {
         return local_file(&state.config.frontend_dir, "index.html", false, &validators).await;
@@ -123,7 +212,16 @@ async fn theme_file(
     validators: &[&str],
 ) -> Response {
     match crate::theme::fetch_theme_path(&state.config.theme_dir, base, relative, prefix).await {
-        Ok((body, content_type)) => response(body, &content_type, cache, validators),
+        Ok((body, content_type)) => {
+            let mut response = response(body, &content_type, cache, validators);
+            response.extensions_mut().insert(SandboxedTheme);
+            // Module scripts and fonts load from an opaque document origin.
+            response.headers_mut().insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                HeaderValue::from_static("*"),
+            );
+            response
+        }
         Err(error) => {
             tracing::warn!(%error, path = relative, "theme asset failed");
             StatusCode::NOT_FOUND.into_response()
@@ -136,9 +234,36 @@ async fn local_file(root: &Path, relative: &str, cache: bool, validators: &[&str
         return StatusCode::NOT_FOUND.into_response();
     };
     match tokio::fs::read(&path).await {
-        Ok(body) => response(body, crate::mime::content_type(&path), cache, validators),
+        Ok(body) => {
+            let mut response = response(body, crate::mime::content_type(&path), cache, validators);
+            if cache && fingerprinted_asset(relative) {
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=31536000, immutable"),
+                );
+            }
+            response
+        }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+// Only the built-in public Vite output follows this naming contract. Theme
+// assets and admin resources never use this rule; HTML always stays no-store.
+fn fingerprinted_asset(relative: &str) -> bool {
+    if !relative.starts_with("assets/") {
+        return false;
+    }
+    let Some((stem, extension)) = relative.rsplit_once('.') else {
+        return false;
+    };
+    let bytes = stem.as_bytes();
+    matches!(extension, "js" | "css" | "woff" | "woff2")
+        && bytes.len() > 9
+        && bytes[bytes.len() - 9] == b'-'
+        && bytes[bytes.len() - 8..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
@@ -234,6 +359,22 @@ fn response(body: Vec<u8>, content_type: &str, cache: bool, validators: &[&str])
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[test]
+    fn immutable_cache_is_limited_to_fingerprinted_public_assets() {
+        for value in ["assets/index-Abc_1-23.js", "assets/index-ABCDEFGH.css"] {
+            assert!(fingerprinted_asset(value));
+        }
+        for value in [
+            "index.html",
+            "logo.svg",
+            "assets/app.js",
+            "assets/app-abcdef.html",
+            "admin-ABCDEFGH.js",
+        ] {
+            assert!(!fingerprinted_asset(value));
+        }
+    }
 
     #[test]
     fn entity_tags_change_with_content() {

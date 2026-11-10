@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from './visual-fixture';
 import { Dashboard } from "./dashboard";
 
 /**

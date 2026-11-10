@@ -107,9 +107,15 @@ pub fn hostname(headers: &HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(':').next())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .filter(|authority| !authority.as_str().contains('@'))
+        .map(|authority| {
+            authority
+                .host()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string()
+        })
 }
 
 fn trusted_proxy(address: std::net::IpAddr, trusted: &[ipnet::IpNet]) -> bool {
@@ -174,6 +180,25 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn parses_ipv6_host_without_splitting_the_address() {
+        for (value, expected) in [
+            ("example.com:2206", Some("example.com")),
+            ("[::1]:2206", Some("::1")),
+            ("[2001:db8::1]", Some("2001:db8::1")),
+            ("admin@example.com", None),
+            ("[::1", None),
+            ("example.com/path", None),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::HOST,
+                HeaderValue::from_str(value).unwrap(),
+            );
+            assert_eq!(hostname(&headers).as_deref(), expected, "{value}");
+        }
+    }
 
     #[test]
     fn trusted_proxy_uses_the_normalized_forwarded_chain() {

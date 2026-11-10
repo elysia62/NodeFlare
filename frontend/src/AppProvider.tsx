@@ -107,6 +107,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const background = resolveBackground(config.background_url, dark);
   const blur = themeToggle(config, "enableBlur");
   const carrierLatency = config.show_latency && themeToggle(config, "showCarrierLatency", false);
+  const isolatedTheme = config.active_theme_id !== 'builtin-nodeflare-glass'
+    || window.location.pathname.startsWith('/__theme-preview/');
   useFavicon(configReady ? config.logo_url : undefined);
 
   if (!reloadQueueRef.current) {
@@ -164,7 +166,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await api.login(username.trim(), derived, turnstileToken, totpCode);
     setAccess("ok");
     await reload();
-  }, [config.password_client_salt, reload]);
+  }, [config.password_client_salt, config.locale, reload]);
 
   const verify = useCallback(async (token: string) => {
     await api.verifyTurnstile(token);
@@ -202,7 +204,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       clearTimer();
       if (stopped || !canRefresh()) return;
       const now = Date.now();
-      if (shouldSyncBootstrap(liveConnectedRef.current, now - lastSyncAt)) {
+      if (shouldSyncBootstrap(liveConnectedRef.current || isolatedTheme, now - lastSyncAt)) {
         await reload(true);
         lastSyncAt = Date.now();
       }
@@ -234,7 +236,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("online", refreshNow);
       window.removeEventListener("offline", handleOffline);
     };
-  }, [access, reload]);
+  }, [access, reload, isolatedTheme]);
 
   useEffect(() => {
     let timer: number | undefined;
@@ -273,11 +275,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!configReady || access !== "ok" || demoMode) return;
+    // The theme bridge owns its public sockets; the host only refreshes access/config.
+    if (!configReady || access !== "ok" || demoMode || isolatedTheme) return;
     let active = true;
+    const playback = livePlayback.current;
     const disconnect = connectLive({ serverId: selectedId }, {
       onBatch: (updates) => {
-        livePlayback.current.enqueue(updates, serversRef.current);
+        playback.enqueue(updates, serversRef.current);
       },
       onConnectedChange: (connected) => {
         liveConnectedRef.current = connected;
@@ -285,7 +289,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         nodeObservation.current.setConnected(connected);
         refreshObservation();
         if (!connected) {
-          livePlayback.current.clear();
+          playback.clear();
         }
         if (active && !connected && !document.hidden && navigator.onLine !== false) {
           void reload(true);
@@ -294,10 +298,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
     return () => {
       active = false;
-      livePlayback.current.clear();
+      playback.clear();
       disconnect();
     };
-  }, [access, configReady, reload, selectedId]);
+  }, [access, configReady, reload, selectedId, isolatedTheme]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -367,7 +371,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (Object.keys(previous).length === liveServers.length
       && liveServers.every((server) => previous[server.id] === next[server.id])) return previous;
     nodeStatusesRef.current = next;
+    // Observation mutates behind a ref; its revision intentionally invalidates this cache.
     return next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clockNow, config.offline_threshold_seconds, liveServers, observationVersion]);
 
   useEffect(() => {
@@ -394,7 +400,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const next = resolved === "dark" ? "light" : "dark";
       return next;
     });
-  }, [dark]);
+  }, [dark, setAppearance]);
 
   const value = useMemo<AppState>(() => ({
     config,

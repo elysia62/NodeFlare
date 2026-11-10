@@ -5,9 +5,10 @@ import { defineConfig, devices } from "@playwright/test";
 // 视觉基线需要稳定的数据源，因此截图用例走 demo 模式（frontend/src/demo.ts，
 // 静态数据，不需要后端与 agent 上报）。真实数据流的用例走已部署的后端。
 //
-// Chromium 用系统包（/usr/bin/chromium），避免再下载一份 ~150MB 的浏览器。
-const BASE_URL = process.env.NODEFLARE_BASE_URL ?? "http://localhost:5173";
-const EXECUTABLE = process.env.CHROMIUM_PATH ?? "/usr/bin/chromium";
+// Default to the browser revision locked by Playwright. An explicit override is
+// useful for manual debugging, but must not generate the committed baselines.
+const BASE_URL = process.env.NODEFLARE_BASE_URL ?? "http://127.0.0.1:5173";
+const EXECUTABLE = process.env.CHROMIUM_PATH || undefined;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -19,6 +20,12 @@ export default defineConfig({
   workers: 1,
   reporter: [["list"], ["html", { open: "never", outputFolder: "e2e-report" }]],
   timeout: 60_000,
+  webServer: process.env.NODEFLARE_BASE_URL ? undefined : {
+    command: 'bun run --cwd frontend dev --host 127.0.0.1 --port 5173 --strictPort',
+    url: 'http://127.0.0.1:5173',
+    reuseExistingServer: !process.env.CI,
+    timeout: 30_000,
+  },
   expect: {
     toHaveScreenshot: {
       // 状态圆点带 2s 无限 status-pulse 动画，截图会捕捉到不同相位。
@@ -33,6 +40,8 @@ export default defineConfig({
   },
   use: {
     baseURL: BASE_URL,
+    locale: 'zh-CN',
+    timezoneId: 'UTC',
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 900 },

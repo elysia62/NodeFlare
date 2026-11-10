@@ -9,16 +9,6 @@ use std::sync::Arc;
 use crate::AppState;
 use crate::routes::{ApiResponse, bearer_or_cookie};
 
-fn maintenance_route(path: &str) -> bool {
-    matches!(
-        path,
-        "/api/admin/database/migrate"
-            | "/api/admin/database/restore"
-            | "/api/admin/database/reclaim"
-            | "/api/admin/database/backup"
-    )
-}
-
 fn business_write(method: &Method, path: &str) -> bool {
     !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
         && !matches!(
@@ -35,10 +25,6 @@ pub async fn database_activity(
     request: Request,
     next: Next,
 ) -> Response {
-    // Maintenance handlers acquire exclusive access after authentication/body parsing.
-    if maintenance_route(request.uri().path()) {
-        return next.run(request).await;
-    }
     let access = if business_write(request.method(), request.uri().path()) {
         state.database_activity.write()
     } else {
@@ -81,6 +67,10 @@ pub struct AuthenticatedUser {
 pub async fn security_headers(request: Request, next: Next) -> Response {
     let api_response = request.uri().path().starts_with("/api/");
     let mut response = next.run(request).await;
+    let theme = response
+        .extensions()
+        .get::<crate::routes::site::SandboxedTheme>()
+        .is_some();
     let headers = response.headers_mut();
     if api_response {
         headers.insert(
@@ -93,10 +83,9 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(
-        HeaderName::from_static("x-frame-options"),
-        HeaderValue::from_static("DENY"),
-    );
+    if !theme {
+        headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    }
     headers.insert(
         HeaderName::from_static("referrer-policy"),
         HeaderValue::from_static("strict-origin-when-cross-origin"),
@@ -107,11 +96,22 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ws: wss:; frame-src https://challenges.cloudflare.com; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
-        ),
+        HeaderValue::from_static(if theme {
+            "sandbox allow-scripts; default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'none'; frame-src 'none'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'none'"
+        } else {
+            "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ws: wss:; frame-src 'self' https://challenges.cloudflare.com; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        }),
     );
     response
+}
+
+/// Once a maintenance handler starts, keep its guards alive through completion,
+/// including blocking ZIP work, even if the HTTP client disconnects.
+pub async fn finish_maintenance(request: Request, next: Next) -> Response {
+    match tokio::spawn(async move { next.run(request).await }).await {
+        Ok(response) => response,
+        Err(error) => ApiResponse::internal(error).into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -129,7 +129,5 @@ mod tests {
         assert!(business_write(&Method::PATCH, "/api/admin/settings"));
         assert!(business_write(&Method::POST, "/api/admin/remote/task"));
         assert!(business_write(&Method::DELETE, "/api/admin/servers/node"));
-        assert!(maintenance_route("/api/admin/database/migrate"));
-        assert!(!maintenance_route("/api/admin/database/restart"));
     }
 }

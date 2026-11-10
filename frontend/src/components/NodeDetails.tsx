@@ -212,7 +212,7 @@ export function NodeDetails({ server, liveLatencyResults, status, retentionDays,
     setLatencyTasks([]);
     setLatencyPoints([]);
     if (demo) {
-      const taskIds = new Set(server.latency.map((point) => point.task_id));
+      const taskIds = new Set(latestServerRef.current.latency.map((point) => point.task_id));
       const tasks = demoLatencyTasks.filter((task) => taskIds.has(task.id));
       setLatencyTasks(tasks);
       setLatencyPoints(tasks.length ? demoLatencyHistory(server.id, latencyHours).filter((point) => taskIds.has(point.task_id)) : []);

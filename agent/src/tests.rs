@@ -1,4 +1,31 @@
 use clap::Parser;
+
+#[test]
+fn invalid_spooled_samples_are_removed_before_replay() {
+    let now = 10_000;
+    let good = super::Report {
+        timestamp: now,
+        cpu: 20.0,
+        ..Default::default()
+    };
+    let mut bad = good.clone();
+    bad.cpu = f64::NAN;
+    let mut samples = vec![
+        bad,
+        good,
+        super::Report {
+            timestamp: i64::MIN,
+            ..Default::default()
+        },
+    ];
+    super::sanitize_spooled_samples(&mut samples, now);
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].cpu, 20.0);
+    // The persisted timestamp includes a server correction not yet known by
+    // the collector after a restart; retain it within the normal replay age.
+    super::sanitize_spooled_samples(&mut samples, now - 600);
+    assert_eq!(samples.len(), 1);
+}
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

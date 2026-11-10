@@ -79,6 +79,8 @@ pub async fn theme_asset(db: &Database, id: &str) -> Result<Option<(String, Stri
         let resolved_url = row.try_get::<String, _>("resolved_url")?;
         let version = row.try_get::<String, _>("version")?;
         let created_at = row.try_get::<i64, _>("created_at")?;
+        // This is an installation metadata key, not a digest of asset bytes.
+        // Restores or upstream replacements can reuse it; do not cache it immutable.
         let cache_key = auth::token_hash(&format!("{id}\0{resolved_url}\0{version}\0{created_at}"));
         Ok::<_, sqlx::Error>((resolved_url, cache_key[..16].to_string()))
     })

@@ -5,6 +5,7 @@ use crate::db::{
 use crate::models::AgentReport;
 use anyhow::{Result, ensure};
 use nodeflare_telemetry::{MAX_BATCH_BYTES, MAX_SAMPLES};
+use std::collections::HashSet;
 
 pub struct AgentBuffer {
     pending: Vec<AgentReport>,
@@ -18,6 +19,7 @@ pub struct IngestResult {
     pub latest: Option<AgentReport>,
     pub samples: Vec<AgentReport>,
     pub acknowledgement: Option<PersistResult>,
+    pub rejected: Vec<i64>,
 }
 
 impl AgentBuffer {
@@ -42,13 +44,23 @@ impl AgentBuffer {
     ) -> Result<IngestResult> {
         let current = now();
         ensure!(reports.len() <= MAX_SAMPLES, "too many telemetry samples");
-        ensure!(
-            reports.iter().all(|report| report.timestamp > 0
-                && report.timestamp >= current - 7200
-                && report.timestamp <= current + 300
-                && queries::valid_agent_report(report, current)),
-            "invalid telemetry sample"
-        );
+        let mut rejected = Vec::new();
+        reports.retain(|report| {
+            if queries::valid_agent_report(report, current) {
+                true
+            } else {
+                rejected.push(report.timestamp);
+                false
+            }
+        });
+        // A duplicate timestamp containing valid data must not be rejected.
+        let valid_timestamps: HashSet<_> = reports.iter().map(|report| report.timestamp).collect();
+        rejected.retain(|timestamp| !valid_timestamps.contains(timestamp));
+        rejected.sort_unstable();
+        rejected.dedup();
+        if !rejected.is_empty() {
+            tracing::warn!(server_id = %identity.server_id, count = rejected.len(), "discarded invalid telemetry samples");
+        }
         reports.sort_by_key(|report| report.timestamp);
         reports.dedup_by_key(|report| report.timestamp);
         reports.retain(|report| report.timestamp > self.received_through);
@@ -87,6 +99,7 @@ impl AgentBuffer {
             latest,
             samples,
             acknowledgement,
+            rejected,
         })
     }
 

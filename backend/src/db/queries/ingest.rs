@@ -5,13 +5,11 @@ use crate::models::{AgentLatencyResult, AgentReport};
 use anyhow::{Context, Result};
 use sqlx::any::AnyArguments;
 use sqlx::{Any, Arguments, AssertSqlSafe, Row, Transaction};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-const AGENT_REPORT_MAX_AGE_SECONDS: i64 = 2 * 60 * 60;
-const AGENT_REPORT_MAX_BYTES: usize = 256 * 1024;
-const AGENT_REPORT_MAX_DISKS: usize = 128;
-const AGENT_REPORT_MAX_GPUS: usize = 32;
-pub(crate) const AGENT_REPORT_MAX_LATENCY_RESULTS: usize = 2048;
+use nodeflare_telemetry::AGENT_REPORT_MAX_AGE_SECONDS;
+#[cfg(test)]
+pub(crate) use nodeflare_telemetry::AGENT_REPORT_MAX_LATENCY_RESULTS;
 const HISTORY_INSERT_BATCH_ROWS: usize = 500;
 const LATENCY_INSERT_BATCH_ROWS: usize = 500;
 
@@ -185,95 +183,8 @@ pub async fn save_agent_batch(
     })
 }
 
-pub(crate) fn valid_agent_report(report: &AgentReport, current: i64) -> bool {
-    fn finite_between(value: f64, minimum: f64, maximum: f64) -> bool {
-        value.is_finite() && (minimum..=maximum).contains(&value)
-    }
+pub(crate) use nodeflare_telemetry::valid_report as valid_agent_report;
 
-    fn valid_capacity(used: i64, total: i64) -> bool {
-        used >= 0 && total >= 0 && (total == 0 || used <= total)
-    }
-
-    if !finite_between(report.cpu, 0.0, 100.0)
-        || !finite_between(report.load1, 0.0, 1_000_000.0)
-        || !finite_between(report.load5, 0.0, 1_000_000.0)
-        || !finite_between(report.load15, 0.0, 1_000_000.0)
-        || !valid_capacity(report.mem_used, report.mem_total)
-        || !valid_capacity(report.swap_used, report.swap_total)
-        || !valid_capacity(report.disk_used, report.disk_total)
-        || !finite_between(report.net_in, 0.0, 1.0e18)
-        || !finite_between(report.net_out, 0.0, 1.0e18)
-        || report.net_rx_total < 0
-        || report.net_tx_total < 0
-        || report.uptime < 0
-        || report.processes < 0
-        || report.tcp_connections < 0
-        || report.udp_connections < 0
-        || !(0..=1_000_000).contains(&report.cpu_cores)
-        || !finite_between(report.gpu_usage, 0.0, 100.0)
-        || !finite_between(report.disk_read_bps, 0.0, 1.0e18)
-        || !finite_between(report.disk_write_bps, 0.0, 1.0e18)
-        || !finite_between(report.disk_read_iops, 0.0, 1.0e12)
-        || !finite_between(report.disk_write_iops, 0.0, 1.0e12)
-        || !finite_between(report.disk_await_ms, 0.0, 86_400_000.0)
-        || !finite_between(report.disk_utilization, 0.0, 100.0)
-        || report.cpu_model.len() > 512
-        || report.os.len() > 128
-        || report.kernel.len() > 256
-        || report.arch.len() > 64
-        || report.virtualization.len() > 128
-        || report.gpu_model.len() > 512
-        || report.agent_version.len() > 64
-        || report
-            .ip_v4
-            .parse::<std::net::Ipv4Addr>()
-            .is_err_and(|_| !report.ip_v4.is_empty())
-        || report
-            .ip_v6
-            .parse::<std::net::Ipv6Addr>()
-            .is_err_and(|_| !report.ip_v6.is_empty())
-        || report.disks.len() > AGENT_REPORT_MAX_DISKS
-        || report.gpus.len() > AGENT_REPORT_MAX_GPUS
-        || report.latency_results.len() > AGENT_REPORT_MAX_LATENCY_RESULTS
-    {
-        return false;
-    }
-
-    if report.disks.iter().any(|disk| {
-        disk.name.len() > 128
-            || disk.mount_point.len() > 512
-            || !valid_capacity(disk.used, disk.total)
-            || !finite_between(disk.read_bps, 0.0, 1.0e18)
-            || !finite_between(disk.write_bps, 0.0, 1.0e18)
-            || !finite_between(disk.read_iops, 0.0, 1.0e12)
-            || !finite_between(disk.write_iops, 0.0, 1.0e12)
-            || !finite_between(disk.await_ms, 0.0, 86_400_000.0)
-            || !finite_between(disk.utilization, 0.0, 100.0)
-    }) || report.gpus.iter().any(|gpu| {
-        gpu.model.len() > 512
-            || gpu
-                .usage
-                .is_some_and(|usage| !finite_between(usage, 0.0, 100.0))
-            || !valid_capacity(gpu.memory_used, gpu.memory_total)
-    }) {
-        return false;
-    }
-
-    let mut latency_ids = HashSet::with_capacity(report.latency_results.len());
-    if report.latency_results.iter().any(|latency| {
-        latency.task_id.is_empty()
-            || latency.task_id.len() > 80
-            || !latency_ids.insert(&latency.task_id)
-            || latency.timestamp < current - AGENT_REPORT_MAX_AGE_SECONDS
-            || latency.timestamp > current + 300
-            || !finite_between(latency.latency_ms, -1.0, 86_400_000.0)
-            || !finite_between(latency.packet_loss, 0.0, 100.0)
-    }) {
-        return false;
-    }
-
-    serde_json::to_vec(report).is_ok_and(|encoded| encoded.len() <= AGENT_REPORT_MAX_BYTES)
-}
 pub(crate) async fn load_traffic_state(
     db: &Database,
     transaction: &mut Transaction<'_, Any>,

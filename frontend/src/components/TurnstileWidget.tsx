@@ -91,7 +91,7 @@ export function TurnstileWidget({
       if (widgetId.current && window.turnstile) window.turnstile.remove(widgetId.current);
       widgetId.current = "";
     };
-  }, [action, siteKey, theme, resetKey]);
+  }, [action, siteKey, theme, resetKey, locale]);
 
   const testing = siteKey.startsWith("1x00000000000000000000");
   return <div className={`turnstile-widget${verified ? " verified" : ""}${testing ? " testing" : ""}`} ref={target} />;

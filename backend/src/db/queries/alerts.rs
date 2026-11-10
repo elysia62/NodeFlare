@@ -371,7 +371,7 @@ pub async fn mark_notification_delivered(db: &Database, id: &str, channel: &str)
 }
 
 pub async fn retry_notification(db: &Database, id: &str, attempts: i64) -> Result<()> {
-    let delay = (5_i64 << attempts.clamp(0, 10)).min(3600);
+    let delay = notification_retry_delay(attempts);
     sqlx::query(db.sql("UPDATE notification_outbox SET attempts=?, next_attempt_at=? WHERE id=?"))
         .bind(attempts.saturating_add(1))
         .bind(now().saturating_add(delay))
@@ -379,4 +379,32 @@ pub async fn retry_notification(db: &Database, id: &str, attempts: i64) -> Resul
         .execute(db.pool())
         .await?;
     Ok(())
+}
+
+fn notification_retry_delay(attempts: i64) -> i64 {
+    // Equal jitter keeps simultaneous failures from retrying in lockstep,
+    // including at the one-hour cap. Never retry sooner than five seconds.
+    let ceiling = (5_i64 << attempts.clamp(0, 10)).min(3600);
+    rand::random_range((ceiling / 2).max(5)..=ceiling.max(6))
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn retry_jitter_stays_within_bounds_at_initial_and_capped_backoff() {
+        for (attempts, bounds) in [
+            (i64::MIN, 5..=6),
+            (0, 5..=6),
+            (1, 5..=10),
+            (5, 80..=160),
+            (10, 1800..=3600),
+            (i64::MAX, 1800..=3600),
+        ] {
+            for _ in 0..64 {
+                assert!(bounds.contains(&notification_retry_delay(attempts)));
+            }
+        }
+    }
 }

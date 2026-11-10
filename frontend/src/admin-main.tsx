@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { api, setApiLocale } from "./api";
 import { AdminPanel } from "./components/AdminPanel";
@@ -17,7 +17,7 @@ function AdminApp() {
   // Before the config arrives there is no configured locale; fall back to the browser.
   const locale = config?.locale ?? (navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 
-  async function loadConfig() {
+  const loadConfig = useCallback(async () => {
     try {
       const next = await api.bootstrap();
       setApiLocale(next.config.locale);
@@ -26,9 +26,9 @@ function AdminApp() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : ui(locale, "无法加载管理面板", "Unable to load the admin panel"));
     }
-  }
+  }, [locale]);
 
-  useEffect(() => { void loadConfig(); }, []);
+  useEffect(() => { void loadConfig(); }, [loadConfig]);
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     document.documentElement.style.colorScheme = dark ? "dark" : "light";

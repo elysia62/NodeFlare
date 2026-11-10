@@ -28,6 +28,7 @@ Playwright 通过 `playwright.config.ts` 里的 `executablePath` 指向 `/usr/bi
 ```bash
 # 视觉回归（demo 模式，只需前端 dev server）
 bun run --cwd frontend dev            # 另开终端
+bunx playwright install --with-deps chromium
 bun run test:visual
 
 # 全部 e2e（含真实数据用例，需要后端 + agent 上报）
@@ -103,12 +104,16 @@ next[server.id] = demoMode
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `NODEFLARE_BASE_URL` | `http://localhost:5173` | 前端地址（视觉与 demo 用例） |
+| `NODEFLARE_BASE_URL` | `http://127.0.0.1:5173` | 前端地址（视觉与 demo 用例） |
 | `NODEFLARE_LIVE_URL` | `http://127.0.0.1:2206` | 后端地址（真实数据用例） |
-| `CHROMIUM_PATH` | `/usr/bin/chromium` | Chromium 可执行文件 |
+| `CHROMIUM_PATH` | Playwright 锁定的 Chromium | 仅用于手动调试；更新基线时不要覆盖 |
 
 ## 注意
 
-- **Vite 默认监听 IPv6**（`[::1]:5173`），用 `localhost` 而非 `127.0.0.1` 访问。
+- 未指定 `NODEFLARE_BASE_URL` 时，测试自动启动监听 `127.0.0.1:5173` 的 Vite 服务。
 - 截图基线（`e2e/__screenshots__/`）需提交；`e2e-report/`、`e2e-results/` 已加入 `.gitignore`。
-- 视觉基线对渲染环境敏感（字体、系统库），跨机器比对可能失败。这类用例更适合作为本地与固定 CI 环境的回归手段，而不是跨环境的一致性检查。
+- CI 使用固定 Ubuntu 24.04、锁文件指定的 Playwright 浏览器、仓库中的测试字体和固定时间。基线更新后必须再运行一次不带 `--update-snapshots` 的比较；浏览器升级或渲染变化需要人工检查截图。
+
+## 主题隔离集成测试
+
+先构建前后端，再运行 `bun run test:themes`。测试自行启动临时 SQLite 服务，覆盖详情深链接、普通链接、路由跳转、前进后退、带详情路径的预览、沙箱主题模块/CSS、只读 fetch、WebSocket 心跳、私有看板登录边界以及直接打开主题文件的隔离；也检查恢复上传的并发限制与中途断开后的锁释放。测试不会连接现有部署。

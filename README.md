@@ -161,6 +161,14 @@ cp backend/config.example.toml backend/config.toml
 
 `dev.sh` 会构建前端并以 `cargo run` 启动后端。测试、构建与仓库结构详见文档[开发指南](https://elysia62.github.io/NodeFlareWiki/dev/develop.html)与[仓库结构](https://elysia62.github.io/NodeFlareWiki/dev/structure.html)。
 
+前端正确性检查使用 `bun run lint:frontend`；视觉回归和主题隔离测试见 [e2e/README.md](e2e/README.md)。
+
+主题作者请同时阅读仓库内的[主题导航与桥接接口](docs/theme-bridge.md)，了解详情路由、预览兼容方式与沙箱权限范围。
+
+手动审计前端依赖时运行 `bun audit --registry=https://registry.npmjs.org`。项目使用的 npmmirror 不提供兼容的 audit 接口，直接 `bun audit` 可能返回 404；`scripts/check.sh` 已指定官方 registry。
+
+开发依赖中的 `minimatch` 暂时通过根目录 `overrides` 固定到已修复的 11.x；这是为了避开 ESLint / typescript-eslint 传递依赖的 [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249)。上游升级依赖范围后可移除该覆盖，并重新运行 lint 与依赖审计。
+
 ## License
 
 MIT

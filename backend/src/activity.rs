@@ -27,7 +27,24 @@ impl DatabaseActivity {
     }
 
     pub async fn maintenance(&self) -> Result<RwLockWriteGuard<'_, ()>, ApiResponse> {
-        let access = self.access.write().await;
+        self.maintenance_with_timeout(std::time::Duration::from_secs(30))
+            .await
+    }
+
+    async fn maintenance_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<RwLockWriteGuard<'_, ()>, ApiResponse> {
+        // Only bound the drain phase. Once destructive work starts, dropping its
+        // guard while spawn_blocking continues would allow concurrent DB writes.
+        let access = tokio::time::timeout(timeout, self.access.write())
+            .await
+            .map_err(|_| {
+                ApiResponse::error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "数据库正在维护，请稍后重试",
+                )
+            })?;
         self.ensure_writable()?;
         Ok(access)
     }
@@ -71,6 +88,21 @@ mod tests {
         assert!(activity.write().is_err());
         drop(exclusive);
         assert!(activity.write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn maintenance_timeout_cancels_queued_exclusivity_without_leaving_writes_blocked() {
+        let activity = DatabaseActivity::default();
+        let writer = activity.write().unwrap();
+        assert!(
+            activity
+                .maintenance_with_timeout(std::time::Duration::from_millis(10))
+                .await
+                .is_err()
+        );
+        assert!(activity.write().is_ok());
+        drop(writer);
+        assert!(activity.maintenance().await.is_ok());
     }
 
     #[tokio::test]

@@ -1,5 +1,53 @@
 import { describe, expect, test } from "bun:test";
 import { localizedError, TRANSLATED_MESSAGES } from "./errors";
+import { Glob } from "bun";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function backendErrorMessages(root: URL) {
+  const messages: Array<{ file: string; message: string }> = [];
+  let files = 0;
+  // internal(error) only logs its argument; its public message is covered by
+  // Self::error inside ApiResponse::internal. Include that call and format!.
+  const literal = /(?:ApiResponse|Self)::(?:error\(\s*[\w:]+\s*,\s*|(?:bad_request|unauthorized|forbidden|not_found|conflict|unprocessable|throttled)\(\s*)(format!\(\s*)?"((?:\\.|[^"\\])*)"/g;
+  for await (const file of new Glob('**/*.rs').scan({ cwd: fileURLToPath(root), absolute: true })) {
+    files++;
+    const source = await readFile(file, 'utf8');
+    for (const match of source.matchAll(literal)) {
+      const message = match[1] ? match[2].replace(/\{[^{}]*\}/g, '42') : match[2];
+      if (/[\u4e00-\u9fff]/.test(message)) messages.push({ file, message });
+    }
+  }
+  // A broken cwd or extraction pattern must never turn this guard into a pass.
+  expect(files, `No Rust sources scanned at ${root}`).toBeGreaterThan(0);
+  expect(messages.length, `No API messages found at ${root}`).toBeGreaterThan(0);
+  return messages;
+}
+
+test('backend API error literals and format templates have English translations', async () => {
+  for (const { file, message } of await backendErrorMessages(new URL('../../backend/src/', import.meta.url))) {
+    expect(localizedError(message, 'en'), `${file}: ${message}`).not.toMatch(/[\u4e00-\u9fff]/);
+  }
+});
+
+test('translation guard scans paths with spaces and Unicode and covers generic errors', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'nodeflare 中文 '));
+  try {
+    await writeFile(join(root, 'example.rs'), `
+      ApiResponse::bad_request("节点不存在");
+      ApiResponse::error(axum::http::StatusCode::BAD_REQUEST, "主题不存在");
+      ApiResponse::throttled(format!("登录尝试过多，请在 {seconds} 秒后重试"), seconds);
+      fn internal(error: impl Display) { Self::error(StatusCode::INTERNAL_SERVER_ERROR, "服务器内部错误") }
+    `);
+    expect((await backendErrorMessages(pathToFileURL(root))).map(value => value.message)).toEqual([
+      '节点不存在', '主题不存在', '登录尝试过多，请在 42 秒后重试', '服务器内部错误',
+    ]);
+    await rm(join(root, 'example.rs'));
+    await expect(backendErrorMessages(pathToFileURL(root))).rejects.toThrow();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 describe("localizedError", () => {
   test("returns the server text unchanged for Chinese dashboards", () => {

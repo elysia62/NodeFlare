@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -146,6 +146,22 @@ pub async fn settings_get(State(state): State<Arc<AppState>>) -> Result<Response
         .await
         .map_err(ApiResponse::internal)?;
     Ok(Json(settings.admin_view()).into_response())
+}
+
+pub async fn server_rotate_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Result<Response, ApiResponse> {
+    validate_id(&id)?;
+    super::auth::require_sensitive_headers(&state, &user, &headers).await?;
+    let token = crate::db::queries::rotate_agent_token(&state.db, &id)
+        .await
+        .map_err(ApiResponse::internal)?
+        .ok_or_else(|| ApiResponse::not_found("节点不存在"))?;
+    state.disconnect_agent(&id).await;
+    Ok(Json(serde_json::json!({"agent_token": token})).into_response())
 }
 
 pub async fn settings_patch(
@@ -697,7 +713,12 @@ pub async fn database_stats(State(state): State<Arc<AppState>>) -> Result<Respon
 }
 
 pub async fn database_reclaim(State(state): State<Arc<AppState>>) -> Result<Response, ApiResponse> {
-    let _maintenance = state.database_maintenance.lock().await;
+    let _maintenance = state.database_maintenance.try_lock().map_err(|_| {
+        ApiResponse::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "数据库正在维护，请稍后重试",
+        )
+    })?;
     let _activity = state.database_activity.maintenance().await?;
     state.disconnect_agents().await;
 
@@ -745,7 +766,12 @@ pub async fn database_migrate(
     }
     super::auth::require_sensitive_headers(&state, &user, &headers).await?;
 
-    let _maintenance = state.database_maintenance.lock().await;
+    let _maintenance = state.database_maintenance.try_lock().map_err(|_| {
+        ApiResponse::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "数据库正在维护，请稍后重试",
+        )
+    })?;
     let _activity = state.database_activity.maintenance().await?;
     let _themes = state.theme_operations.lock().await;
     state.disconnect_agents().await;
@@ -802,7 +828,12 @@ pub async fn database_backup(
     headers: HeaderMap,
 ) -> Result<Response, ApiResponse> {
     super::auth::require_sensitive_headers(&state, &user, &headers).await?;
-    let _maintenance = state.database_maintenance.lock().await;
+    let _maintenance = state.database_maintenance.try_lock().map_err(|_| {
+        ApiResponse::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "数据库正在维护，请稍后重试",
+        )
+    })?;
     let _activity = state.database_activity.maintenance().await?;
     let _themes = state.theme_operations.lock().await;
     let archive = crate::backup::export_archive(&state.db, &state.config.theme_dir)
@@ -857,26 +888,52 @@ pub async fn database_restore(
         ));
     }
     super::auth::require_sensitive_headers(&state, &user, request.headers()).await?;
-    let archive = to_bytes(
-        request.into_body(),
-        crate::backup::DATABASE_BACKUP_MAX_BYTES,
-    )
-    .await
-    .map_err(|_| {
+    // Serialize uploads before buffering; a second upload gets a retryable error.
+    let _maintenance = state.database_maintenance.try_lock().map_err(|_| {
         ApiResponse::error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "数据库备份 ZIP 不能超过 512 MiB",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "数据库正在维护，请稍后重试",
         )
     })?;
+    let temporary = tokio::task::spawn_blocking(tempfile::tempfile)
+        .await
+        .map_err(ApiResponse::internal)?
+        .map_err(ApiResponse::internal)?;
+    let mut file = tokio::fs::File::from_std(temporary);
+    let mut stream = request.into_body().into_data_stream();
+    let upload = async {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+        let mut size = 0usize;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| ApiResponse::bad_request("数据库备份 ZIP 上传失败"))?;
+            size = size.saturating_add(chunk.len());
+            if size > crate::backup::DATABASE_BACKUP_MAX_BYTES {
+                return Err(ApiResponse::error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "数据库备份 ZIP 不能超过 512 MiB",
+                ));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(ApiResponse::internal)?;
+        }
+        file.flush().await.map_err(ApiResponse::internal)?;
+        Ok::<_, ApiResponse>(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(300), upload)
+        .await
+        .map_err(|_| {
+            ApiResponse::error(StatusCode::REQUEST_TIMEOUT, "数据库备份 ZIP 上传超时")
+        })??;
+    let file = file.into_std().await;
 
-    let _maintenance = state.database_maintenance.lock().await;
     let _activity = state.database_activity.maintenance().await?;
     let _themes = state.theme_operations.lock().await;
     state.disconnect_agents().await;
-    let restored_rows =
-        crate::backup::restore_archive(&state.db, &state.config.theme_dir, &archive)
-            .await
-            .map_err(|error| ApiResponse::unprocessable(format!("恢复失败：{error}")))?;
+    let restored_rows = crate::backup::restore_file(&state.db, &state.config.theme_dir, file)
+        .await
+        .map_err(|error| ApiResponse::unprocessable(format!("恢复失败：{error}")))?;
     state.last_agent_reports.write().await.clear();
     Ok(Json(serde_json::json!({"restored_rows": restored_rows})).into_response())
 }
@@ -1145,46 +1202,7 @@ fn valid_agent_mirror(value: &str) -> bool {
     })
 }
 
-fn valid_ping_target(value: &str) -> bool {
-    let labels = value.split('.').collect::<Vec<_>>();
-    if labels.len() == 4
-        && labels
-            .iter()
-            .all(|part| part.chars().all(|c| c.is_ascii_digit()))
-    {
-        return value.parse::<Ipv4Addr>().is_ok_and(|ip| {
-            let [a, b, c, _] = ip.octets();
-            !(a == 0
-                || a == 10
-                || a == 127
-                || a == 169 && b == 254
-                || a == 172 && (16..=31).contains(&b)
-                || a == 192 && b == 168
-                || a == 192 && b == 0 && (c == 0 || c == 2)
-                || a >= 224)
-        });
-    }
-    let lower = value.to_ascii_lowercase();
-    labels.len() >= 2
-        && !["local", "localhost", "internal", "lan", "localdomain"]
-            .iter()
-            .any(|suffix| lower == *suffix || lower.ends_with(&format!(".{suffix}")))
-        && labels.iter().all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && label
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
-                && label
-                    .chars()
-                    .next()
-                    .is_some_and(|character| character.is_ascii_alphanumeric())
-                && label
-                    .chars()
-                    .last()
-                    .is_some_and(|character| character.is_ascii_alphanumeric())
-        })
-}
+use nodeflare_telemetry::probe::valid_probe_host as valid_ping_target;
 
 #[cfg(test)]
 mod server_validation_tests {

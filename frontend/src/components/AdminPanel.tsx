@@ -11,10 +11,11 @@ import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, use
 import { ADMIN_UNAUTHORIZED_EVENT, api, ApiError } from "../api";
 import { ui } from "../locale";
 import { adminTabFromPath, adminTabPaths, canonicalAdminPath, type AdminTab } from "../adminRoutes";
-import { formatBytes, formatByteSize, parseByteSize } from "../format";
+import { formatByteSize, parseByteSize } from "../format";
 import { derivePassword } from "../password";
+import { useDatabaseActions } from "./admin/useDatabaseActions";
 import { hasActiveRemoteTasks, isRemoteTaskActive, REMOTE_TASK_POLL_INTERVAL_MS, REMOTE_TASK_POLL_TIMEOUT_MS } from "../refresh";
-import { ASSET_CURRENCIES, type AdminServer, type Config, type DatabaseMigrationResult, type DatabaseStats, type ExchangeRates, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
+import { ASSET_CURRENCIES, type AdminServer, type Config, type LoginSession, type RemoteTask, type ServerInput, type Settings, type Theme, type ThemeSettingsSchema, type ThemeSettingValue, type TotpSetup, type TotpStatus } from "../types";
 import { LoginForm } from "./LoginForm";
 import { useDialog } from "./useDialog";
 import { SiteLogo } from "./SiteLogo";
@@ -40,7 +41,6 @@ import {
   settingPatch,
   toInput,
   trafficTimezones,
-  waitForDatabaseSwitch,
   type AgentInstallInfo,
 } from "./admin/shared";
 
@@ -68,11 +68,6 @@ export function AdminPanel({
   const [draggingId, setDraggingId] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [database, setDatabase] = useState<DatabaseStats | null>(null);
-  const [databaseMigrationUrl, setDatabaseMigrationUrl] = useState("");
-  const [databaseMigrationResult, setDatabaseMigrationResult] = useState<DatabaseMigrationResult | null>(null);
-  const [restarting, setRestarting] = useState(false);
-  const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [exchangeRatesExpanded, setExchangeRatesExpanded] = useState(false);
   const [themes, setThemes] = useState<Theme[]>([]);
   const [themeSettingsSchema, setThemeSettingsSchema] = useState<ThemeSettingsSchema | null>(null);
@@ -108,6 +103,12 @@ export function AdminPanel({
 
   remoteTasksRef.current = remoteTasks;
 
+  const {
+    database, databaseMigrationUrl, setDatabaseMigrationUrl, databaseMigrationResult,
+    restarting, exchangeRates, loadDatabase, reclaimDatabase, migrateDatabase,
+    restartAfterDatabaseMigration, refreshExchangeRates, exportDatabaseBackup, restoreDatabaseBackup,
+  } = useDatabaseActions({ locale, setBusy, setError, setNotice, sensitiveProof });
+
   const load = useCallback(async () => {
     setBusy(true);
     setError("");
@@ -138,7 +139,7 @@ export function AdminPanel({
       setAuthChecked(true);
       setBusy(false);
     }
-  }, []);
+  }, [locale]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -171,7 +172,7 @@ export function AdminPanel({
   useEffect(() => {
     tabLoaders.current = {
       themeSettings: loadThemeSettings,
-      database: loadDatabase,
+      database: () => { if (!database) void loadDatabase(); },
       loginSessions: loadLoginSessions,
     };
   });
@@ -179,9 +180,7 @@ export function AdminPanel({
   useEffect(() => {
     if (!authenticated) return;
     if (tab === "themeSettings") void tabLoaders.current.themeSettings();
-    // `database` is read purely as a one-shot guard; re-running on every
-    // database update would needlessly refetch the other tabs' data.
-    if (tab === "data" && !database) void tabLoaders.current.database();
+    if (tab === "data") void tabLoaders.current.database();
     if (tab === "security") void tabLoaders.current.loginSessions();
   }, [authenticated, tab]);
 
@@ -300,6 +299,19 @@ export function AdminPanel({
     catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "删除失败", "Delete failed")); }
   }
 
+  async function rotateAgentToken(server: AdminServer) {
+    if (!window.confirm(ui(locale, `重置“${server.name}”的 Agent 凭证后，所有旧安装命令立即失效，当前 Agent 会断开。需要在节点上执行新安装命令才能恢复上报。确认继续？`, `Reset credentials for "${server.name}"? All old installation commands will stop working and the Agent will disconnect. Run the new installation command on the node to resume reporting.`))) return;
+    setBusy(true); setError("");
+    try {
+      const proof = await sensitiveProof(ui(locale, "重置 Agent 凭证", "Reset Agent credentials"));
+      if (!proof) return;
+      const { agent_token } = await api.rotateAgentToken(server.id, proof);
+      setInstall({ agent_token, agent_mirror: server.agent_mirror, agent_remote_control: server.agent_remote_control });
+      await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "重置失败", "Reset failed")); }
+    finally { setBusy(false); }
+  }
+
   async function showInstallCommand(server: AdminServer) {
     setBusy(true);
     setError("");
@@ -392,121 +404,12 @@ export function AdminPanel({
     finally { setBusy(false); }
   }
 
-  async function loadDatabase() {
-    setBusy(true); setError("");
-    try {
-      const [stats, rates] = await Promise.all([api.databaseStats(), api.exchangeRates()]);
-      setDatabase(stats);
-      if (!stats.restart_required) setDatabaseMigrationResult(null);
-      setExchangeRates(rates);
-    }
-    catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "读取数据库统计失败", "Failed to load database stats")); }
-    finally { setBusy(false); }
-  }
-
   async function sensitiveProof(action: string) {
     if (!twoFactorStatus) throw new Error(ui(locale, "正在读取两步验证状态，请稍候", "Reading two-factor status, please wait"));
     const entered = await verificationDialog.ask(action, twoFactorStatus.enabled);
     if (entered === null) return null;
     if (twoFactorStatus.enabled) return { totpCode: entered };
     return { passwordDerived: await derivePassword(entered, config.password_client_salt, locale) };
-  }
-
-  async function reclaimDatabase() {
-    if (!window.confirm(ui(locale, "回收空间期间数据库会短暂不可用，确认继续？", "The database will be briefly unavailable while reclaiming space. Continue?"))) return;
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const result = await api.reclaimDatabase();
-      setDatabase(result.database);
-      setNotice(result.reclaimed_bytes > 0 ? ui(locale, `已回收 ${formatBytes(result.reclaimed_bytes)}`, `Reclaimed ${formatBytes(result.reclaimed_bytes)}`) : ui(locale, "数据库已整理，当前没有可释放空间", "Database optimized; nothing to reclaim right now"));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "回收数据库空间失败", "Failed to reclaim database space")); }
-    finally { setBusy(false); }
-  }
-
-  async function migrateDatabase() {
-    const databaseUrl = databaseMigrationUrl.trim();
-    if (!databaseUrl) return;
-    const source = database?.kind === "postgresql" ? "PostgreSQL" : "SQLite";
-    const target = database?.kind === "postgresql" ? "SQLite" : "PostgreSQL";
-    if (!window.confirm(ui(locale, `将 ${source} 迁移到 ${target}？目标库中已有的 NodeFlare 数据会被覆盖，完成后业务写入将暂停，直至重启服务。`, `Migrate from ${source} to ${target}? Existing NodeFlare data in the target database will be overwritten, and writes will pause until the service restarts.`))) return;
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const proof = await sensitiveProof(ui(locale, "迁移数据库", "Migrate database"));
-      if (!proof) return;
-      const result = await api.migrateDatabase(databaseUrl, proof);
-      setDatabaseMigrationUrl("");
-      setDatabaseMigrationResult(result);
-      setDatabase((current) => current ? { ...current, restart_required: result.restart_required } : current);
-      const targetName = result.target_kind === "postgresql" ? "PostgreSQL" : "SQLite";
-      setNotice(ui(locale, `数据库已迁移到 ${targetName}，共 ${result.migrated_rows.toLocaleString()} 行（${formatBytes(result.size_bytes)}），业务写入已暂停，请重启服务`, `Migrated to ${targetName}: ${result.migrated_rows.toLocaleString()} rows (${formatBytes(result.size_bytes)}). Writes are paused; restart the service`));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "数据库迁移失败", "Database migration failed")); }
-    finally { setBusy(false); }
-  }
-
-  async function restartAfterDatabaseMigration() {
-    if (!database?.restart_required || !window.confirm(ui(locale, "立即重启 NodeFlare 并切换到新数据库？管理界面和 Agent 会短暂断开。", "Restart NodeFlare now and switch to the new database? The admin UI and agents will disconnect briefly."))) return;
-    const targetKind = databaseMigrationResult?.target_kind === "postgresql"
-      ? "postgresql"
-      : databaseMigrationResult?.target_kind === "sqlite"
-        ? "sqlite"
-        : database.kind === "postgresql" ? "sqlite" : "postgresql";
-    setBusy(true); setRestarting(true); setError(""); setNotice(ui(locale, "NodeFlare 正在重启", "NodeFlare is restarting"));
-    try {
-      await api.restartAfterDatabaseMigration();
-      await waitForDatabaseSwitch(targetKind, locale);
-      window.location.replace("/admin/login");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : ui(locale, "重启 NodeFlare 失败", "Failed to restart NodeFlare"));
-    } finally {
-      setBusy(false);
-      setRestarting(false);
-    }
-  }
-
-  async function refreshExchangeRates() {
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const rates = await api.refreshExchangeRates();
-      setExchangeRates(rates);
-      setNotice(ui(locale, `汇率已更新 · ${rates.source} · ${rates.date}`, `Exchange rates updated · ${rates.source} · ${rates.date}`));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "汇率更新失败", "Failed to refresh exchange rates")); }
-    finally { setBusy(false); }
-  }
-
-  async function exportDatabaseBackup() {
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const proof = await sensitiveProof(ui(locale, "导出备份", "Export backup"));
-      if (!proof) return;
-      const { blob, filename } = await api.databaseBackup(proof);
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      document.body.append(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice(ui(locale, "数据库备份已导出", "Database backup exported"));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "导出数据库备份失败", "Failed to export the database backup")); }
-    finally { setBusy(false); }
-  }
-
-  async function restoreDatabaseBackup(file: File) {
-    if (file.size > 512 * 1024 * 1024) {
-      setError(ui(locale, "数据库备份 ZIP 不能超过 512 MiB", "Database backup ZIP must not exceed 512 MiB"));
-      return;
-    }
-    if (!window.confirm(ui(locale, "恢复将覆盖当前数据库，并使现有登录会话失效。确认继续？", "Restoring overwrites the current database and invalidates existing sessions. Continue?"))) return;
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const proof = await sensitiveProof(ui(locale, "恢复备份", "Restore backup"));
-      if (!proof) return;
-      const result = await api.restoreDatabaseBackup(file, proof);
-      window.alert(ui(locale, `数据库已恢复 ${result.restored_rows.toLocaleString()} 行，请使用备份中的管理员账号重新登录。`, `Restored ${result.restored_rows.toLocaleString()} rows. Sign in again with the admin account from the backup.`));
-      window.location.reload();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : ui(locale, "恢复数据库备份失败", "Failed to restore the database backup")); }
-    finally { setBusy(false); }
   }
 
   async function loadThemeSettings() {
@@ -718,7 +621,7 @@ export function AdminPanel({
     });
     setRemoteTasks((current) => current.map((task) => updates.get(task.id) ?? task));
     if (failed && !quiet) setError(ui(locale, "部分执行结果刷新失败", "Some results failed to refresh"));
-  }, []);
+  }, [locale]);
 
   const createRemoteTask = async (event: FormEvent) => {
     event.preventDefault();
@@ -913,6 +816,7 @@ export function AdminPanel({
                   onRemoveSelected={() => void removeSelected()}
                   onMove={(index, offset) => void move(index, offset)}
                   onInstallCommand={(server) => void showInstallCommand(server)}
+                  onRotateToken={(server) => void rotateAgentToken(server)}
                   onEdit={(server) => openEditor(server)}
                   onRemove={(server) => void remove(server)}
                 />
